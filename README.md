@@ -42,7 +42,17 @@ cargo build --release
 
 ## Run
 
+Always in a nested X server, never in the session you are working in:
+
 ```bash
-cargo run --bin primodockd      # terminal 1
-cargo run --bin primodock-shell # terminal 2
+sudo apt-get install -y xserver-xephyr openbox   # once
+cargo build
+./scripts/dev-session.sh
 ```
+
+A dock reserves screen edge space through `_NET_WM_STRUT_PARTIAL`, which
+changes the desktop work area for **every** dock and panel on that display.
+Run this bar on your own session and whatever dock you already use will
+repaint over it, or fail to repaint at all. `dev-session.sh` gives it a
+display of its own where it can reserve whatever it likes and nothing
+outside the window notices.

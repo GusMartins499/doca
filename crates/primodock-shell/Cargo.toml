@@ -1,0 +1,21 @@
+[package]
+name = "primodock-shell"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "primodock-shell"
+path = "src/main.rs"
+
+[dependencies]
+primodock-ipc.workspace = true
+zbus.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gtk = "0.18"
+gdk = "0.18"
+gdkx11 = "0.18"
+glib = "0.18"
+x11rb = "0.13"
+futures-util = "0.3"
