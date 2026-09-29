@@ -1,4 +1,7 @@
+mod dock;
 mod strut;
+
+use std::rc::Rc;
 
 use anyhow::Result;
 use gtk::prelude::*;
@@ -7,8 +10,21 @@ use tracing_subscriber::EnvFilter;
 
 use crate::strut::BottomStrut;
 
-const BAR_HEIGHT: i32 = 64;
-const BAR_WIDTH_RATIO: f64 = 0.6;
+const STYLE: &str = "
+    window { background: transparent; }
+    #bar {
+        background: rgba(28,28,30,0.82);
+        border-radius: 18px;
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 10px;
+    }
+    #item { border-radius: 12px; padding: 8px; }
+    #item:hover { background: rgba(255,255,255,0.10); }
+    #indicator-idle { background: transparent; }
+    #indicator { background: rgba(255,255,255,0.45); border-radius: 2px; }
+    #indicator-active { background: #4c8dff; border-radius: 2px; }
+    #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
+";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -21,13 +37,9 @@ fn main() -> Result<()> {
     gtk::init()?;
 
     let monitor = gdk::Display::default()
-        .and_then(|d| d.primary_monitor())
+        .and_then(|display| display.primary_monitor())
         .ok_or_else(|| anyhow::anyhow!("no primary monitor"))?;
     let screen = monitor.geometry();
-
-    let bar_width = (screen.width() as f64 * BAR_WIDTH_RATIO) as i32;
-    let bar_x = screen.x() + (screen.width() - bar_width) / 2;
-    let bar_y = screen.y() + screen.height() - BAR_HEIGHT;
 
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_title("PrimoDock");
@@ -39,56 +51,27 @@ fn main() -> Result<()> {
     window.set_skip_taskbar_hint(true);
     window.set_skip_pager_hint(true);
     window.set_app_paintable(true);
-    window.set_size_request(bar_width, BAR_HEIGHT);
 
     if let Some(visual) = gtk::prelude::WidgetExt::screen(&window).and_then(|s| s.rgba_visual()) {
         window.set_visual(Some(&visual));
     }
 
-    let label = gtk::Label::new(Some("connecting to primodockd…"));
-    label.set_widget_name("status");
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    root.set_widget_name("bar");
-    root.set_halign(gtk::Align::Center);
-    root.set_valign(gtk::Align::Center);
-    root.add(&label);
-    window.add(&root);
-
     let css = gtk::CssProvider::new();
-    css.load_from_data(
-        b"#bar { background: transparent; }
-          #status { color: #e6e6e6; font-size: 13px; font-weight: 500; }
-          window { background: rgba(28,28,30,0.78); border-radius: 18px; }",
-    )?;
+    css.load_from_data(STYLE.as_bytes())?;
     gtk::StyleContext::add_provider_for_screen(
         &gtk::prelude::WidgetExt::screen(&window).unwrap(),
         &css,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    window.connect_realize(move |w| {
-        let Some(gdk_window) = w.window() else { return };
-        let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() else {
-            tracing::error!("not an X11 session; the shell layer needs replacing for Wayland");
-            return;
-        };
-        let xid = x11_window.xid() as u32;
-        let reserved = BottomStrut {
-            height: BAR_HEIGHT as u32,
-            start_x: bar_x as u32,
-            end_x: (bar_x + bar_width) as u32,
-        };
-        match strut::apply(xid, &reserved) {
-            Ok(()) => tracing::info!(xid, "strut applied"),
-            Err(e) => tracing::error!("strut failed: {e:#}"),
-        }
-    });
-
+    let items = gtk::Box::new(gtk::Orientation::Horizontal, dock::ITEM_SPACING);
+    items.set_widget_name("bar");
+    items.set_halign(gtk::Align::Center);
+    window.add(&items);
     window.show_all();
-    window.move_(bar_x, bar_y);
 
     glib::spawn_future_local(async move {
-        if let Err(e) = drive(label).await {
+        if let Err(e) = drive(window, items, screen).await {
             tracing::error!("daemon link failed: {e:#}");
         }
     });
@@ -97,43 +80,64 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn drive(label: gtk::Label) -> Result<()> {
+async fn drive(window: gtk::Window, items: gtk::Box, screen: gdk::Rectangle) -> Result<()> {
     let connection = zbus::Connection::session().await?;
-    let proxy = PrimoDockProxy::new(&connection).await?;
+    let proxy: Rc<PrimoDockProxy<'static>> = Rc::new(PrimoDockProxy::new(&connection).await?);
     tracing::info!("connected to primodockd");
 
-    refresh(&proxy, &label).await;
+    rebuild(&window, &items, &screen, proxy.clone()).await;
 
-    let mut windows = proxy.receive_windows_changed().await?;
-    let mut workspace = proxy.receive_workspace_changed().await?;
-
-    loop {
-        futures_util::select! {
-            _ = futures_util::StreamExt::next(&mut windows) => refresh(&proxy, &label).await,
-            _ = futures_util::StreamExt::next(&mut workspace) => refresh(&proxy, &label).await,
-            complete => break,
-        }
+    let mut changes = proxy.receive_items_changed().await?;
+    while futures_util::StreamExt::next(&mut changes).await.is_some() {
+        rebuild(&window, &items, &screen, proxy.clone()).await;
     }
     Ok(())
 }
 
-async fn refresh(proxy: &PrimoDockProxy<'_>, label: &gtk::Label) {
-    let windows = proxy.list_windows().await.unwrap_or_default();
-    let current = proxy.current_workspace().await.unwrap_or(0);
-    let total = proxy.workspace_count().await.unwrap_or(1);
-    let here = windows.iter().filter(|w| w.workspace == current).count();
-    let focused = windows
-        .iter()
-        .find(|w| w.active)
-        .map(|w| w.app_id.as_str())
-        .unwrap_or("—");
+async fn rebuild(
+    window: &gtk::Window,
+    items: &gtk::Box,
+    screen: &gdk::Rectangle,
+    proxy: Rc<PrimoDockProxy<'static>>,
+) {
+    let entries = proxy.list_items().await.unwrap_or_default();
 
-    label.set_text(&format!(
-        "{} windows · {} here · workspace {}/{} · focus: {}",
-        windows.len(),
-        here,
-        current + 1,
-        total,
-        focused
-    ));
+    for child in items.children() {
+        items.remove(&child);
+    }
+
+    if entries.is_empty() {
+        let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
+        empty.set_widget_name("empty");
+        items.add(&empty);
+    } else {
+        for entry in &entries {
+            items.add(&dock::item_button(entry, proxy.clone()));
+        }
+    }
+    items.show_all();
+
+    let width = dock::bar_width(entries.len() as i32);
+    let height = dock::bar_height();
+    window.set_size_request(width, height);
+    window.resize(width, height);
+
+    let x = screen.x() + (screen.width() - width) / 2;
+    let y = screen.y() + screen.height() - height;
+    window.move_(x, y);
+
+    if let Some(gdk_window) = window.window() {
+        if let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() {
+            let reserved = BottomStrut {
+                height: height as u32,
+                start_x: x.max(0) as u32,
+                end_x: (x + width).max(0) as u32,
+            };
+            if let Err(e) = strut::apply(x11_window.xid() as u32, &reserved) {
+                tracing::error!("strut failed: {e:#}");
+            }
+        }
+    }
+
+    tracing::debug!(items = entries.len(), width, "rebuilt");
 }

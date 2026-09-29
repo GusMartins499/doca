@@ -7,10 +7,10 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
-**Phase 0 — spine.** A GTK3 bar anchored with `_NET_WM_STRUT_PARTIAL`, a Rust
-daemon listing windows over EWMH, and the two talking over D-Bus. Nothing is
-drawn in the bar yet on purpose: this phase exists to prove the hard part
-holds before anything is built on top of it.
+**Phase 1 — a usable dock.** Pinned apps read from `.desktop` entries, running
+apps matched to them by window class, one item per app however many windows it
+has, an indicator for running and focused, left click to activate or minimise,
+right click to pin, launch or close.
 
 See [PLANO.md](PLANO.md) for the full technical plan.
 
@@ -45,7 +45,7 @@ cargo build --release
 Always in a nested X server, never in the session you are working in:
 
 ```bash
-sudo apt-get install -y xserver-xephyr openbox   # once
+sudo apt-get install -y xserver-xephyr openbox dbus   # once
 cargo build
 ./scripts/dev-session.sh
 ```
@@ -53,6 +53,22 @@ cargo build
 A dock reserves screen edge space through `_NET_WM_STRUT_PARTIAL`, which
 changes the desktop work area for **every** dock and panel on that display.
 Run this bar on your own session and whatever dock you already use will
-repaint over it, or fail to repaint at all. `dev-session.sh` gives it a
-display of its own where it can reserve whatever it likes and nothing
-outside the window notices.
+repaint over it, or fail to repaint at all.
+
+`dev-session.sh` gives it a display of its own, a session bus of its own, and
+a config directory of its own. All three matter. The nested display is not
+enough by itself: launching an app goes through the session bus, and
+single-instance apps like gedit are D-Bus activated, so the copy already
+running on your real display answers the request and opens its window there,
+outside the nesting.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/primodock/config.toml`, written by the daemon when you pin
+or unpin:
+
+```toml
+pinned = ["code", "com.brave.Browser", "discord"]
+```
+
+The ids are `.desktop` file names without the extension.

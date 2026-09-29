@@ -17,6 +17,9 @@ x11rb::atom_manager! {
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_STATE_HIDDEN,
+        _NET_CLOSE_WINDOW,
+        WM_CHANGE_STATE,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NORMAL,
         UTF8_STRING,
@@ -148,6 +151,19 @@ impl X11Backend {
         )
     }
 
+    pub fn minimize_window(&self, id: u32) -> Result<()> {
+        const ICONIC_STATE: u32 = 3;
+        self.send_root_message(id, self.atoms.WM_CHANGE_STATE, [ICONIC_STATE, 0, 0, 0, 0])
+    }
+
+    pub fn close_window(&self, id: u32) -> Result<()> {
+        self.send_root_message(
+            id,
+            self.atoms._NET_CLOSE_WINDOW,
+            [x11rb::CURRENT_TIME, 2, 0, 0, 0],
+        )
+    }
+
     pub fn current_workspace(&self) -> Result<i32> {
         Ok(self
             .prop_u32(self.root, self.atoms._NET_CURRENT_DESKTOP)?
@@ -210,6 +226,8 @@ fn watch_loop(backend: &X11Backend, on_change: &impl Fn(RootChange)) -> Result<(
 enum Request {
     ListWindows(async_channel::Sender<Result<Vec<WindowInfo>>>),
     ActivateWindow(u32, async_channel::Sender<Result<()>>),
+    MinimizeWindow(u32, async_channel::Sender<Result<()>>),
+    CloseWindow(u32, async_channel::Sender<Result<()>>),
     CurrentWorkspace(async_channel::Sender<Result<i32>>),
     WorkspaceCount(async_channel::Sender<Result<i32>>),
     SetWorkspace(i32, async_channel::Sender<Result<()>>),
@@ -232,6 +250,12 @@ pub fn spawn_worker(backend: X11Backend) -> Result<XHandle> {
                     }
                     Request::ActivateWindow(id, reply) => {
                         let _ = reply.send_blocking(backend.activate_window(id));
+                    }
+                    Request::MinimizeWindow(id, reply) => {
+                        let _ = reply.send_blocking(backend.minimize_window(id));
+                    }
+                    Request::CloseWindow(id, reply) => {
+                        let _ = reply.send_blocking(backend.close_window(id));
                     }
                     Request::CurrentWorkspace(reply) => {
                         let _ = reply.send_blocking(backend.current_workspace());
@@ -271,6 +295,14 @@ impl XHandle {
 
     pub async fn activate_window(&self, id: u32) -> Result<()> {
         self.ask(|reply| Request::ActivateWindow(id, reply)).await
+    }
+
+    pub async fn minimize_window(&self, id: u32) -> Result<()> {
+        self.ask(|reply| Request::MinimizeWindow(id, reply)).await
+    }
+
+    pub async fn close_window(&self, id: u32) -> Result<()> {
+        self.ask(|reply| Request::CloseWindow(id, reply)).await
     }
 
     pub async fn current_workspace(&self) -> Result<i32> {

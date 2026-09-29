@@ -1,6 +1,10 @@
+mod config;
+mod desktop;
+mod model;
 mod service;
 mod x11;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -8,6 +12,8 @@ use primodock_ipc::{BUS_NAME, OBJECT_PATH};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+use crate::config::Config;
+use crate::desktop::DesktopIndex;
 use crate::service::DockService;
 use crate::x11::{spawn_worker, watch_root, RootChange, X11Backend};
 
@@ -27,11 +33,26 @@ async fn main() -> Result<()> {
     );
     let x11 = spawn_worker(backend)?;
 
+    let index = Arc::new(DesktopIndex::load());
+    let config = Arc::new(Mutex::new(Config::load()));
+    tracing::info!(
+        entries = index.len(),
+        pinned = config.lock().map(|c| c.pinned.len()).unwrap_or(0),
+        "desktop index loaded"
+    );
+
     let connection = zbus::connection::Builder::session()
         .context("cannot reach the session bus")?
         .name(BUS_NAME)
         .context("another primodockd is already running")?
-        .serve_at(OBJECT_PATH, DockService { x11: x11.clone() })?
+        .serve_at(
+            OBJECT_PATH,
+            DockService {
+                x11: x11.clone(),
+                index: index.clone(),
+                config: config.clone(),
+            },
+        )?
         .build()
         .await?;
 
@@ -53,6 +74,7 @@ async fn main() -> Result<()> {
                 let (windows, workspace) = coalesce(first, &mut rx).await;
                 if windows {
                     DockService::windows_changed(emitter.signal_emitter()).await?;
+                    DockService::items_changed(emitter.signal_emitter()).await?;
                 }
                 if workspace {
                     let index = x11.current_workspace().await.unwrap_or(0);
