@@ -900,9 +900,11 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-channel",
+ "futures-lite",
  "primodock-ipc",
  "serde",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "x11rb",

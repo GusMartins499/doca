@@ -1,11 +1,10 @@
-//! primodockd — the brain.
-//!
-//! Owns the window model and, later, environments, widgets and config.
-//! Draws nothing and knows nothing about how the bar looks.
-
+mod config;
+mod desktop;
+mod model;
 mod service;
 mod x11;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -13,6 +12,8 @@ use primodock_ipc::{BUS_NAME, OBJECT_PATH};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+use crate::config::Config;
+use crate::desktop::DesktopIndex;
 use crate::service::DockService;
 use crate::x11::{spawn_worker, watch_root, RootChange, X11Backend};
 
@@ -32,16 +33,29 @@ async fn main() -> Result<()> {
     );
     let x11 = spawn_worker(backend)?;
 
+    let index = Arc::new(DesktopIndex::load());
+    let config = Arc::new(Mutex::new(Config::load()));
+    tracing::info!(
+        entries = index.len(),
+        pinned = config.lock().map(|c| c.pinned.len()).unwrap_or(0),
+        "desktop index loaded"
+    );
+
     let connection = zbus::connection::Builder::session()
         .context("cannot reach the session bus")?
         .name(BUS_NAME)
         .context("another primodockd is already running")?
-        .serve_at(OBJECT_PATH, DockService { x11: x11.clone() })?
+        .serve_at(
+            OBJECT_PATH,
+            DockService {
+                x11: x11.clone(),
+                index: index.clone(),
+                config: config.clone(),
+            },
+        )?
         .build()
         .await?;
 
-    // The watcher is a sync thread and signal emission is async, so the
-    // channel is the seam between them.
     let (tx, mut rx) = mpsc::unbounded_channel::<RootChange>();
     watch_root(move |change| {
         let _ = tx.send(change);
@@ -60,6 +74,7 @@ async fn main() -> Result<()> {
                 let (windows, workspace) = coalesce(first, &mut rx).await;
                 if windows {
                     DockService::windows_changed(emitter.signal_emitter()).await?;
+                    DockService::items_changed(emitter.signal_emitter()).await?;
                 }
                 if workspace {
                     let index = x11.current_workspace().await.unwrap_or(0);
@@ -76,19 +91,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// How long to keep absorbing root changes before telling anyone.
-///
-/// Short enough that the bar still feels immediate, long enough to collapse
-/// a burst into one update.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Collapses a burst of root-window changes into a single verdict.
-///
-/// One workspace switch makes the window manager touch `_NET_ACTIVE_WINDOW`
-/// several times in a few milliseconds. Forwarding each one would have the
-/// bar rebuild itself a dozen times for one user action, which on a laptop
-/// is paid for in battery. So the first change opens a short window, and
-/// everything that lands inside it is folded into the same notification.
 async fn coalesce(
     first: RootChange,
     rx: &mut mpsc::UnboundedReceiver<RootChange>,
@@ -107,3 +111,37 @@ async fn coalesce(
     }
     (windows, workspace)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_burst_of_root_changes_becomes_a_single_notification() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Workspace).unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let (windows, workspace) = coalesce(first, &mut rx).await;
+
+        assert!(windows);
+        assert!(workspace);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_change_of_one_kind_does_not_announce_the_other() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(RootChange::Workspace).unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let (windows, workspace) = coalesce(first, &mut rx).await;
+
+        assert!(!windows);
+        assert!(workspace);
+    }
+}
+

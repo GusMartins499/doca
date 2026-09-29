@@ -1,9 +1,3 @@
-//! EWMH window model.
-//!
-//! This is the only module in the daemon that knows X11 exists. Everything
-//! above it speaks `WindowInfo` and opaque ids, which is what makes the
-//! eventual Wayland backend a sibling of this file rather than a rewrite.
-
 use anyhow::{Context, Result};
 use primodock_ipc::WindowInfo;
 use x11rb::connection::Connection;
@@ -23,13 +17,15 @@ x11rb::atom_manager! {
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_STATE_HIDDEN,
+        _NET_CLOSE_WINDOW,
+        WM_CHANGE_STATE,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NORMAL,
         UTF8_STRING,
     }
 }
 
-/// What changed on the root window, translated out of X11 vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootChange {
     Windows,
@@ -70,9 +66,6 @@ impl X11Backend {
         Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()))
     }
 
-    /// WM_CLASS holds two NUL-terminated strings: instance, then class.
-    /// The class is the one that matches a `.desktop` file often enough to
-    /// be useful; the instance is too application-specific.
     fn app_id(&self, window: Window) -> Result<String> {
         let reply = self
             .conn
@@ -96,9 +89,6 @@ impl X11Backend {
             .unwrap_or_default())
     }
 
-    /// A window belongs in the dock unless it is explicitly not a normal
-    /// window, or has asked taskbars to skip it. Absence of
-    /// `_NET_WM_WINDOW_TYPE` means normal, per the spec.
     fn is_dockable(&self, window: Window) -> Result<bool> {
         let types = self.prop_u32(window, self.atoms._NET_WM_WINDOW_TYPE)?;
         if !types.is_empty() && !types.contains(&self.atoms._NET_WM_WINDOW_TYPE_NORMAL) {
@@ -118,8 +108,6 @@ impl X11Backend {
 
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            // A window can be destroyed between the client list arriving and
-            // us asking about it. That is normal, not an error.
             let Ok(dockable) = self.is_dockable(id) else {
                 continue;
             };
@@ -156,13 +144,23 @@ impl X11Backend {
     }
 
     pub fn activate_window(&self, id: u32) -> Result<()> {
-        // Source indication 2 means "pager", which is what a dock is as far
-        // as the window manager is concerned. Source 1 (application) gets
-        // focus-stealing prevention applied to it.
         self.send_root_message(
             id,
             self.atoms._NET_ACTIVE_WINDOW,
             [2, x11rb::CURRENT_TIME, 0, 0, 0],
+        )
+    }
+
+    pub fn minimize_window(&self, id: u32) -> Result<()> {
+        const ICONIC_STATE: u32 = 3;
+        self.send_root_message(id, self.atoms.WM_CHANGE_STATE, [ICONIC_STATE, 0, 0, 0, 0])
+    }
+
+    pub fn close_window(&self, id: u32) -> Result<()> {
+        self.send_root_message(
+            id,
+            self.atoms._NET_CLOSE_WINDOW,
+            [x11rb::CURRENT_TIME, 2, 0, 0, 0],
         )
     }
 
@@ -191,11 +189,6 @@ impl X11Backend {
     }
 }
 
-/// Watches the root window on its own connection and thread.
-///
-/// A second connection is deliberate: this one blocks in `wait_for_event`
-/// forever, so it cannot also serve queries. X11 is happy to give a process
-/// more than one connection, and this keeps both paths simple.
 pub fn watch_root(on_change: impl Fn(RootChange) + Send + 'static) -> Result<()> {
     let backend = X11Backend::connect()?;
     std::thread::Builder::new()
@@ -230,20 +223,11 @@ fn watch_loop(backend: &X11Backend, on_change: &impl Fn(RootChange)) -> Result<(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker
-// ---------------------------------------------------------------------------
-
-/// A request for the X11 thread, carrying the channel to answer on.
-///
-/// X11 calls block, and the D-Bus methods that need them run on whatever
-/// executor zbus picked. Coupling the two is how the first version of this
-/// deadlocked: it reached for `tokio::spawn_blocking` from a thread that had
-/// no tokio runtime. So the connection lives on a thread of its own and is
-/// reached only through this queue, which depends on no runtime at all.
 enum Request {
     ListWindows(async_channel::Sender<Result<Vec<WindowInfo>>>),
     ActivateWindow(u32, async_channel::Sender<Result<()>>),
+    MinimizeWindow(u32, async_channel::Sender<Result<()>>),
+    CloseWindow(u32, async_channel::Sender<Result<()>>),
     CurrentWorkspace(async_channel::Sender<Result<i32>>),
     WorkspaceCount(async_channel::Sender<Result<i32>>),
     SetWorkspace(i32, async_channel::Sender<Result<()>>),
@@ -254,7 +238,6 @@ pub struct XHandle {
     tx: async_channel::Sender<Request>,
 }
 
-/// Starts the X11 worker and returns the handle used to reach it.
 pub fn spawn_worker(backend: X11Backend) -> Result<XHandle> {
     let (tx, rx) = async_channel::unbounded::<Request>();
     std::thread::Builder::new()
@@ -267,6 +250,12 @@ pub fn spawn_worker(backend: X11Backend) -> Result<XHandle> {
                     }
                     Request::ActivateWindow(id, reply) => {
                         let _ = reply.send_blocking(backend.activate_window(id));
+                    }
+                    Request::MinimizeWindow(id, reply) => {
+                        let _ = reply.send_blocking(backend.minimize_window(id));
+                    }
+                    Request::CloseWindow(id, reply) => {
+                        let _ = reply.send_blocking(backend.close_window(id));
                     }
                     Request::CurrentWorkspace(reply) => {
                         let _ = reply.send_blocking(backend.current_workspace());
@@ -308,6 +297,14 @@ impl XHandle {
         self.ask(|reply| Request::ActivateWindow(id, reply)).await
     }
 
+    pub async fn minimize_window(&self, id: u32) -> Result<()> {
+        self.ask(|reply| Request::MinimizeWindow(id, reply)).await
+    }
+
+    pub async fn close_window(&self, id: u32) -> Result<()> {
+        self.ask(|reply| Request::CloseWindow(id, reply)).await
+    }
+
     pub async fn current_workspace(&self) -> Result<i32> {
         self.ask(Request::CurrentWorkspace).await
     }
@@ -320,3 +317,55 @@ impl XHandle {
         self.ask(|reply| Request::SetWorkspace(index, reply)).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stub_worker() -> XHandle {
+        let (tx, rx) = async_channel::unbounded::<Request>();
+        std::thread::spawn(move || {
+            while let Ok(request) = rx.recv_blocking() {
+                match request {
+                    Request::ListWindows(reply) => {
+                        let _ = reply.send_blocking(Ok(vec![WindowInfo {
+                            id: 1,
+                            title: "a window".into(),
+                            app_id: "app".into(),
+                            workspace: 0,
+                            active: true,
+                        }]));
+                    }
+                    Request::CurrentWorkspace(reply) => {
+                        let _ = reply.send_blocking(Ok(3));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        XHandle { tx }
+    }
+
+    #[test]
+    fn x11_requests_are_served_without_any_async_runtime_present() {
+        let handle = stub_worker();
+
+        let windows = futures_lite::future::block_on(handle.list_windows()).unwrap();
+        let workspace = futures_lite::future::block_on(handle.current_workspace()).unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(workspace, 3);
+    }
+
+    #[test]
+    fn a_request_whose_worker_has_gone_away_fails_instead_of_hanging() {
+        let (tx, rx) = async_channel::unbounded::<Request>();
+        drop(rx);
+        let handle = XHandle { tx };
+
+        let result = futures_lite::future::block_on(handle.list_windows());
+
+        assert!(result.is_err());
+    }
+}
+
