@@ -40,6 +40,24 @@ sudo apt-get install -y pkg-config libgtk-3-dev
 cargo build --release
 ```
 
+## Try it safely
+
+```bash
+cargo build --release
+./scripts/sandbox.sh
+```
+
+Opens a window you can click around in. Inside it is a nested X server with
+its own session bus and its own config, seeded from your Plank launchers. The
+dock in there reserves space on the nested screen, not yours; your own dock
+keeps running untouched. Close the window to stop.
+
+`--headless` runs the same thing on a virtual screen with no window at all,
+for screenshots and CI.
+
+This is the only way to evaluate the dock at no risk, and it is how every
+phase of this project is verified.
+
 ## Try it on your own session
 
 ```bash
@@ -69,11 +87,12 @@ declared as a 1024px PNG once made it.
 
 ## Run it in isolation
 
-For development. Always in a nested X server, never in the session you are
-working in:
+`scripts/sandbox.sh` above is the one to use. `scripts/dev-session.sh` is the
+older, barer version of the same idea, kept for a debug build with an empty
+config:
 
 ```bash
-sudo apt-get install -y xserver-xephyr openbox dbus   # once
+sudo apt-get install -y xserver-xephyr xvfb openbox dbus   # once
 cargo build
 ./scripts/dev-session.sh
 ```
