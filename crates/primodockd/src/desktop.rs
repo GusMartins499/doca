@@ -104,6 +104,7 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 
 impl DesktopIndex {
+    #[cfg(test)]
     pub fn from_entries(entries: Vec<DesktopEntry>) -> Self {
         Self { entries }
     }
@@ -140,10 +141,6 @@ impl DesktopIndex {
 
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     pub fn get(&self, id: &str) -> Option<&DesktopEntry> {
