@@ -34,8 +34,11 @@ if [ ! -f "$CONFIG" ]; then
     cp "$ROOT/examples/config-from-plank.toml" "$CONFIG"
 fi
 
+RESTORED=0
 restore() {
     local code=$?
+    [ "$RESTORED" = "1" ] && exit $code
+    RESTORED=1
     echo
     echo "stopping PrimoDock"
     pkill -x primodock-shell 2>/dev/null

@@ -25,8 +25,28 @@ pub fn unmatched_id(window: u32) -> String {
     format!("{UNMATCHED_PREFIX}{window}")
 }
 
+#[cfg(test)]
 pub fn window_of_unmatched_id(id: &str) -> Option<u32> {
     id.strip_prefix(UNMATCHED_PREFIX)?.parse().ok()
+}
+
+pub fn item_id_for(index: &DesktopIndex, window: &WindowInfo) -> String {
+    index
+        .match_window(&window.app_id)
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| unmatched_id(window.id))
+}
+
+pub fn windows_of<'w>(
+    index: &DesktopIndex,
+    id: &str,
+    windows: &[&'w WindowInfo],
+) -> Vec<&'w WindowInfo> {
+    windows
+        .iter()
+        .copied()
+        .filter(|window| item_id_for(index, window) == id)
+        .collect()
 }
 
 pub fn build(index: &DesktopIndex, pinned: &[String], windows: &[&WindowInfo]) -> Vec<DockItem> {
@@ -49,9 +69,7 @@ pub fn build(index: &DesktopIndex, pinned: &[String], windows: &[&WindowInfo]) -
 
     for window in windows {
         let matched = index.match_window(&window.app_id);
-        let id = matched
-            .map(|entry| entry.id.clone())
-            .unwrap_or_else(|| unmatched_id(window.id));
+        let id = item_id_for(index, window);
 
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
             item.windows.push(window.id);
@@ -230,6 +248,28 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].pinned);
         assert_eq!(items[0].windows, vec![1]);
+    }
+
+    #[test]
+    fn the_windows_of_an_app_can_be_found_again_from_its_item_id() {
+        let windows = vec![
+            window_on(1, "code", 0),
+            window_on(2, "discord", 0),
+            window_on(3, "code", 0),
+        ];
+        let all = everywhere(&windows);
+
+        let mine = windows_of(&index(), "code", &all);
+
+        assert_eq!(mine.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    #[test]
+    fn an_unmatched_window_is_found_by_the_id_the_dock_gave_it() {
+        let windows = vec![window_on(42, "nothing-installed", 0)];
+        let all = everywhere(&windows);
+
+        assert_eq!(windows_of(&index(), "window:42", &all).len(), 1);
     }
 
     #[test]

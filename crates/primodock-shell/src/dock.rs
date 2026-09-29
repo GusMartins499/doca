@@ -14,6 +14,10 @@ pub const MAX_BAR_HEIGHT: i32 = MIN_BAR_HEIGHT * 2;
 pub const SCREEN_MARGIN: i32 = 8;
 pub const MIN_ICON_SIZE: i32 = 24;
 
+pub fn switcher_is_useful(environment_count: usize) -> bool {
+    environment_count > 1
+}
+
 pub fn divider() -> gtk::Separator {
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     separator.set_widget_name("separator");
@@ -290,6 +294,17 @@ mod tests {
     #[test]
     fn a_missing_icon_file_yields_nothing_instead_of_panicking() {
         assert!(scaled_from_file("/nonexistent/icon.png", ICON_SIZE).is_none());
+    }
+
+    #[test]
+    fn a_single_environment_needs_no_switcher() {
+        assert!(!switcher_is_useful(0));
+        assert!(!switcher_is_useful(1));
+    }
+
+    #[test]
+    fn two_environments_are_worth_a_switcher() {
+        assert!(switcher_is_useful(2));
     }
 
     #[test]

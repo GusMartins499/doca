@@ -27,7 +27,6 @@ pinned = [
   "brave-kjgfgldnnfoeklkmfkjfagphfepbbdan-Default",
   "Zoom",
   "anki",
-  "rocks.fastpotify.Fastpotify",
   "spotify_spotify",
 ]
 widgets = ["clock", "cpu", "battery", "music"]

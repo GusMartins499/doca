@@ -75,23 +75,19 @@ impl DockService {
     }
 
     async fn activate_item(&self, id: &str) -> zbus::fdo::Result<()> {
-        if let Some(window) = model::window_of_unmatched_id(id) {
-            return self.x11.activate_window(window).await.map_err(failed);
-        }
+        let workspace = self.workspace().await?;
+        let windows = self.x11.list_windows().await.map_err(failed)?;
+        let environment = self.with_config(|config| config.environment_for(workspace).clone())?;
+        let visible = model::windows_in(&environment, &windows);
+        let mine = model::windows_of(&self.index, id, &visible);
 
-        let items = self.items().await?;
-        let Some(item) = items.into_iter().find(|item| item.id == id) else {
-            return Err(zbus::fdo::Error::Failed(format!("no dock item {id}")));
-        };
-
-        let Some(&first) = item.windows.first() else {
+        let Some(first) = mine.first() else {
             return self.spawn(id);
         };
 
-        if item.active {
-            self.x11.minimize_window(first).await.map_err(failed)
-        } else {
-            self.x11.activate_window(first).await.map_err(failed)
+        match mine.iter().find(|window| window.active) {
+            Some(focused) => self.x11.minimize_window(focused.id).await.map_err(failed),
+            None => self.x11.activate_window(first.id).await.map_err(failed),
         }
     }
 
