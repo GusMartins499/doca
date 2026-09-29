@@ -7,10 +7,10 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
-**Phase 1 — a usable dock.** Pinned apps read from `.desktop` entries, running
-apps matched to them by window class, one item per app however many windows it
-has, an indicator for running and focused, left click to activate or minimise,
-right click to pin, launch or close.
+**Phase 2 — environments.** Each environment owns a set of workspaces and its
+own pinned apps. Switching workspace switches the dock: its apps, and only the
+windows living on its workspaces. Pinning applies to the environment you are
+in, not globally.
 
 See [PLANO.md](PLANO.md) for the full technical plan.
 
@@ -71,11 +71,41 @@ DISPLAY=:9 cargo test -- --ignored
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/primodock/config.toml`, written by the daemon when you pin
-or unpin:
+`$XDG_CONFIG_HOME/primodock/config.toml`:
 
 ```toml
-pinned = ["code", "com.brave.Browser", "discord"]
+[[environments]]
+name = "Work"
+workspaces = [0, 1]
+pinned = ["code", "dev.warp.Warp"]
+
+[[environments]]
+name = "Personal"
+workspaces = [2, 3]
+pinned = ["discord", "spotify"]
 ```
 
-The ids are `.desktop` file names without the extension.
+The ids are `.desktop` file names without the extension. An environment with
+no `workspaces` is a catch-all, used for any workspace no other environment
+claims. A config from phase 1, with a top-level `pinned` list, is migrated on
+load into a single catch-all environment.
+
+## Switching environments
+
+Click the chip on the left of the bar, or bind a key to the D-Bus method. The
+dock does not grab keys itself: on Linux the desktop owns the keyboard, and
+the app exposes the action.
+
+```bash
+KEY=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/primodock/
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$KEY']"
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY name 'PrimoDock: cycle environment'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY binding '<Super>e'
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY command 'gdbus call --session --dest dev.oprimo.PrimoDock --object-path /dev/oprimo/PrimoDock --method dev.oprimo.PrimoDock1.CycleEnvironment'
+```
+
+`SetEnvironment` takes a name, if you would rather bind one key per
+environment than cycle.
+
+The `GlobalShortcuts` portal would be the other route, but it landed in
+`xdg-desktop-portal` 1.17 and Ubuntu 22.04 ships 1.14.

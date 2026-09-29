@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use primodock_ipc::{DockItem, WindowInfo};
+use primodock_ipc::{DockItem, EnvironmentInfo, WindowInfo};
 use zbus::object_server::SignalEmitter;
 
 use crate::config::Config;
@@ -19,16 +19,26 @@ fn failed(e: impl std::fmt::Display) -> zbus::fdo::Error {
 }
 
 impl DockService {
-    fn pinned(&self) -> Vec<String> {
-        self.config
-            .lock()
-            .map(|config| config.pinned.clone())
-            .unwrap_or_default()
+    async fn workspace(&self) -> zbus::fdo::Result<i32> {
+        self.x11.current_workspace().await.map_err(failed)
+    }
+
+    fn with_config<T>(&self, read: impl FnOnce(&Config) -> T) -> zbus::fdo::Result<T> {
+        let config = self.config.lock().map_err(|_| {
+            zbus::fdo::Error::Failed("configuration lock was poisoned".to_string())
+        })?;
+        Ok(read(&config))
     }
 
     async fn items(&self) -> zbus::fdo::Result<Vec<DockItem>> {
+        let workspace = self.workspace().await?;
         let windows = self.x11.list_windows().await.map_err(failed)?;
-        Ok(model::build(&self.index, &self.pinned(), &windows))
+        let (pinned, environment) = self.with_config(|config| {
+            let environment = config.environment_for(workspace);
+            (environment.pinned.clone(), environment.clone())
+        })?;
+        let visible = model::windows_in(&environment, &windows);
+        Ok(model::build(&self.index, &pinned, &visible))
     }
 
     fn update_config(&self, change: impl FnOnce(&mut Config)) -> zbus::fdo::Result<()> {
@@ -88,11 +98,76 @@ impl DockService {
     }
 
     async fn pin_item(&self, id: &str) -> zbus::fdo::Result<()> {
-        self.update_config(|config| config.pin(id))
+        let workspace = self.workspace().await?;
+        self.update_config(|config| config.pin(workspace, id))
     }
 
     async fn unpin_item(&self, id: &str) -> zbus::fdo::Result<()> {
-        self.update_config(|config| config.unpin(id))
+        let workspace = self.workspace().await?;
+        self.update_config(|config| config.unpin(workspace, id))
+    }
+
+    async fn list_environments(&self) -> zbus::fdo::Result<Vec<EnvironmentInfo>> {
+        let workspace = self.workspace().await?;
+        self.with_config(|config| {
+            let current = config.environment_for(workspace).name.clone();
+            config
+                .environments
+                .iter()
+                .map(|environment| EnvironmentInfo {
+                    name: environment.name.clone(),
+                    workspaces: environment.workspaces.clone(),
+                    current: environment.name == current,
+                })
+                .collect()
+        })
+    }
+
+    async fn current_environment(&self) -> zbus::fdo::Result<String> {
+        let workspace = self.workspace().await?;
+        self.with_config(|config| config.environment_for(workspace).name.clone())
+    }
+
+    async fn set_environment(&self, name: &str) -> zbus::fdo::Result<()> {
+        let target = self.with_config(|config| {
+            config
+                .environment_named(name)
+                .and_then(|environment| environment.workspaces.first().copied())
+        })?;
+        let Some(workspace) = target else {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "no environment {name} with a workspace to switch to"
+            )));
+        };
+        self.x11.set_workspace(workspace).await.map_err(failed)
+    }
+
+    async fn cycle_environment(&self) -> zbus::fdo::Result<String> {
+        let workspace = self.workspace().await?;
+        let next = self.with_config(|config| {
+            let current = config.environment_for(workspace).name.clone();
+            let position = config
+                .environments
+                .iter()
+                .position(|environment| environment.name == current)
+                .unwrap_or(0);
+            config
+                .environments
+                .iter()
+                .cycle()
+                .skip(position + 1)
+                .take(config.environments.len())
+                .find(|environment| !environment.is_catch_all())
+                .map(|environment| (environment.name.clone(), environment.workspaces[0]))
+        })?;
+
+        let Some((name, target)) = next else {
+            return Err(zbus::fdo::Error::Failed(
+                "no other environment to cycle to".to_string(),
+            ));
+        };
+        self.x11.set_workspace(target).await.map_err(failed)?;
+        Ok(name)
     }
 
     async fn close_window(&self, id: u32) -> zbus::fdo::Result<()> {
@@ -118,6 +193,9 @@ impl DockService {
     async fn set_workspace(&self, index: i32) -> zbus::fdo::Result<()> {
         self.x11.set_workspace(index).await.map_err(failed)
     }
+
+    #[zbus(signal)]
+    pub async fn environment_changed(emitter: &SignalEmitter<'_>, name: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn items_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;

@@ -24,12 +24,24 @@ pub struct DockItem {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct EnvironmentInfo {
+    pub name: String,
+    pub workspaces: Vec<i32>,
+    pub current: bool,
+}
+
 #[zbus::proxy(
     interface = "dev.oprimo.PrimoDock1",
     default_service = "dev.oprimo.PrimoDock",
     default_path = "/dev/oprimo/PrimoDock"
 )]
 pub trait PrimoDock {
+    fn list_environments(&self) -> zbus::Result<Vec<EnvironmentInfo>>;
+    fn current_environment(&self) -> zbus::Result<String>;
+    fn set_environment(&self, name: &str) -> zbus::Result<()>;
+    fn cycle_environment(&self) -> zbus::Result<String>;
+
     fn list_items(&self) -> zbus::Result<Vec<DockItem>>;
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
@@ -42,6 +54,9 @@ pub trait PrimoDock {
     fn current_workspace(&self) -> zbus::Result<i32>;
     fn workspace_count(&self) -> zbus::Result<i32>;
     fn set_workspace(&self, index: i32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn environment_changed(&self, name: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn items_changed(&self) -> zbus::Result<()>;
