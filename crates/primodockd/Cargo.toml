@@ -17,3 +17,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 x11rb = "0.13"
 async-channel = "2"
+
+[dev-dependencies]
+futures-lite = "2"

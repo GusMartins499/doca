@@ -1,8 +1,3 @@
-//! The D-Bus face of the daemon.
-//!
-//! Thin on purpose: each method forwards to the X11 worker and translates
-//! the failure. No policy lives here, and no X11 vocabulary escapes.
-
 use primodock_ipc::WindowInfo;
 use zbus::object_server::SignalEmitter;
 

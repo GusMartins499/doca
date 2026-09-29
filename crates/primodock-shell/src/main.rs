@@ -1,10 +1,3 @@
-//! primodock-shell — the bar.
-//!
-//! Draws and anchors. Every fact it shows comes from the daemon over D-Bus;
-//! it never talks to X11 about windows, only about its own surface. That
-//! split is the whole point of phase 0: this file is the one that gets
-//! replaced when the X11 session goes away, and it should be the only one.
-
 mod strut;
 
 use anyhow::Result;
@@ -48,8 +41,6 @@ fn main() -> Result<()> {
     window.set_app_paintable(true);
     window.set_size_request(bar_width, BAR_HEIGHT);
 
-    // Without an RGBA visual the rounded corners below would be drawn onto
-    // whatever the WM last painted there.
     if let Some(visual) = gtk::prelude::WidgetExt::screen(&window).and_then(|s| s.rgba_visual()) {
         window.set_visual(Some(&visual));
     }
@@ -106,7 +97,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Keeps the bar in step with the daemon.
 async fn drive(label: gtk::Label) -> Result<()> {
     let connection = zbus::Connection::session().await?;
     let proxy = PrimoDockProxy::new(&connection).await?;
@@ -127,9 +117,6 @@ async fn drive(label: gtk::Label) -> Result<()> {
     Ok(())
 }
 
-/// Phase 0 draws no icons on purpose. This line exists to make the whole
-/// spine visible at a glance: if it moves when you open a window or switch
-/// workspace, X11, the daemon and the bus are all wired correctly.
 async fn refresh(proxy: &PrimoDockProxy<'_>, label: &gtk::Label) {
     let windows = proxy.list_windows().await.unwrap_or_default();
     let current = proxy.current_workspace().await.unwrap_or(0);

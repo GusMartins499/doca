@@ -5,11 +5,6 @@ pub const BUS_NAME: &str = "dev.oprimo.PrimoDock";
 pub const OBJECT_PATH: &str = "/dev/oprimo/PrimoDock";
 pub const INTERFACE: &str = "dev.oprimo.PrimoDock1";
 
-/// A window as the shell needs to see it.
-///
-/// Deliberately free of X11 concepts: `id` is an opaque handle the shell
-/// passes back, never something it interprets. When the shell layer is
-/// replaced for Wayland, this type is what stays.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct WindowInfo {
     pub id: u32,

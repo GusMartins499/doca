@@ -1,8 +1,3 @@
-//! primodockd — the brain.
-//!
-//! Owns the window model and, later, environments, widgets and config.
-//! Draws nothing and knows nothing about how the bar looks.
-
 mod service;
 mod x11;
 
@@ -40,8 +35,6 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    // The watcher is a sync thread and signal emission is async, so the
-    // channel is the seam between them.
     let (tx, mut rx) = mpsc::unbounded_channel::<RootChange>();
     watch_root(move |change| {
         let _ = tx.send(change);
@@ -76,19 +69,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// How long to keep absorbing root changes before telling anyone.
-///
-/// Short enough that the bar still feels immediate, long enough to collapse
-/// a burst into one update.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Collapses a burst of root-window changes into a single verdict.
-///
-/// One workspace switch makes the window manager touch `_NET_ACTIVE_WINDOW`
-/// several times in a few milliseconds. Forwarding each one would have the
-/// bar rebuild itself a dozen times for one user action, which on a laptop
-/// is paid for in battery. So the first change opens a short window, and
-/// everything that lands inside it is folded into the same notification.
 async fn coalesce(
     first: RootChange,
     rx: &mut mpsc::UnboundedReceiver<RootChange>,
@@ -107,3 +89,37 @@ async fn coalesce(
     }
     (windows, workspace)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_burst_of_root_changes_becomes_a_single_notification() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Windows).unwrap();
+        tx.send(RootChange::Workspace).unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let (windows, workspace) = coalesce(first, &mut rx).await;
+
+        assert!(windows);
+        assert!(workspace);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_change_of_one_kind_does_not_announce_the_other() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(RootChange::Workspace).unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let (windows, workspace) = coalesce(first, &mut rx).await;
+
+        assert!(!windows);
+        assert!(workspace);
+    }
+}
+
