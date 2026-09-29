@@ -56,6 +56,17 @@ launchers so the dock is not empty.
 If the script is killed outright rather than interrupted, Plank will not come
 back on its own: `setsid plank >/dev/null 2>&1 &`.
 
+If the dock ever covers the terminal you started it from, switch to a text
+console with `Ctrl+Alt+F3`, log in, and run:
+
+```bash
+pkill -x primodock-shell; pkill -x primodockd; setsid plank &
+```
+
+`Ctrl+Alt+F2` returns to the desktop. The bar is capped at a fraction of the
+screen height so it should not get there — that cap exists because an icon
+declared as a 1024px PNG once made it.
+
 ## Run it in isolation
 
 For development. Always in a nested X server, never in the session you are

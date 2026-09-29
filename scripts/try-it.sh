@@ -57,6 +57,23 @@ if pgrep -x plank >/dev/null; then
     sleep 1
 fi
 
+cat <<'ESCAPE'
+
+  ------------------------------------------------------------------
+  IF THE DOCK EVER COVERS THIS TERMINAL AND YOU CANNOT REACH Ctrl-C:
+
+    press  Ctrl+Alt+F3   to reach a text console, log in, then run
+
+      pkill -x primodock-shell; pkill -x primodockd; setsid plank &
+
+    press  Ctrl+Alt+F2   to come back to the desktop.
+
+  The bar is capped at a fraction of the screen height so this should
+  not happen. It is written here because it did once.
+  ------------------------------------------------------------------
+
+ESCAPE
+
 echo "config: $CONFIG"
 "$ROOT/target/release/primodockd" &
 sleep 1

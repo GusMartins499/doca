@@ -160,29 +160,23 @@ async fn rebuild(
     }
 
     items.add(&dock::environment_switcher(&environment, proxy.clone()));
-    let separator = gtk::Separator::new(gtk::Orientation::Vertical);
-    separator.set_widget_name("separator");
-    separator.set_margin_top(6);
-    separator.set_margin_bottom(6);
-    items.add(&separator);
+    items.add(&dock::divider());
 
     if entries.is_empty() {
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
         empty.set_widget_name("empty");
         items.add(&empty);
     } else {
+        let icon_size =
+            dock::icon_size_for(entries.len() as i32, widgets.len() as i32, screen.width());
         for entry in &entries {
-            items.add(&dock::item_button(entry, proxy.clone()));
+            items.add(&dock::item_button(entry, icon_size, proxy.clone()));
         }
     }
 
     tiles.borrow_mut().clear();
     if !widgets.is_empty() {
-        let divider = gtk::Separator::new(gtk::Orientation::Vertical);
-        divider.set_widget_name("separator");
-        divider.set_margin_top(6);
-        divider.set_margin_bottom(6);
-        items.add(&divider);
+        items.add(&dock::divider());
 
         for state in &widgets {
             let tile = widget_tile::WidgetTile::new(state, proxy.clone());
@@ -198,7 +192,17 @@ async fn rebuild(
         }
     }
 
-    let (width, height) = dock::natural_size(items);
+    let natural = dock::natural_size(items);
+    let (width, height) = dock::clamp_to_screen(natural, (screen.width(), screen.height()));
+    if (width, height) != natural {
+        tracing::warn!(
+            natural_width = natural.0,
+            natural_height = natural.1,
+            width,
+            height,
+            "bar clamped to the screen"
+        );
+    }
     window.set_size_request(width, height);
     window.resize(width, height);
 
