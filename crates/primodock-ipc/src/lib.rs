@@ -31,6 +31,17 @@ pub struct EnvironmentInfo {
     pub current: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct WidgetState {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub progress: f64,
+    pub active: bool,
+}
+
+pub const NO_PROGRESS: f64 = -1.0;
+
 #[zbus::proxy(
     interface = "dev.oprimo.PrimoDock1",
     default_service = "dev.oprimo.PrimoDock",
@@ -41,6 +52,9 @@ pub trait PrimoDock {
     fn current_environment(&self) -> zbus::Result<String>;
     fn set_environment(&self, name: &str) -> zbus::Result<()>;
     fn cycle_environment(&self) -> zbus::Result<String>;
+
+    fn list_widgets(&self) -> zbus::Result<Vec<WidgetState>>;
+    fn invoke_widget(&self, id: &str, action: &str) -> zbus::Result<()>;
 
     fn list_items(&self) -> zbus::Result<Vec<DockItem>>;
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
@@ -57,6 +71,9 @@ pub trait PrimoDock {
 
     #[zbus(signal)]
     fn environment_changed(&self, name: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn widget_changed(&self, state: WidgetState) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn items_changed(&self) -> zbus::Result<()>;

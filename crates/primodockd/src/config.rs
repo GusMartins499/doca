@@ -12,6 +12,8 @@ pub struct Environment {
     pub workspaces: Vec<i32>,
     #[serde(default)]
     pub pinned: Vec<String>,
+    #[serde(default)]
+    pub widgets: Vec<String>,
 }
 
 impl Environment {
@@ -61,6 +63,7 @@ impl Config {
                 name: DEFAULT_ENVIRONMENT.to_string(),
                 workspaces: Vec::new(),
                 pinned: std::mem::take(&mut self.pinned),
+                widgets: Vec::new(),
             });
         }
         self.pinned.clear();
@@ -88,6 +91,18 @@ impl Config {
                     .find(|environment| environment.is_catch_all())
             })
             .unwrap_or_else(|| &self.environments[0])
+    }
+
+    pub fn all_widgets(&self) -> Vec<String> {
+        let mut seen = Vec::new();
+        for environment in &self.environments {
+            for widget in &environment.widgets {
+                if !seen.contains(widget) {
+                    seen.push(widget.clone());
+                }
+            }
+        }
+        seen
     }
 
     pub fn environment_named(&self, name: &str) -> Option<&Environment> {

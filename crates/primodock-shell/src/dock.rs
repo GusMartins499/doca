@@ -9,11 +9,12 @@ pub const ITEM_PADDING: i32 = 8;
 pub const BAR_PADDING: i32 = 10;
 
 pub const SWITCHER_WIDTH: i32 = 96;
+pub const MIN_BAR_HEIGHT: i32 = ICON_SIZE + ITEM_PADDING * 2 + BAR_PADDING * 2;
 
-pub fn bar_width(item_count: i32) -> i32 {
-    let slot = ICON_SIZE + ITEM_PADDING * 2;
-    let items = item_count.max(1);
-    items * slot + (items - 1) * ITEM_SPACING + BAR_PADDING * 2 + SWITCHER_WIDTH + ITEM_SPACING
+pub fn natural_size(bar: &gtk::Box) -> (i32, i32) {
+    let (_, width) = bar.preferred_width();
+    let (_, height) = bar.preferred_height();
+    (width.max(SWITCHER_WIDTH), height.max(MIN_BAR_HEIGHT))
 }
 
 pub fn environment_switcher(
@@ -42,10 +43,6 @@ pub fn environment_switcher(
     });
 
     chip.upcast()
-}
-
-pub fn bar_height() -> i32 {
-    ICON_SIZE + ITEM_PADDING * 2 + BAR_PADDING * 2
 }
 
 fn icon_widget(name: &str) -> gtk::Image {
@@ -207,19 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_dock_still_reserves_the_width_of_one_slot() {
-        assert_eq!(bar_width(0), bar_width(1));
-    }
-
-    #[test]
-    fn the_bar_grows_by_one_slot_and_one_gap_per_item() {
-        let slot = ICON_SIZE + ITEM_PADDING * 2;
-
-        assert_eq!(bar_width(3) - bar_width(2), slot + ITEM_SPACING);
-    }
-
-    #[test]
-    fn the_bar_is_tall_enough_for_an_icon_and_its_padding() {
-        assert!(bar_height() >= ICON_SIZE + ITEM_PADDING * 2);
+    fn the_bar_is_never_shorter_than_an_icon_and_its_padding() {
+        assert!(MIN_BAR_HEIGHT >= ICON_SIZE + ITEM_PADDING * 2);
     }
 }
