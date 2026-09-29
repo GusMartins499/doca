@@ -126,17 +126,23 @@ async fn rebuild(
     let y = screen.y() + screen.height() - height;
     window.move_(x, y);
 
-    if let Some(gdk_window) = window.window() {
-        if let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() {
-            let reserved = BottomStrut {
-                height: height as u32,
-                start_x: x.max(0) as u32,
-                end_x: (x + width).max(0) as u32,
-            };
-            if let Err(e) = strut::apply(x11_window.xid() as u32, &reserved) {
-                tracing::error!("strut failed: {e:#}");
-            }
-        }
+    let Some(gdk_window) = window.window() else {
+        tracing::warn!("window is not realised yet, strut skipped");
+        return;
+    };
+    let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() else {
+        tracing::warn!("not an X11 window, strut skipped");
+        return;
+    };
+    let reserved = BottomStrut {
+        height: height as u32,
+        start_x: x.max(0) as u32,
+        end_x: (x + width).max(0) as u32,
+    };
+    let xid = x11_window.xid() as u32;
+    match strut::apply(xid, &reserved) {
+        Ok(()) => tracing::info!(xid, height, x, width, "strut applied"),
+        Err(e) => tracing::error!("strut failed: {e:#}"),
     }
 
     tracing::debug!(items = entries.len(), width, "rebuilt");

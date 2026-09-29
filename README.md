@@ -62,6 +62,13 @@ single-instance apps like gedit are D-Bus activated, so the copy already
 running on your real display answers the request and opens its window there,
 outside the nesting.
 
+Some tests need a real X display and are marked `#[ignore]`. Run them from
+inside the nested session:
+
+```bash
+DISPLAY=:9 cargo test -- --ignored
+```
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/primodock/config.toml`, written by the daemon when you pin
