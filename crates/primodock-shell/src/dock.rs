@@ -8,10 +8,40 @@ pub const ITEM_SPACING: i32 = 6;
 pub const ITEM_PADDING: i32 = 8;
 pub const BAR_PADDING: i32 = 10;
 
+pub const SWITCHER_WIDTH: i32 = 96;
+
 pub fn bar_width(item_count: i32) -> i32 {
     let slot = ICON_SIZE + ITEM_PADDING * 2;
     let items = item_count.max(1);
-    items * slot + (items - 1) * ITEM_SPACING + BAR_PADDING * 2
+    items * slot + (items - 1) * ITEM_SPACING + BAR_PADDING * 2 + SWITCHER_WIDTH + ITEM_SPACING
+}
+
+pub fn environment_switcher(
+    name: &str,
+    proxy: Rc<PrimoDockProxy<'static>>,
+) -> gtk::Widget {
+    let label = gtk::Label::new(Some(name));
+    label.set_widget_name("environment-name");
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_max_width_chars(10);
+
+    let chip = gtk::EventBox::new();
+    chip.set_widget_name("environment");
+    chip.set_tooltip_text(Some("Click to switch environment"));
+    chip.set_size_request(SWITCHER_WIDTH, ICON_SIZE);
+    chip.add(&label);
+
+    chip.connect_button_press_event(move |_, _| {
+        let proxy = proxy.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = proxy.cycle_environment().await {
+                tracing::warn!("cannot cycle environment: {e}");
+            }
+        });
+        glib::Propagation::Stop
+    });
+
+    chip.upcast()
 }
 
 pub fn bar_height() -> i32 {

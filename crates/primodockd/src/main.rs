@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let config = Arc::new(Mutex::new(Config::load()));
     tracing::info!(
         entries = index.len(),
-        pinned = config.lock().map(|c| c.pinned.len()).unwrap_or(0),
+        environments = config.lock().map(|c| c.environments.len()).unwrap_or(0),
         "desktop index loaded"
     );
 

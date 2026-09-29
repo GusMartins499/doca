@@ -177,6 +177,10 @@ Trocar de ambiente é `_NET_CURRENT_DESKTOP` + trocar o perfil. As janelas
 dos outros ambientes saem da frente **porque o WM já faz isso** — não porque
 você escondeu nada. É mais robusto que o original, não menos.
 
+O atalho de teclado não é capturado pelo app. `CycleEnvironment` e
+`SetEnvironment` são métodos D-Bus, e uma custom keybinding do GNOME chama um
+deles — ver o README.
+
 Substituto do "Segue o seu Foco": não existe Focus Mode no GNOME. O análogo
 honesto é trocar por horário, por rede Wi-Fi conectada, ou por atalho. Não
 tente emular o Foco da Apple.
@@ -245,9 +249,15 @@ DBus. Se isso não ficar sólido, nada acima dele fica.
 janela aberta, clique ativa/minimiza, botão direito com menu. Neste ponto já
 substitui o dock que você não tem.
 
-**Fase 2 — Ambientes.** Perfis, mapeamento para workspaces, troca por atalho
-via portal `GlobalShortcuts`. É o diferencial do produto; vem antes dos
-widgets.
+**Fase 2 — Ambientes.** Perfis, mapeamento para workspaces, troca por clique
+no chip ou por atalho do próprio desktop.
+
+> **Correção (2026-09-29):** este plano assumia o portal `GlobalShortcuts`
+> para o atalho de teclado. Ele não existe aqui — o `xdg-desktop-portal` do
+> Ubuntu 22.04 é o 1.14.4 e essa interface só entrou na 1.17. O caminho certo
+> no Linux é outro e é melhor: o app **expõe a ação** por D-Bus e o desktop
+> liga a tecla nela, via custom keybinding do GNOME. Quem é dono do teclado é
+> o ambiente, não o app.
 
 **Fase 3 — Infra de widget + cinco.** O contrato de tile e o painel. Comece
 por relógio, bateria, CPU, música (MPRIS) e pomodoro — cobrem os quatro

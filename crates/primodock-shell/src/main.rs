@@ -24,6 +24,18 @@ const STYLE: &str = "
     #indicator { background: rgba(255,255,255,0.45); border-radius: 2px; }
     #indicator-active { background: #4c8dff; border-radius: 2px; }
     #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
+    #environment {
+        background: rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 0 10px;
+    }
+    #environment:hover { background: rgba(255,255,255,0.16); }
+    #environment-name {
+        color: #e6e6e6;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    #separator { background: rgba(255,255,255,0.12); }
 ";
 
 fn main() -> Result<()> {
@@ -87,8 +99,15 @@ async fn drive(window: gtk::Window, items: gtk::Box, screen: gdk::Rectangle) -> 
 
     rebuild(&window, &items, &screen, proxy.clone()).await;
 
-    let mut changes = proxy.receive_items_changed().await?;
-    while futures_util::StreamExt::next(&mut changes).await.is_some() {
+    let mut items_changed = proxy.receive_items_changed().await?;
+    let mut environment_changed = proxy.receive_environment_changed().await?;
+
+    loop {
+        futures_util::select! {
+            _ = futures_util::StreamExt::next(&mut items_changed) => {}
+            _ = futures_util::StreamExt::next(&mut environment_changed) => {}
+            complete => break,
+        }
         rebuild(&window, &items, &screen, proxy.clone()).await;
     }
     Ok(())
@@ -101,10 +120,21 @@ async fn rebuild(
     proxy: Rc<PrimoDockProxy<'static>>,
 ) {
     let entries = proxy.list_items().await.unwrap_or_default();
+    let environment = proxy
+        .current_environment()
+        .await
+        .unwrap_or_else(|_| String::new());
 
     for child in items.children() {
         items.remove(&child);
     }
+
+    items.add(&dock::environment_switcher(&environment, proxy.clone()));
+    let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+    separator.set_widget_name("separator");
+    separator.set_margin_top(6);
+    separator.set_margin_bottom(6);
+    items.add(&separator);
 
     if entries.is_empty() {
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
