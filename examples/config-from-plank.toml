@@ -1,0 +1,33 @@
+[[environments]]
+name = "Tudo"
+pinned = [
+  "org.gnome.Nautilus",
+  "dev.warp.Warp",
+  "brave-browser",
+  "google-chrome",
+  "code-url-handler",
+  "com.anthropic.Claude",
+  "dev.zed.Zed",
+  "cursor",
+  "ai.opencode.desktop",
+  "insomnia",
+  "discord",
+  "slack_slack",
+  "obsidian",
+  "org.gnome.gedit",
+  "org.gnome.Calculator",
+  "sublime_text",
+  "docker-desktop",
+  "beekeeper-studio",
+  "pgadmin4",
+  "mongodb-compass",
+  "redisinsight",
+  "brave-kjbdgfilnfhdoflbpgamdcdgpehopbep-Default",
+  "brave-hnpfjngllnobngcgfapefoaidbinmjnm-Default",
+  "brave-kjgfgldnnfoeklkmfkjfagphfepbbdan-Default",
+  "Zoom",
+  "anki",
+  "rocks.fastpotify.Fastpotify",
+  "spotify_spotify",
+]
+widgets = ["clock", "cpu", "battery", "music"]
