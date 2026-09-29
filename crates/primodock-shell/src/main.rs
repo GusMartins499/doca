@@ -1,6 +1,9 @@
 mod dock;
 mod strut;
+mod widget_tile;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -36,6 +39,16 @@ const STYLE: &str = "
         font-weight: 600;
     }
     #separator { background: rgba(255,255,255,0.12); }
+    #widget { border-radius: 12px; padding: 6px 8px; }
+    #widget:hover { background: rgba(255,255,255,0.10); }
+    #widget.active { background: rgba(76,141,255,0.18); }
+    #widget-label { color: #f2f2f2; font-size: 15px; font-weight: 600; }
+    #widget-detail { color: rgba(255,255,255,0.55); font-size: 10px; }
+    #widget-progress {
+        min-height: 3px;
+        background: rgba(255,255,255,0.14);
+    }
+    #widget-progress progress { background: #4c8dff; min-height: 3px; }
 ";
 
 fn main() -> Result<()> {
@@ -92,23 +105,38 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
+
 async fn drive(window: gtk::Window, items: gtk::Box, screen: gdk::Rectangle) -> Result<()> {
     let connection = zbus::Connection::session().await?;
     let proxy: Rc<PrimoDockProxy<'static>> = Rc::new(PrimoDockProxy::new(&connection).await?);
+    let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
     tracing::info!("connected to primodockd");
 
-    rebuild(&window, &items, &screen, proxy.clone()).await;
+    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone()).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
+    let mut widget_changed = proxy.receive_widget_changed().await?;
 
     loop {
         futures_util::select! {
             _ = futures_util::StreamExt::next(&mut items_changed) => {}
             _ = futures_util::StreamExt::next(&mut environment_changed) => {}
+            signal = futures_util::StreamExt::next(&mut widget_changed) => {
+                if let Some(signal) = signal {
+                    if let Ok(args) = signal.args() {
+                        if let Some(tile) = tiles.borrow().get(&args.state.id) {
+                            tile.update(&args.state);
+                            continue;
+                        }
+                    }
+                }
+                continue;
+            }
             complete => break,
         }
-        rebuild(&window, &items, &screen, proxy.clone()).await;
+        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone()).await;
     }
     Ok(())
 }
@@ -118,8 +146,10 @@ async fn rebuild(
     items: &gtk::Box,
     screen: &gdk::Rectangle,
     proxy: Rc<PrimoDockProxy<'static>>,
+    tiles: Tiles,
 ) {
     let entries = proxy.list_items().await.unwrap_or_default();
+    let widgets = proxy.list_widgets().await.unwrap_or_default();
     let environment = proxy
         .current_environment()
         .await
@@ -145,10 +175,30 @@ async fn rebuild(
             items.add(&dock::item_button(entry, proxy.clone()));
         }
     }
-    items.show_all();
 
-    let width = dock::bar_width(entries.len() as i32);
-    let height = dock::bar_height();
+    tiles.borrow_mut().clear();
+    if !widgets.is_empty() {
+        let divider = gtk::Separator::new(gtk::Orientation::Vertical);
+        divider.set_widget_name("separator");
+        divider.set_margin_top(6);
+        divider.set_margin_bottom(6);
+        items.add(&divider);
+
+        for state in &widgets {
+            let tile = widget_tile::WidgetTile::new(state, proxy.clone());
+            items.add(&tile.root);
+            tiles.borrow_mut().insert(state.id.clone(), tile);
+        }
+    }
+
+    items.show_all();
+    for state in &widgets {
+        if let Some(tile) = tiles.borrow().get(&state.id) {
+            tile.update(state);
+        }
+    }
+
+    let (width, height) = dock::natural_size(items);
     window.set_size_request(width, height);
     window.resize(width, height);
 

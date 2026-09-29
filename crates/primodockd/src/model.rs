@@ -132,6 +132,7 @@ mod tests {
             name: name.to_string(),
             workspaces,
             pinned: Vec::new(),
+            widgets: Vec::new(),
         }
     }
 

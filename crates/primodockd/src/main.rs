@@ -2,6 +2,7 @@ mod config;
 mod desktop;
 mod model;
 mod service;
+mod widgets;
 mod x11;
 
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,13 @@ async fn main() -> Result<()> {
         "desktop index loaded"
     );
 
+    let widget_ids = config
+        .lock()
+        .map(|c| c.all_widgets())
+        .unwrap_or_default();
+    let (widgets, widget_changes) = crate::widgets::spawn_hub(crate::widgets::build(&widget_ids))?;
+    tracing::info!(widgets = widget_ids.len(), "widgets started");
+
     let connection = zbus::connection::Builder::session()
         .context("cannot reach the session bus")?
         .name(BUS_NAME)
@@ -49,6 +57,7 @@ async fn main() -> Result<()> {
             OBJECT_PATH,
             DockService {
                 x11: x11.clone(),
+                widgets: widgets.clone(),
                 index: index.clone(),
                 config: config.clone(),
             },
@@ -80,6 +89,9 @@ async fn main() -> Result<()> {
                     let index = x11.current_workspace().await.unwrap_or(0);
                     DockService::workspace_changed(emitter.signal_emitter(), index).await?;
                 }
+            }
+            Ok(state) = widget_changes.recv() => {
+                DockService::widget_changed(emitter.signal_emitter(), state).await?;
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");

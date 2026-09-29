@@ -1,15 +1,17 @@
 use std::sync::{Arc, Mutex};
 
-use primodock_ipc::{DockItem, EnvironmentInfo, WindowInfo};
+use primodock_ipc::{DockItem, EnvironmentInfo, WidgetState, WindowInfo};
 use zbus::object_server::SignalEmitter;
 
 use crate::config::Config;
 use crate::desktop::DesktopIndex;
 use crate::model;
+use crate::widgets::WidgetHandle;
 use crate::x11::XHandle;
 
 pub struct DockService {
     pub x11: XHandle,
+    pub widgets: WidgetHandle,
     pub index: Arc<DesktopIndex>,
     pub config: Arc<Mutex<Config>>,
 }
@@ -107,6 +109,22 @@ impl DockService {
         self.update_config(|config| config.unpin(workspace, id))
     }
 
+    async fn list_widgets(&self) -> zbus::fdo::Result<Vec<WidgetState>> {
+        let workspace = self.workspace().await?;
+        let wanted = self.with_config(|config| {
+            config.environment_for(workspace).widgets.clone()
+        })?;
+        let available = self.widgets.list().await.map_err(failed)?;
+        Ok(wanted
+            .iter()
+            .filter_map(|id| available.iter().find(|state| &state.id == id).cloned())
+            .collect())
+    }
+
+    async fn invoke_widget(&self, id: &str, action: &str) -> zbus::fdo::Result<()> {
+        self.widgets.invoke(id, action).await.map_err(failed)
+    }
+
     async fn list_environments(&self) -> zbus::fdo::Result<Vec<EnvironmentInfo>> {
         let workspace = self.workspace().await?;
         self.with_config(|config| {
@@ -196,6 +214,12 @@ impl DockService {
 
     #[zbus(signal)]
     pub async fn environment_changed(emitter: &SignalEmitter<'_>, name: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn widget_changed(
+        emitter: &SignalEmitter<'_>,
+        state: WidgetState,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn items_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;

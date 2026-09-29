@@ -7,10 +7,10 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
-**Phase 2 — environments.** Each environment owns a set of workspaces and its
-own pinned apps. Switching workspace switches the dock: its apps, and only the
-windows living on its workspaces. Pinning applies to the environment you are
-in, not globally.
+**Phase 3 — widgets.** Live tiles in the bar: clock, battery, CPU, music over
+MPRIS, and a pomodoro. Each widget declares its own poll interval, and the
+scheduler only announces a widget when its rendered state actually changed —
+so a paused pomodoro and a steady battery cost nothing.
 
 See [PLANO.md](PLANO.md) for the full technical plan.
 
@@ -78,12 +78,30 @@ DISPLAY=:9 cargo test -- --ignored
 name = "Work"
 workspaces = [0, 1]
 pinned = ["code", "dev.warp.Warp"]
+widgets = ["clock", "pomodoro", "cpu", "battery"]
 
 [[environments]]
 name = "Personal"
 workspaces = [2, 3]
 pinned = ["discord", "spotify"]
+widgets = ["clock", "music"]
 ```
+
+## Widgets
+
+| id | shows | poll | click |
+|---|---|---|---|
+| `clock` | time and date | 1s | — |
+| `battery` | charge and time to full or empty | 30s | — |
+| `cpu` | busy share since the last sample | 2s | — |
+| `music` | MPRIS title and artist | 2s | play/pause, right click resets |
+| `pomodoro` | focus and break blocks | 1s | start/pause, right click resets |
+
+A poll is not an update. The scheduler compares the rendered state to the last
+one and stays quiet when nothing changed, so a clock showing `17:21` is read
+every second and announced once a minute. That is deliberate: this is a laptop
+dock, and a tile that wakes the bar sixty times a minute is paid for in
+battery.
 
 The ids are `.desktop` file names without the extension. An environment with
 no `workspaces` is a catch-all, used for any workspace no other environment
