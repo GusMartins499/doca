@@ -150,25 +150,32 @@ async fn rebuild(
 ) {
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
-    let environment = proxy
-        .current_environment()
-        .await
-        .unwrap_or_else(|_| String::new());
+    let environments = proxy.list_environments().await.unwrap_or_default();
 
     for child in items.children() {
         items.remove(&child);
     }
 
-    items.add(&dock::environment_switcher(&environment, proxy.clone()));
-    items.add(&dock::divider());
+    if dock::switcher_is_useful(environments.len()) {
+        let current = environments
+            .iter()
+            .find(|environment| environment.current)
+            .map(|environment| environment.name.clone())
+            .unwrap_or_default();
+        items.add(&dock::environment_switcher(&current, proxy.clone()));
+        items.add(&dock::divider());
+    }
 
     if entries.is_empty() {
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
         empty.set_widget_name("empty");
         items.add(&empty);
     } else {
-        let icon_size =
-            dock::icon_size_for(entries.len() as i32, widgets.len() as i32, screen.width());
+        let icon_size = dock::icon_size_for(
+            entries.len() as i32,
+            widgets.len() as i32,
+            screen.width() - if dock::switcher_is_useful(environments.len()) { 0 } else { dock::SWITCHER_WIDTH },
+        );
         for entry in &entries {
             items.add(&dock::item_button(entry, icon_size, proxy.clone()));
         }
