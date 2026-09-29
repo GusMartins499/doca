@@ -40,9 +40,26 @@ sudo apt-get install -y pkg-config libgtk-3-dev
 cargo build --release
 ```
 
-## Run
+## Try it on your own session
 
-Always in a nested X server, never in the session you are working in:
+```bash
+cargo build --release
+./scripts/try-it.sh
+```
+
+Stops Plank, runs PrimoDock in its place, and restarts Plank when you press
+Ctrl-C. Two docks cannot share a screen edge — both reserve space through the
+same strut protocol and each reacts to the other's reservation — so they take
+turns rather than fight. On first run it seeds a config from your Plank
+launchers so the dock is not empty.
+
+If the script is killed outright rather than interrupted, Plank will not come
+back on its own: `setsid plank >/dev/null 2>&1 &`.
+
+## Run it in isolation
+
+For development. Always in a nested X server, never in the session you are
+working in:
 
 ```bash
 sudo apt-get install -y xserver-xephyr openbox dbus   # once
