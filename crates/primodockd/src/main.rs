@@ -44,11 +44,12 @@ async fn main() -> Result<()> {
         "desktop index loaded"
     );
 
-    let widget_ids = config
+    let (widget_ids, widget_settings) = config
         .lock()
-        .map(|c| c.all_widgets())
+        .map(|c| (c.all_widgets(), c.widgets.clone()))
         .unwrap_or_default();
-    let (widgets, widget_changes) = crate::widgets::spawn_hub(crate::widgets::build(&widget_ids))?;
+    let (widgets, widget_changes) =
+        crate::widgets::spawn_hub(crate::widgets::build(&widget_ids, &widget_settings))?;
     tracing::info!(widgets = widget_ids.len(), "widgets started");
 
     let connection = zbus::connection::Builder::session()
@@ -82,14 +83,24 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             Some(first) = rx.recv() => {
-                let (windows, workspace) = coalesce(first, &mut rx).await;
-                if windows {
+                let announce = announcements_for(coalesce(first, &mut rx).await);
+                if announce.windows {
                     DockService::windows_changed(emitter.signal_emitter()).await?;
-                    DockService::items_changed(emitter.signal_emitter()).await?;
                 }
-                if workspace {
+                if announce.workspace {
                     let index = x11.current_workspace().await.unwrap_or(0);
                     DockService::workspace_changed(emitter.signal_emitter(), index).await?;
+                }
+                if announce.environment {
+                    let index = x11.current_workspace().await.unwrap_or(0);
+                    let name = config
+                        .lock()
+                        .map(|c| c.environment_for(index).name.clone())
+                        .unwrap_or_default();
+                    DockService::environment_changed(emitter.signal_emitter(), &name).await?;
+                }
+                if announce.items {
+                    DockService::items_changed(emitter.signal_emitter()).await?;
                 }
             }
             Ok(state) = widget_changes.recv() => {
@@ -103,6 +114,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Announcements {
+    pub windows: bool,
+    pub workspace: bool,
+    pub environment: bool,
+    pub items: bool,
+}
+
+pub fn announcements_for((windows, workspace): (bool, bool)) -> Announcements {
+    Announcements {
+        windows,
+        workspace,
+        environment: workspace,
+        items: windows || workspace,
+    }
 }
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
@@ -129,6 +157,46 @@ async fn coalesce(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workspace_change_announces_the_environment_and_the_items_it_changed() {
+        let announce = announcements_for((false, true));
+
+        assert!(announce.workspace);
+        assert!(
+            announce.environment,
+            "switching workspace switches environment, and the bar has to hear about it"
+        );
+        assert!(
+            announce.items,
+            "each environment pins its own apps, so the row changes too"
+        );
+    }
+
+    #[test]
+    fn a_window_change_does_not_pretend_the_environment_moved() {
+        let announce = announcements_for((true, false));
+
+        assert!(announce.windows);
+        assert!(announce.items);
+        assert!(!announce.environment);
+        assert!(!announce.workspace);
+    }
+
+    #[test]
+    fn nothing_changing_announces_nothing() {
+        let announce = announcements_for((false, false));
+
+        assert_eq!(
+            announce,
+            Announcements {
+                windows: false,
+                workspace: false,
+                environment: false,
+                items: false
+            }
+        );
+    }
 
     #[tokio::test]
     async fn a_burst_of_root_changes_becomes_a_single_notification() {
