@@ -77,6 +77,18 @@ cat <<'ESCAPE'
 
 ESCAPE
 
+# A daemon left over from an earlier run holds the bus name, and the one
+# started here loses it and dies. The dock then comes up talking to the old
+# daemon, which read the config when *it* started — so config changes appear
+# to have been ignored, with the reason buried in the scrollback. Whatever is
+# already running is stopped first.
+if pgrep -x primodockd >/dev/null || pgrep -x primodock-shell >/dev/null; then
+    echo "stopping a PrimoDock that was already running"
+    pkill -x primodock-shell 2>/dev/null
+    pkill -x primodockd 2>/dev/null
+    sleep 1
+fi
+
 echo "config: $CONFIG"
 "$ROOT/target/release/primodockd" &
 sleep 1
