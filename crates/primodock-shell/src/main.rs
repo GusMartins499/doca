@@ -1,5 +1,6 @@
 mod dock;
 mod magnify;
+mod stack;
 mod strut;
 mod theme;
 mod widget_tile;

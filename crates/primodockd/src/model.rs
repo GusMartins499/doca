@@ -151,6 +151,7 @@ mod tests {
             workspaces,
             pinned: Vec::new(),
             widgets: Vec::new(),
+            folders: Vec::new(),
         }
     }
 
