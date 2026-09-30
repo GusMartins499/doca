@@ -84,6 +84,6 @@ sleep 1
 
 echo
 echo "PrimoDock is running. Left click activates, right click pins or closes."
-echo "The chip on the left switches environment. Press Ctrl-C to stop and get"
+echo "The environment follows the workspace. Press Ctrl-C to stop and get"
 echo "Plank back."
 wait

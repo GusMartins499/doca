@@ -4,7 +4,6 @@ const SHARED: &str = "
     window { background: transparent; }
     #item { border-radius: 12px; padding: 8px; }
     #widget { border-radius: 12px; padding: 6px 8px; }
-    #environment { border-radius: 12px; padding: 0 10px; }
     #widget-progress { min-height: 3px; }
     #widget-progress progress { min-height: 3px; }
     #indicator-idle { background: transparent; }
@@ -22,9 +21,6 @@ const NATIVE: &str = "
     #item:hover { background: rgba(255,255,255,0.10); }
     #widget:hover { background: rgba(255,255,255,0.10); }
     #widget.active { background: rgba(76,141,255,0.18); }
-    #environment { background: rgba(255,255,255,0.08); }
-    #environment:hover { background: rgba(255,255,255,0.16); }
-    #environment-name { color: #e6e6e6; font-size: 12px; font-weight: 600; }
     #separator { background: rgba(255,255,255,0.12); }
     #indicator { background: rgba(255,255,255,0.45); }
     #indicator-active { background: #4c8dff; }
@@ -45,9 +41,6 @@ const MIDNIGHT: &str = "
     #item:hover { background: #1a1f2b; }
     #widget:hover { background: #1a1f2b; }
     #widget.active { background: #16233d; }
-    #environment { background: #151a24; }
-    #environment:hover { background: #1f2635; }
-    #environment-name { color: #c8d0e0; font-size: 12px; font-weight: 700; }
     #separator { background: #232a38; }
     #indicator { background: #4a5568; }
     #indicator-active { background: #7aa2f7; }
@@ -68,9 +61,6 @@ const PAPER: &str = "
     #item:hover { background: rgba(0,0,0,0.06); }
     #widget:hover { background: rgba(0,0,0,0.06); }
     #widget.active { background: rgba(198,124,78,0.16); }
-    #environment { background: rgba(0,0,0,0.05); }
-    #environment:hover { background: rgba(0,0,0,0.10); }
-    #environment-name { color: #33302b; font-size: 12px; font-weight: 600; }
     #separator { background: rgba(0,0,0,0.12); }
     #indicator { background: rgba(0,0,0,0.35); }
     #indicator-active { background: #c67c4e; }
@@ -131,7 +121,6 @@ mod tests {
             "#separator",
             "#indicator",
             "#indicator-active",
-            "#environment-name",
             "#widget-label",
             "#widget-detail",
             "#widget-progress",
