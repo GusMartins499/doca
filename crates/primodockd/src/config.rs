@@ -247,6 +247,35 @@ impl Config {
             .unwrap_or_else(|| &self.environments[0])
     }
 
+    /// The environment a cycle key should land on, with the workspace to switch
+    /// to in order to get there.
+    ///
+    /// Catch-all environments are never a destination: they exist to cover the
+    /// workspaces nobody claimed, and have no workspace of their own to switch
+    /// to. Neither is the environment you are already in, so a setup with one
+    /// real environment has nowhere to cycle and says so.
+    pub fn next_environment(&self, workspace: i32) -> Option<(String, i32)> {
+        let current = &self.environment_for(workspace).name;
+        let position = self
+            .environments
+            .iter()
+            .position(|environment| &environment.name == current)
+            .unwrap_or(0);
+
+        self.environments
+            .iter()
+            .cycle()
+            .skip(position + 1)
+            .take(self.environments.len())
+            .filter(|environment| !environment.is_catch_all() && &environment.name != current)
+            .find_map(|environment| {
+                environment
+                    .workspaces
+                    .first()
+                    .map(|target| (environment.name.clone(), *target))
+            })
+    }
+
     pub fn appearance(&self) -> Appearance {
         self.appearance.sanitised()
     }
@@ -298,6 +327,100 @@ mod tests {
 
     fn config(toml: &str) -> Config {
         toml::from_str::<Config>(toml).unwrap().migrated()
+    }
+
+    const THREE_ENVIRONMENTS: &str = r#"
+        [[environments]]
+        name = "Work"
+        workspaces = [0, 1]
+
+        [[environments]]
+        name = "Personal"
+        workspaces = [2]
+
+        [[environments]]
+        name = "Music"
+        workspaces = [3]
+    "#;
+
+    #[test]
+    fn cycling_lands_on_the_next_environment_and_the_workspace_that_reaches_it() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert_eq!(
+            config.next_environment(0),
+            Some(("Personal".to_string(), 2))
+        );
+    }
+
+    #[test]
+    fn cycling_past_the_last_environment_comes_back_to_the_first() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert_eq!(config.next_environment(3), Some(("Work".to_string(), 0)));
+    }
+
+    #[test]
+    fn cycling_skips_the_catch_all_because_it_owns_no_workspace_to_switch_to() {
+        let config = config(
+            r#"
+            [[environments]]
+            name = "Work"
+            workspaces = [0]
+
+            [[environments]]
+            name = "Everything else"
+
+            [[environments]]
+            name = "Music"
+            workspaces = [3]
+        "#,
+        );
+
+        assert_eq!(config.next_environment(0), Some(("Music".to_string(), 3)));
+    }
+
+    #[test]
+    fn cycling_out_of_the_catch_all_reaches_a_real_environment() {
+        let config = config(
+            r#"
+            [[environments]]
+            name = "Everything else"
+
+            [[environments]]
+            name = "Work"
+            workspaces = [0]
+        "#,
+        );
+
+        assert_eq!(config.next_environment(7), Some(("Work".to_string(), 0)));
+    }
+
+    #[test]
+    fn one_real_environment_has_nowhere_to_cycle_to() {
+        let config = config(
+            r#"
+            [[environments]]
+            name = "Work"
+            workspaces = [0, 1]
+
+            [[environments]]
+            name = "Everything else"
+        "#,
+        );
+
+        assert_eq!(
+            config.next_environment(0),
+            None,
+            "cycling back into the environment you are already in would move the workspace for nothing"
+        );
+    }
+
+    #[test]
+    fn a_migrated_phase_one_config_has_nowhere_to_cycle_to() {
+        let config = config("pinned = [\"code\"]");
+
+        assert_eq!(config.next_environment(0), None);
     }
 
     #[test]

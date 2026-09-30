@@ -244,22 +244,7 @@ impl DockService {
 
     async fn cycle_environment(&self) -> zbus::fdo::Result<String> {
         let workspace = self.workspace().await?;
-        let next = self.with_config(|config| {
-            let current = config.environment_for(workspace).name.clone();
-            let position = config
-                .environments
-                .iter()
-                .position(|environment| environment.name == current)
-                .unwrap_or(0);
-            config
-                .environments
-                .iter()
-                .cycle()
-                .skip(position + 1)
-                .take(config.environments.len())
-                .find(|environment| !environment.is_catch_all())
-                .map(|environment| (environment.name.clone(), environment.workspaces[0]))
-        })?;
+        let next = self.with_config(|config| config.next_environment(workspace))?;
 
         let Some((name, target)) = next else {
             return Err(zbus::fdo::Error::Failed(

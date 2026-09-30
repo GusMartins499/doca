@@ -259,20 +259,27 @@ load into a single catch-all environment.
 
 The environment follows the workspace, so your own workspace shortcuts already
 switch it and the bar carries no control for it. To switch environment without
-moving workspace, bind a key to the D-Bus method. The dock does not grab keys
-itself: on Linux the desktop owns the keyboard, and the app exposes the
-action.
+moving workspace, bind a key. The dock does not grab keys itself: on Linux the
+desktop owns the keyboard, and the app only exposes the action.
 
 ```bash
-KEY=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/primodock/
-gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$KEY']"
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY name 'PrimoDock: cycle environment'
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY binding '<Super>e'
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$KEY command 'gdbus call --session --dest dev.oprimo.PrimoDock --object-path /dev/oprimo/PrimoDock --method dev.oprimo.PrimoDock1.CycleEnvironment'
+./scripts/bind-key.sh                    # <Super>e cycles environment
+./scripts/bind-key.sh '<Super>x'         # the same action, your key
+./scripts/bind-key.sh '<Super>1' Work    # one key straight to one environment
+./scripts/bind-key.sh --list
+./scripts/bind-key.sh --remove '<Super>1' Work
 ```
 
-`SetEnvironment` takes a name, if you would rather bind one key per
-environment than cycle.
+The script writes a GNOME custom keybinding whose command is a `gdbus call` to
+`CycleEnvironment` or `SetEnvironment`. It exists because that list of
+keybindings is shared by every application on the desktop: it has to be read
+and written back, and a copy-pasted `gsettings set` that assigns the whole
+array drops every shortcut you had. Each action owns a named slot, so running
+it twice for one action moves that binding instead of adding another.
+
+Cycling walks the environments in config order, skips the catch-all — it has
+no workspace of its own to switch to — and refuses when there is only one real
+environment, rather than switching workspace to land back where you started.
 
 The `GlobalShortcuts` portal would be the other route, but it landed in
 `xdg-desktop-portal` 1.17 and Ubuntu 22.04 ships 1.14.
