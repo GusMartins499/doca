@@ -5,41 +5,15 @@ No Electron, no webview.
 
 Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
-## Status
+![The dock, with pinned apps on the left and clock, CPU and battery widgets on the right](docs/screenshot.png)
 
-**Phase 5 — parity.** Magnification on hover, a trash item, files dropped onto
-an app, folders that open as a grid, and a window list on right click. Thumbnail
-previews and the remaining two dozen widgets are not here.
-
-**Phase 4 — themes.** Three of them, chosen in config, plus a configurable
-icon size. Three, not eight: the shape of the theme system is what matters,
-and more of them is a morning's work once it holds.
-
-**Phase 3 — widgets.** Live tiles in the bar: clock, battery, CPU, music over
-MPRIS, and a pomodoro. Each widget declares its own poll interval, and the
-scheduler only announces a widget when its rendered state actually changed —
-so a paused pomodoro and a steady battery cost nothing.
-
-See [PLANO.md](PLANO.md) for the full technical plan.
-
-## Target
+## Requirements
 
 | | |
 |---|---|
-| Session | X11 (Wayland requires a different shell layer — see plan §3) |
+| Session | X11 |
 | Desktop | GNOME Shell 42+ |
-| Toolkit | GTK3 (deliberately not GTK4 — see plan §5) |
-
-## Layout
-
-```
-crates/primodock-ipc     shared D-Bus contract
-crates/primodockd        the daemon: windows, workspaces, state
-crates/primodock-shell   the bar: draws, anchors, never talks X11 policy
-```
-
-The D-Bus boundary between the two is load-bearing: when the X11 session goes
-away, the shell is replaced and the daemon survives intact.
+| Toolkit | GTK3 |
 
 ## Build
 
@@ -48,10 +22,11 @@ sudo apt-get install -y pkg-config libgtk-3-dev
 cargo build --release
 ```
 
-## Try it safely
+## Run
+
+### In a sandbox
 
 ```bash
-cargo build --release
 ./scripts/sandbox.sh
 ```
 
@@ -63,13 +38,11 @@ keeps running untouched. Close the window to stop.
 `--headless` runs the same thing on a virtual screen with no window at all,
 for screenshots and CI.
 
-This is the only way to evaluate the dock at no risk, and it is how every
-phase of this project is verified.
+This is the way to evaluate the dock at no risk.
 
-## Try it on your own session
+### On your own session
 
 ```bash
-cargo build --release
 ./scripts/try-it.sh
 ```
 
@@ -89,40 +62,7 @@ console with `Ctrl+Alt+F3`, log in, and run:
 pkill -x primodock-shell; pkill -x primodockd; setsid plank &
 ```
 
-`Ctrl+Alt+F2` returns to the desktop. The bar is capped at a fraction of the
-screen height so it should not get there — that cap exists because an icon
-declared as a 1024px PNG once made it.
-
-## Run it in isolation
-
-`scripts/sandbox.sh` above is the one to use. `scripts/dev-session.sh` is the
-older, barer version of the same idea, kept for a debug build with an empty
-config:
-
-```bash
-sudo apt-get install -y xserver-xephyr xvfb openbox dbus   # once
-cargo build
-./scripts/dev-session.sh
-```
-
-A dock reserves screen edge space through `_NET_WM_STRUT_PARTIAL`, which
-changes the desktop work area for **every** dock and panel on that display.
-Run this bar on your own session and whatever dock you already use will
-repaint over it, or fail to repaint at all.
-
-`dev-session.sh` gives it a display of its own, a session bus of its own, and
-a config directory of its own. All three matter. The nested display is not
-enough by itself: launching an app goes through the session bus, and
-single-instance apps like gedit are D-Bus activated, so the copy already
-running on your real display answers the request and opens its window there,
-outside the nesting.
-
-Some tests need a real X display and are marked `#[ignore]`. Run them from
-inside the nested session:
-
-```bash
-DISPLAY=:9 cargo test -- --ignored
-```
+`Ctrl+Alt+F2` returns to the desktop.
 
 ## Configuration
 
@@ -150,67 +90,28 @@ pinned = ["discord", "spotify"]
 widgets = ["clock", "music"]
 ```
 
-## Themes
+The ids in `pinned` are `.desktop` file names without the extension. An
+environment with no `workspaces` is a catch-all, used for any workspace no
+other environment claims.
 
-| `theme` | |
+### Appearance
+
+| key | |
 |---|---|
-| `native` | translucent dark glass, blue accents. The default. |
-| `midnight` | solid near-black, navy tint |
-| `paper` | light cream, terracotta accents |
+| `theme` | `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
+| `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit. |
+| `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. |
+| `auto_hide` | slides the bar off the bottom edge, leaving a two-pixel sliver to point at, and reserves only that sliver through the strut so maximised windows get the screen back. Pointing at the sliver slides it up; moving away slides it down. |
+| `show_trash` | a trash item at the end of the bar. |
 
-An unknown name falls back to `native` with a warning rather than leaving the
-bar unstyled. `icon_size` is clamped to 24–96, and shrinks further on its own
-when there are more apps than fit.
-
-## Stacks
+### Folders
 
 A path in `folders` becomes a dock item that opens as a grid of its contents,
-directories first, then names case-insensitively, capped at 60 entries so a
-crowded Downloads folder does not become an endless menu. Hidden entries are
-left out. Each entry opens with `xdg-open`; file icons come from the content
-type, not the extension.
+directories first, then names case-insensitively, capped at 60 entries. Hidden
+entries are left out. Each entry opens with `xdg-open`; file icons come from
+the content type, not the extension.
 
-## Window lists
-
-Right clicking an app with more than one window lists them by title, and
-clicking a title raises that window. Titles are elided by character count, not
-bytes, so accented titles are cut where you would expect.
-
-Thumbnail previews are not implemented: on X11 they need composite redirect
-and per-window pixmap capture, which is a great deal of machinery for a
-hover effect.
-
-## Auto-hide
-
-`auto_hide = true` slides the bar off the bottom edge, leaving a two-pixel
-sliver to point at, and reserves only that sliver through the strut so
-maximised windows get the screen back. Pointing at the sliver slides it up;
-moving away slides it down.
-
-The sliver is not decoration: a bar with nothing at all on screen can never be
-summoned, which `a_hidden_bar_leaves_a_sliver_on_screen_to_be_pointed_at`
-pins.
-
-## Launch animation
-
-Clicking an app that is not running swells its icon and lets it settle over
-700ms. It is a scale pulse rather than the original's vertical hop: GTK3 has
-no CSS transform and ignores negative margins, so lifting an icon would mean
-reserving empty headroom in the bar forever.
-
-The pulse and the magnification lens both write the icon size, so a pulse
-holds a flag that the lens respects while it runs.
-
-## Magnification
-
-`magnification` is how much the icon under the pointer grows, clamped to
-1.0–2.5. `1.0` turns the lens off.
-
-The lens measures distance against the *base* layout, cached when the bar is
-built, not against the current one. Measuring against the live layout makes
-the icon grow, push its neighbours, change the distance, and shake.
-
-## Widgets
+### Widgets
 
 | id | shows | poll | click |
 |---|---|---|---|
@@ -244,23 +145,15 @@ minutes = 15
 goal = 8
 ```
 
-A poll is not an update. The scheduler compares the rendered state to the last
+A poll is not an update: the scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read
-every second and announced once a minute. That is deliberate: this is a laptop
-dock, and a tile that wakes the bar sixty times a minute is paid for in
-battery.
-
-The ids are `.desktop` file names without the extension. An environment with
-no `workspaces` is a catch-all, used for any workspace no other environment
-claims. A config from phase 1, with a top-level `pinned` list, is migrated on
-load into a single catch-all environment.
+every second and announced once a minute.
 
 ## Switching environments
 
 The environment follows the workspace, so your own workspace shortcuts already
 switch it and the bar carries no control for it. To switch environment without
-moving workspace, bind a key. The dock does not grab keys itself: on Linux the
-desktop owns the keyboard, and the app only exposes the action.
+moving workspace, bind a key:
 
 ```bash
 ./scripts/bind-key.sh                    # <Super>e cycles environment
@@ -279,7 +172,38 @@ it twice for one action moves that binding instead of adding another.
 
 Cycling walks the environments in config order, skips the catch-all — it has
 no workspace of its own to switch to — and refuses when there is only one real
-environment, rather than switching workspace to land back where you started.
+environment.
 
-The `GlobalShortcuts` portal would be the other route, but it landed in
-`xdg-desktop-portal` 1.17 and Ubuntu 22.04 ships 1.14.
+## Development
+
+```
+crates/primodock-ipc     shared D-Bus contract
+crates/primodockd        the daemon: windows, workspaces, state
+crates/primodock-shell   the bar: draws, anchors, never talks X11 policy
+```
+
+The D-Bus boundary between the two is load-bearing: when the X11 session goes
+away, the shell is replaced and the daemon survives intact.
+
+`scripts/dev-session.sh` is a barer version of the sandbox, for a debug build
+with an empty config:
+
+```bash
+sudo apt-get install -y xserver-xephyr xvfb openbox dbus   # once
+cargo build
+./scripts/dev-session.sh
+```
+
+Some tests need a real X display and are marked `#[ignore]`. Run them from
+inside a nested session:
+
+```bash
+DISPLAY=:9 cargo test -- --ignored
+```
+
+## Not implemented
+
+Thumbnail previews on window-list hover: on X11 they need composite redirect
+and per-window pixmap capture, which is a great deal of machinery for a hover
+effect. Right clicking an app with more than one window still lists the
+windows by title, and clicking a title raises that window.
