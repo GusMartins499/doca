@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use primodock_ipc::{DockItem, EnvironmentInfo, WidgetState, WindowInfo};
+use primodock_ipc::{Appearance, DockItem, EnvironmentInfo, WidgetState, WindowInfo};
 use zbus::object_server::SignalEmitter;
 
 use crate::config::Config;
@@ -103,6 +103,16 @@ impl DockService {
     async fn unpin_item(&self, id: &str) -> zbus::fdo::Result<()> {
         let workspace = self.workspace().await?;
         self.update_config(|config| config.unpin(workspace, id))
+    }
+
+    async fn appearance(&self) -> zbus::fdo::Result<Appearance> {
+        self.with_config(|config| {
+            let appearance = config.appearance();
+            Appearance {
+                theme: appearance.theme,
+                icon_size: appearance.icon_size,
+            }
+        })
     }
 
     async fn list_widgets(&self) -> zbus::fdo::Result<Vec<WidgetState>> {
