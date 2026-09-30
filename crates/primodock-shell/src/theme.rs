@@ -85,6 +85,7 @@ pub fn names() -> [&'static str; 3] {
     ["native", "midnight", "paper"]
 }
 
+#[cfg(test)]
 pub fn exists(name: &str) -> bool {
     names().contains(&name)
 }
