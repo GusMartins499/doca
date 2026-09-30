@@ -159,8 +159,23 @@ impl DesktopIndex {
             .or_else(|| self.by_exec_binary(&wanted))
     }
 
+    /// The entry a user would recognise, out of every one that claims the class.
+    ///
+    /// Several entries can claim the same window: Brave ships both
+    /// `brave-browser.desktop` and a `NoDisplay=true` `com.brave.Browser.desktop`
+    /// with the same `StartupWMClass`. Picking whichever the filesystem yielded
+    /// first gives the running window an id the pinned launcher does not share,
+    /// and the app lands in the dock twice. The one that shows in the menus wins,
+    /// and ties are broken by id so the dock is the same on every start.
+    fn best(&self, mut claims: impl FnMut(&DesktopEntry) -> bool) -> Option<&DesktopEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| claims(entry))
+            .min_by(|a, b| (a.no_display, &a.id).cmp(&(b.no_display, &b.id)))
+    }
+
     fn by_startup_wm_class(&self, app_id: &str) -> Option<&DesktopEntry> {
-        self.entries.iter().find(|entry| {
+        self.best(|entry| {
             entry
                 .startup_wm_class
                 .as_deref()
@@ -169,21 +184,15 @@ impl DesktopIndex {
     }
 
     fn by_exact_id(&self, wanted: &str) -> Option<&DesktopEntry> {
-        self.entries
-            .iter()
-            .find(|entry| normalize(&entry.id) == wanted)
+        self.best(|entry| normalize(&entry.id) == wanted)
     }
 
     fn by_trailing_id_segment(&self, wanted: &str) -> Option<&DesktopEntry> {
-        self.entries
-            .iter()
-            .find(|entry| normalize(last_segment(&entry.id)) == wanted)
+        self.best(|entry| normalize(last_segment(&entry.id)) == wanted)
     }
 
     fn by_exec_binary(&self, wanted: &str) -> Option<&DesktopEntry> {
-        self.entries
-            .iter()
-            .find(|entry| exec_binary(&entry.exec).as_deref() == Some(wanted))
+        self.best(|entry| exec_binary(&entry.exec).as_deref() == Some(wanted))
     }
 }
 
@@ -287,6 +296,47 @@ mod tests {
             index.match_window("Spotify").unwrap().id,
             "spotify_spotify"
         );
+    }
+
+    #[test]
+    fn the_entry_that_shows_in_the_menus_wins_over_a_hidden_one_claiming_the_same_class() {
+        let hidden = DesktopEntry {
+            no_display: true,
+            ..entry("com.brave.Browser", "/usr/bin/brave-browser-stable", Some("brave-browser"))
+        };
+        let index = DesktopIndex::from_entries(vec![
+            hidden,
+            entry("brave-browser", "/usr/bin/brave-browser-stable", Some("brave-browser")),
+        ]);
+
+        assert_eq!(index.match_window("Brave-browser").unwrap().id, "brave-browser");
+    }
+
+    #[test]
+    fn a_running_window_lands_on_the_same_entry_however_the_files_were_read() {
+        let hidden = DesktopEntry {
+            no_display: true,
+            ..entry("com.brave.Browser", "/usr/bin/brave-browser-stable", Some("brave-browser"))
+        };
+        let visible = entry("brave-browser", "/usr/bin/brave-browser-stable", Some("brave-browser"));
+
+        let one_way = DesktopIndex::from_entries(vec![hidden.clone(), visible.clone()]);
+        let the_other = DesktopIndex::from_entries(vec![visible, hidden]);
+
+        assert_eq!(
+            one_way.match_window("Brave-browser").unwrap().id,
+            the_other.match_window("Brave-browser").unwrap().id
+        );
+    }
+
+    #[test]
+    fn two_equally_visible_claimants_are_settled_by_name_not_by_read_order() {
+        let index = DesktopIndex::from_entries(vec![
+            entry("zzz-editor", "/usr/bin/editor", Some("Editor")),
+            entry("aaa-editor", "/usr/bin/editor", Some("Editor")),
+        ]);
+
+        assert_eq!(index.match_window("Editor").unwrap().id, "aaa-editor");
     }
 
     #[test]
