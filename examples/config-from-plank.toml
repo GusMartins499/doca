@@ -1,3 +1,7 @@
+[appearance]
+theme = "native"
+icon_size = 48
+
 [[environments]]
 name = "Tudo"
 pinned = [

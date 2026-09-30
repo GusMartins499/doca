@@ -42,6 +42,12 @@ pub struct WidgetState {
 
 pub const NO_PROGRESS: f64 = -1.0;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct Appearance {
+    pub theme: String,
+    pub icon_size: i32,
+}
+
 #[zbus::proxy(
     interface = "dev.oprimo.PrimoDock1",
     default_service = "dev.oprimo.PrimoDock",
@@ -52,6 +58,8 @@ pub trait PrimoDock {
     fn current_environment(&self) -> zbus::Result<String>;
     fn set_environment(&self, name: &str) -> zbus::Result<()>;
     fn cycle_environment(&self) -> zbus::Result<String>;
+
+    fn appearance(&self) -> zbus::Result<Appearance>;
 
     fn list_widgets(&self) -> zbus::Result<Vec<WidgetState>>;
     fn invoke_widget(&self, id: &str, action: &str) -> zbus::Result<()>;

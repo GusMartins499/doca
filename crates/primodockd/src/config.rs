@@ -4,6 +4,43 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ENVIRONMENT: &str = "Default";
+pub const DEFAULT_THEME: &str = "native";
+pub const MIN_ICON_SIZE: i32 = 24;
+pub const MAX_ICON_SIZE: i32 = 96;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Appearance {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_icon_size")]
+    pub icon_size: i32,
+}
+
+fn default_theme() -> String {
+    DEFAULT_THEME.to_string()
+}
+
+fn default_icon_size() -> i32 {
+    48
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            icon_size: default_icon_size(),
+        }
+    }
+}
+
+impl Appearance {
+    pub fn sanitised(&self) -> Self {
+        Self {
+            theme: self.theme.trim().to_lowercase(),
+            icon_size: self.icon_size.clamp(MIN_ICON_SIZE, MAX_ICON_SIZE),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Environment {
@@ -28,6 +65,8 @@ impl Environment {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub appearance: Appearance,
     #[serde(default)]
     pub environments: Vec<Environment>,
     #[serde(default, skip_serializing)]
@@ -91,6 +130,10 @@ impl Config {
                     .find(|environment| environment.is_catch_all())
             })
             .unwrap_or_else(|| &self.environments[0])
+    }
+
+    pub fn appearance(&self) -> Appearance {
+        self.appearance.sanitised()
     }
 
     pub fn all_widgets(&self) -> Vec<String> {
@@ -166,8 +209,17 @@ mod tests {
 
         let written = toml::to_string_pretty(&migrated).unwrap();
 
-        let first_line = written.lines().find(|line| !line.trim().is_empty()).unwrap();
-        assert_eq!(first_line, "[[environments]]");
+        let before_any_table: Vec<&str> = written
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .collect();
+
+        assert!(
+            before_any_table
+                .iter()
+                .all(|line| !line.trim_start().starts_with("pinned")),
+            "a top-level pinned key survived migration: {before_any_table:?}"
+        );
         assert!(written.contains("pinned = [\"code\"]"));
     }
 
@@ -183,6 +235,43 @@ mod tests {
              workspaces = [2, 3]\n\
              pinned = [\"discord\"]\n",
         )
+    }
+
+    #[test]
+    fn a_config_with_no_appearance_block_still_has_a_theme() {
+        let appearance = config("[[environments]]\nname = \"A\"\n").appearance();
+
+        assert_eq!(appearance.theme, DEFAULT_THEME);
+        assert_eq!(appearance.icon_size, 48);
+    }
+
+    #[test]
+    fn a_theme_name_is_matched_regardless_of_how_it_was_typed() {
+        let appearance = config("[appearance]\ntheme = \"  MidNight \"\n").appearance();
+
+        assert_eq!(appearance.theme, "midnight");
+    }
+
+    #[test]
+    fn an_absurd_icon_size_is_brought_back_into_range() {
+        assert_eq!(
+            config("[appearance]\nicon_size = 4000\n").appearance().icon_size,
+            MAX_ICON_SIZE
+        );
+        assert_eq!(
+            config("[appearance]\nicon_size = 2\n").appearance().icon_size,
+            MIN_ICON_SIZE
+        );
+    }
+
+    #[test]
+    fn appearance_survives_a_round_trip_through_toml() {
+        let original = config("[appearance]\ntheme = \"paper\"\nicon_size = 40\n");
+
+        let written = toml::to_string_pretty(&original).unwrap();
+        let reloaded = toml::from_str::<Config>(&written).unwrap().migrated();
+
+        assert_eq!(reloaded.appearance(), original.appearance());
     }
 
     #[test]

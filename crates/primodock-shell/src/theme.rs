@@ -1,0 +1,159 @@
+pub const DEFAULT: &str = "native";
+
+const SHARED: &str = "
+    window { background: transparent; }
+    #item { border-radius: 12px; padding: 8px; }
+    #widget { border-radius: 12px; padding: 6px 8px; }
+    #environment { border-radius: 12px; padding: 0 10px; }
+    #widget-progress { min-height: 3px; }
+    #widget-progress progress { min-height: 3px; }
+    #indicator-idle { background: transparent; }
+    #indicator { border-radius: 2px; }
+    #indicator-active { border-radius: 2px; }
+";
+
+const NATIVE: &str = "
+    #bar {
+        background: rgba(28,28,30,0.82);
+        border-radius: 18px;
+        border: 1px solid rgba(255,255,255,0.08);
+        padding: 10px;
+    }
+    #item:hover { background: rgba(255,255,255,0.10); }
+    #widget:hover { background: rgba(255,255,255,0.10); }
+    #widget.active { background: rgba(76,141,255,0.18); }
+    #environment { background: rgba(255,255,255,0.08); }
+    #environment:hover { background: rgba(255,255,255,0.16); }
+    #environment-name { color: #e6e6e6; font-size: 12px; font-weight: 600; }
+    #separator { background: rgba(255,255,255,0.12); }
+    #indicator { background: rgba(255,255,255,0.45); }
+    #indicator-active { background: #4c8dff; }
+    #widget-label { color: #f2f2f2; font-size: 15px; font-weight: 600; }
+    #widget-detail { color: rgba(255,255,255,0.55); font-size: 10px; }
+    #widget-progress { background: rgba(255,255,255,0.14); }
+    #widget-progress progress { background: #4c8dff; }
+    #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
+";
+
+const MIDNIGHT: &str = "
+    #bar {
+        background: #0d0f14;
+        border-radius: 10px;
+        border: 1px solid #1f2430;
+        padding: 10px;
+    }
+    #item:hover { background: #1a1f2b; }
+    #widget:hover { background: #1a1f2b; }
+    #widget.active { background: #16233d; }
+    #environment { background: #151a24; }
+    #environment:hover { background: #1f2635; }
+    #environment-name { color: #c8d0e0; font-size: 12px; font-weight: 700; }
+    #separator { background: #232a38; }
+    #indicator { background: #4a5568; }
+    #indicator-active { background: #7aa2f7; }
+    #widget-label { color: #d8e0f0; font-size: 15px; font-weight: 700; }
+    #widget-detail { color: #6b7488; font-size: 10px; }
+    #widget-progress { background: #1f2430; }
+    #widget-progress progress { background: #7aa2f7; }
+    #empty { color: #6b7488; font-size: 13px; padding: 12px; }
+";
+
+const PAPER: &str = "
+    #bar {
+        background: rgba(250,248,243,0.95);
+        border-radius: 14px;
+        border: 1px solid rgba(0,0,0,0.10);
+        padding: 10px;
+    }
+    #item:hover { background: rgba(0,0,0,0.06); }
+    #widget:hover { background: rgba(0,0,0,0.06); }
+    #widget.active { background: rgba(198,124,78,0.16); }
+    #environment { background: rgba(0,0,0,0.05); }
+    #environment:hover { background: rgba(0,0,0,0.10); }
+    #environment-name { color: #33302b; font-size: 12px; font-weight: 600; }
+    #separator { background: rgba(0,0,0,0.12); }
+    #indicator { background: rgba(0,0,0,0.35); }
+    #indicator-active { background: #c67c4e; }
+    #widget-label { color: #26241f; font-size: 15px; font-weight: 600; }
+    #widget-detail { color: rgba(0,0,0,0.45); font-size: 10px; }
+    #widget-progress { background: rgba(0,0,0,0.10); }
+    #widget-progress progress { background: #c67c4e; }
+    #empty { color: rgba(0,0,0,0.45); font-size: 13px; padding: 12px; }
+";
+
+pub fn names() -> [&'static str; 3] {
+    ["native", "midnight", "paper"]
+}
+
+pub fn exists(name: &str) -> bool {
+    names().contains(&name)
+}
+
+pub fn css(name: &str) -> String {
+    let body = match name {
+        "midnight" => MIDNIGHT,
+        "paper" => PAPER,
+        _ => NATIVE,
+    };
+    format!("{SHARED}{body}")
+}
+
+pub fn resolve(requested: &str) -> &'static str {
+    names()
+        .into_iter()
+        .find(|name| *name == requested)
+        .unwrap_or(DEFAULT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_advertised_theme_can_be_resolved() {
+        for name in names() {
+            assert_eq!(resolve(name), name);
+        }
+    }
+
+    #[test]
+    fn an_unknown_theme_falls_back_rather_than_leaving_the_bar_unstyled() {
+        assert_eq!(resolve("rocket"), DEFAULT);
+        assert_eq!(resolve(""), DEFAULT);
+    }
+
+    #[test]
+    fn every_theme_styles_every_part_the_bar_draws() {
+        let parts = [
+            "#bar",
+            "#item:hover",
+            "#separator",
+            "#indicator",
+            "#indicator-active",
+            "#environment-name",
+            "#widget-label",
+            "#widget-detail",
+            "#widget-progress",
+            "#empty",
+        ];
+
+        for name in names() {
+            let css = css(name);
+            for part in parts {
+                assert!(css.contains(part), "{name} leaves {part} unstyled");
+            }
+        }
+    }
+
+    #[test]
+    fn every_theme_carries_the_shared_rules_as_well_as_its_own() {
+        for name in names() {
+            assert!(css(name).contains("window { background: transparent; }"));
+        }
+    }
+
+    #[test]
+    fn the_fallback_theme_is_one_of_the_real_ones() {
+        assert!(exists(DEFAULT));
+    }
+}

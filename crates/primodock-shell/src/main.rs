@@ -1,5 +1,6 @@
 mod dock;
 mod strut;
+mod theme;
 mod widget_tile;
 
 use std::cell::RefCell;
@@ -12,44 +13,6 @@ use primodock_ipc::PrimoDockProxy;
 use tracing_subscriber::EnvFilter;
 
 use crate::strut::BottomStrut;
-
-const STYLE: &str = "
-    window { background: transparent; }
-    #bar {
-        background: rgba(28,28,30,0.82);
-        border-radius: 18px;
-        border: 1px solid rgba(255,255,255,0.08);
-        padding: 10px;
-    }
-    #item { border-radius: 12px; padding: 8px; }
-    #item:hover { background: rgba(255,255,255,0.10); }
-    #indicator-idle { background: transparent; }
-    #indicator { background: rgba(255,255,255,0.45); border-radius: 2px; }
-    #indicator-active { background: #4c8dff; border-radius: 2px; }
-    #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
-    #environment {
-        background: rgba(255,255,255,0.08);
-        border-radius: 12px;
-        padding: 0 10px;
-    }
-    #environment:hover { background: rgba(255,255,255,0.16); }
-    #environment-name {
-        color: #e6e6e6;
-        font-size: 12px;
-        font-weight: 600;
-    }
-    #separator { background: rgba(255,255,255,0.12); }
-    #widget { border-radius: 12px; padding: 6px 8px; }
-    #widget:hover { background: rgba(255,255,255,0.10); }
-    #widget.active { background: rgba(76,141,255,0.18); }
-    #widget-label { color: #f2f2f2; font-size: 15px; font-weight: 600; }
-    #widget-detail { color: rgba(255,255,255,0.55); font-size: 10px; }
-    #widget-progress {
-        min-height: 3px;
-        background: rgba(255,255,255,0.14);
-    }
-    #widget-progress progress { background: #4c8dff; min-height: 3px; }
-";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -82,7 +45,7 @@ fn main() -> Result<()> {
     }
 
     let css = gtk::CssProvider::new();
-    css.load_from_data(STYLE.as_bytes())?;
+    css.load_from_data(theme::css(theme::DEFAULT).as_bytes())?;
     gtk::StyleContext::add_provider_for_screen(
         &gtk::prelude::WidgetExt::screen(&window).unwrap(),
         &css,
@@ -96,7 +59,7 @@ fn main() -> Result<()> {
     window.show_all();
 
     glib::spawn_future_local(async move {
-        if let Err(e) = drive(window, items, screen).await {
+        if let Err(e) = drive(window, items, screen, css).await {
             tracing::error!("daemon link failed: {e:#}");
         }
     });
@@ -107,13 +70,20 @@ fn main() -> Result<()> {
 
 type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
 
-async fn drive(window: gtk::Window, items: gtk::Box, screen: gdk::Rectangle) -> Result<()> {
+async fn drive(
+    window: gtk::Window,
+    items: gtk::Box,
+    screen: gdk::Rectangle,
+    css: gtk::CssProvider,
+) -> Result<()> {
     let connection = zbus::Connection::session().await?;
     let proxy: Rc<PrimoDockProxy<'static>> = Rc::new(PrimoDockProxy::new(&connection).await?);
     let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
+    let applied: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     tracing::info!("connected to primodockd");
 
-    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone()).await;
+    let style = Style { css, applied };
+    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
@@ -136,9 +106,33 @@ async fn drive(window: gtk::Window, items: gtk::Box, screen: gdk::Rectangle) -> 
             }
             complete => break,
         }
-        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone()).await;
+        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style).await;
     }
     Ok(())
+}
+
+struct Style {
+    css: gtk::CssProvider,
+    applied: Rc<RefCell<String>>,
+}
+
+impl Style {
+    fn apply(&self, requested: &str) {
+        let resolved = theme::resolve(requested);
+        if *self.applied.borrow() == resolved {
+            return;
+        }
+        match self.css.load_from_data(theme::css(resolved).as_bytes()) {
+            Ok(()) => {
+                if requested != resolved {
+                    tracing::warn!("unknown theme {requested}, using {resolved}");
+                }
+                tracing::info!(theme = resolved, "theme applied");
+                *self.applied.borrow_mut() = resolved.to_string();
+            }
+            Err(e) => tracing::error!("theme {resolved} failed to load: {e}"),
+        }
+    }
 }
 
 async fn rebuild(
@@ -147,7 +141,17 @@ async fn rebuild(
     screen: &gdk::Rectangle,
     proxy: Rc<PrimoDockProxy<'static>>,
     tiles: Tiles,
+    style: &Style,
 ) {
+    let appearance = proxy.appearance().await.ok();
+    if let Some(appearance) = &appearance {
+        style.apply(&appearance.theme);
+    }
+    let preferred_icon = appearance
+        .as_ref()
+        .map(|appearance| appearance.icon_size)
+        .unwrap_or(dock::ICON_SIZE);
+
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
     let environments = proxy.list_environments().await.unwrap_or_default();
@@ -174,7 +178,13 @@ async fn rebuild(
         let icon_size = dock::icon_size_for(
             entries.len() as i32,
             widgets.len() as i32,
-            screen.width() - if dock::switcher_is_useful(environments.len()) { 0 } else { dock::SWITCHER_WIDTH },
+            screen.width()
+                - if dock::switcher_is_useful(environments.len()) {
+                    0
+                } else {
+                    dock::SWITCHER_WIDTH
+                },
+            preferred_icon,
         );
         for entry in &entries {
             items.add(&dock::item_button(entry, icon_size, proxy.clone()));

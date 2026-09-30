@@ -26,9 +26,15 @@ pub fn divider() -> gtk::Separator {
     separator
 }
 
-pub fn icon_size_for(item_count: i32, widget_count: i32, screen_width: i32) -> i32 {
+pub fn icon_size_for(
+    item_count: i32,
+    widget_count: i32,
+    screen_width: i32,
+    preferred: i32,
+) -> i32 {
+    let preferred = preferred.clamp(MIN_ICON_SIZE, ICON_SIZE);
     if item_count <= 0 {
-        return ICON_SIZE;
+        return preferred;
     }
     let reserved = SWITCHER_WIDTH
         + ITEM_SPACING * 2
@@ -37,7 +43,7 @@ pub fn icon_size_for(item_count: i32, widget_count: i32, screen_width: i32) -> i
         + SCREEN_MARGIN * 2;
     let available = (screen_width - reserved).max(0);
     let per_item = available / item_count - ITEM_SPACING - ITEM_PADDING * 2;
-    per_item.clamp(MIN_ICON_SIZE, ICON_SIZE)
+    per_item.clamp(MIN_ICON_SIZE, preferred)
 }
 
 pub fn clamp_to_screen(natural: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
@@ -297,6 +303,18 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_preferred_size_is_honoured_even_when_there_is_room_to_spare() {
+        assert_eq!(icon_size_for(4, 0, SCREEN.0, 32), 32);
+    }
+
+    #[test]
+    fn a_preferred_size_never_overrides_the_need_to_fit() {
+        let crowded = icon_size_for(40, 4, SCREEN.0, ICON_SIZE);
+
+        assert!(crowded < ICON_SIZE);
+    }
+
+    #[test]
     fn a_single_environment_needs_no_switcher() {
         assert!(!switcher_is_useful(0));
         assert!(!switcher_is_useful(1));
@@ -309,12 +327,12 @@ mod tests {
 
     #[test]
     fn a_handful_of_apps_keeps_icons_at_full_size() {
-        assert_eq!(icon_size_for(6, 2, SCREEN.0), ICON_SIZE);
+        assert_eq!(icon_size_for(6, 2, SCREEN.0, ICON_SIZE), ICON_SIZE);
     }
 
     #[test]
     fn twenty_eight_pinned_apps_shrink_the_icons_instead_of_overflowing() {
-        let size = icon_size_for(28, 4, SCREEN.0);
+        let size = icon_size_for(28, 4, SCREEN.0, ICON_SIZE);
 
         assert!(size < ICON_SIZE);
         assert!(size >= MIN_ICON_SIZE);
@@ -323,7 +341,7 @@ mod tests {
     #[test]
     fn the_shrunken_icons_actually_fit_the_screen_they_were_sized_for() {
         for count in 1..60 {
-            let size = icon_size_for(count, 4, SCREEN.0);
+            let size = icon_size_for(count, 4, SCREEN.0, ICON_SIZE);
             let reserved = SWITCHER_WIDTH
                 + ITEM_SPACING * 2
                 + 4 * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
@@ -343,12 +361,12 @@ mod tests {
 
     #[test]
     fn icons_never_shrink_below_the_point_of_being_recognisable() {
-        assert_eq!(icon_size_for(500, 4, SCREEN.0), MIN_ICON_SIZE);
+        assert_eq!(icon_size_for(500, 4, SCREEN.0, ICON_SIZE), MIN_ICON_SIZE);
     }
 
     #[test]
     fn an_empty_dock_does_not_divide_by_zero_sizing_its_icons() {
-        assert_eq!(icon_size_for(0, 0, SCREEN.0), ICON_SIZE);
+        assert_eq!(icon_size_for(0, 0, SCREEN.0, ICON_SIZE), ICON_SIZE);
     }
 
     #[test]

@@ -7,6 +7,10 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
+**Phase 4 — themes.** Three of them, chosen in config, plus a configurable
+icon size. Three, not eight: the shape of the theme system is what matters,
+and more of them is a morning's work once it holds.
+
 **Phase 3 — widgets.** Live tiles in the bar: clock, battery, CPU, music over
 MPRIS, and a pomodoro. Each widget declares its own poll interval, and the
 scheduler only announces a widget when its rendered state actually changed —
@@ -121,6 +125,10 @@ DISPLAY=:9 cargo test -- --ignored
 `$XDG_CONFIG_HOME/primodock/config.toml`:
 
 ```toml
+[appearance]
+theme = "native"
+icon_size = 48
+
 [[environments]]
 name = "Work"
 workspaces = [0, 1]
@@ -133,6 +141,18 @@ workspaces = [2, 3]
 pinned = ["discord", "spotify"]
 widgets = ["clock", "music"]
 ```
+
+## Themes
+
+| `theme` | |
+|---|---|
+| `native` | translucent dark glass, blue accents. The default. |
+| `midnight` | solid near-black, navy tint |
+| `paper` | light cream, terracotta accents |
+
+An unknown name falls back to `native` with a warning rather than leaving the
+bar unstyled. `icon_size` is clamped to 24–96, and shrinks further on its own
+when there are more apps than fit.
 
 ## Widgets
 
