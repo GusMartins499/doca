@@ -49,6 +49,13 @@ pub struct Appearance {
     pub magnification: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FolderEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
 #[zbus::proxy(
     interface = "dev.oprimo.PrimoDock1",
     default_service = "dev.oprimo.PrimoDock",
@@ -69,6 +76,9 @@ pub trait PrimoDock {
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
     fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
+    fn list_folder(&self, id: &str) -> zbus::Result<Vec<FolderEntry>>;
+    fn open_path(&self, path: &str) -> zbus::Result<()>;
+    fn item_windows(&self, id: &str) -> zbus::Result<Vec<WindowInfo>>;
     fn pin_item(&self, id: &str) -> zbus::Result<()>;
     fn unpin_item(&self, id: &str) -> zbus::Result<()>;
     fn close_window(&self, id: u32) -> zbus::Result<()>;

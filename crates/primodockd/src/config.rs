@@ -71,6 +71,8 @@ pub struct Environment {
     pub pinned: Vec<String>,
     #[serde(default)]
     pub widgets: Vec<String>,
+    #[serde(default)]
+    pub folders: Vec<String>,
 }
 
 impl Environment {
@@ -123,6 +125,7 @@ impl Config {
                 workspaces: Vec::new(),
                 pinned: std::mem::take(&mut self.pinned),
                 widgets: Vec::new(),
+                folders: Vec::new(),
             });
         }
         self.pinned.clear();

@@ -1,5 +1,6 @@
 mod config;
 mod desktop;
+mod folder;
 mod model;
 mod service;
 mod trash;

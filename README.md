@@ -7,9 +7,9 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
-**Phase 5 — parity, partly.** Magnification on hover, a trash item, and
-dropping files onto an app to open them with it. Stacks, window previews and
-the remaining two dozen widgets are not here.
+**Phase 5 — parity.** Magnification on hover, a trash item, files dropped onto
+an app, folders that open as a grid, and a window list on right click. Thumbnail
+previews and the remaining two dozen widgets are not here.
 
 **Phase 4 — themes.** Three of them, chosen in config, plus a configurable
 icon size. Three, not eight: the shape of the theme system is what matters,
@@ -140,6 +140,7 @@ name = "Work"
 workspaces = [0, 1]
 pinned = ["code", "dev.warp.Warp"]
 widgets = ["clock", "pomodoro", "cpu", "battery"]
+folders = ["~/Downloads"]
 
 [[environments]]
 name = "Personal"
@@ -159,6 +160,24 @@ widgets = ["clock", "music"]
 An unknown name falls back to `native` with a warning rather than leaving the
 bar unstyled. `icon_size` is clamped to 24–96, and shrinks further on its own
 when there are more apps than fit.
+
+## Stacks
+
+A path in `folders` becomes a dock item that opens as a grid of its contents,
+directories first, then names case-insensitively, capped at 60 entries so a
+crowded Downloads folder does not become an endless menu. Hidden entries are
+left out. Each entry opens with `xdg-open`; file icons come from the content
+type, not the extension.
+
+## Window lists
+
+Right clicking an app with more than one window lists them by title, and
+clicking a title raises that window. Titles are elided by character count, not
+bytes, so accented titles are cut where you would expect.
+
+Thumbnail previews are not implemented: on X11 they need composite redirect
+and per-window pixmap capture, which is a great deal of machinery for a
+hover effect.
 
 ## Magnification
 

@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex};
 
-use primodock_ipc::{Appearance, DockItem, EnvironmentInfo, WidgetState, WindowInfo};
+use primodock_ipc::{
+    Appearance, DockItem, EnvironmentInfo, FolderEntry, WidgetState, WindowInfo,
+};
 use zbus::object_server::SignalEmitter;
 
 use crate::config::Config;
 use crate::desktop::DesktopIndex;
+use crate::folder;
 use crate::model;
 use crate::trash;
 use crate::widgets::WidgetHandle;
@@ -40,8 +43,12 @@ impl DockService {
             let environment = config.environment_for(workspace);
             (environment.pinned.clone(), environment.clone())
         })?;
+        let environment = environment;
         let visible = model::windows_in(&environment, &windows);
         let mut items = model::build(&self.index, &pinned, &visible);
+        for path in &environment.folders {
+            items.push(folder::item(&folder::expand(path)));
+        }
         if self.with_config(|config| config.appearance().show_trash)? {
             items.push(trash::item(trash::count_in(&trash::trash_files_dir())));
         }
@@ -56,7 +63,7 @@ impl DockService {
         config.save().map_err(failed)
     }
 
-    fn open_path(&self, path: &str) -> zbus::fdo::Result<()> {
+    fn launch_path(&self, path: &str) -> zbus::fdo::Result<()> {
         std::process::Command::new("xdg-open")
             .arg(path)
             .stdin(std::process::Stdio::null())
@@ -92,7 +99,10 @@ impl DockService {
 
     async fn activate_item(&self, id: &str) -> zbus::fdo::Result<()> {
         if id == trash::ID {
-            return self.open_path(&trash::trash_files_dir().to_string_lossy());
+            return self.launch_path(&trash::trash_files_dir().to_string_lossy());
+        }
+        if let Some(path) = folder::path_of(id) {
+            return self.launch_path(&path.to_string_lossy());
         }
         let workspace = self.workspace().await?;
         let windows = self.x11.list_windows().await.map_err(failed)?;
@@ -173,6 +183,27 @@ impl DockService {
 
     async fn invoke_widget(&self, id: &str, action: &str) -> zbus::fdo::Result<()> {
         self.widgets.invoke(id, action).await.map_err(failed)
+    }
+
+    async fn list_folder(&self, id: &str) -> zbus::fdo::Result<Vec<FolderEntry>> {
+        let path = folder::path_of(id)
+            .ok_or_else(|| zbus::fdo::Error::Failed(format!("{id} is not a folder")))?;
+        Ok(folder::list(&path))
+    }
+
+    async fn open_path(&self, path: &str) -> zbus::fdo::Result<()> {
+        self.launch_path(path)
+    }
+
+    async fn item_windows(&self, id: &str) -> zbus::fdo::Result<Vec<WindowInfo>> {
+        let workspace = self.workspace().await?;
+        let windows = self.x11.list_windows().await.map_err(failed)?;
+        let environment = self.with_config(|config| config.environment_for(workspace).clone())?;
+        let visible = model::windows_in(&environment, &windows);
+        Ok(model::windows_of(&self.index, id, &visible)
+            .into_iter()
+            .cloned()
+            .collect())
     }
 
     async fn list_environments(&self) -> zbus::fdo::Result<Vec<EnvironmentInfo>> {

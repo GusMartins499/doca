@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use primodock_ipc::{DockItem, PrimoDockProxy};
+use primodock_ipc::{DockItem, PrimoDockProxy, WindowInfo};
 
 pub const ICON_SIZE: i32 = 48;
 pub const ITEM_SPACING: i32 = 6;
@@ -118,8 +118,42 @@ fn icon_widget(name: &str, size: i32) -> gtk::Image {
     image
 }
 
-fn context_menu(item: &DockItem, proxy: Rc<PrimoDockProxy<'static>>) -> gtk::Menu {
+fn elide(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    format!("{kept}\u{2026}")
+}
+
+fn context_menu(
+    item: &DockItem,
+    windows: &[WindowInfo],
+    proxy: Rc<PrimoDockProxy<'static>>,
+) -> gtk::Menu {
     let menu = gtk::Menu::new();
+
+    if windows.len() > 1 {
+        for window in windows {
+            let title = if window.title.is_empty() {
+                item.name.clone()
+            } else {
+                window.title.clone()
+            };
+            let entry = gtk::MenuItem::with_label(&elide(&title, 48));
+            entry.set_tooltip_text(Some(&title));
+            let id = window.id;
+            let proxy = proxy.clone();
+            entry.connect_activate(move |_| {
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    let _ = proxy.activate_window(id).await;
+                });
+            });
+            menu.append(&entry);
+        }
+        menu.append(&gtk::SeparatorMenuItem::new());
+    }
 
     let open = gtk::MenuItem::with_label("New window");
     let id = item.id.clone();
@@ -217,6 +251,16 @@ pub fn item_button(
     let proxy_for_drop = proxy.clone();
     button.connect_button_press_event(move |_, event| {
         match event.button() {
+            1 if crate::stack::is_folder(&id) => {
+                let id = id.clone();
+                let proxy = proxy.clone();
+                let trigger = event.clone();
+                glib::spawn_future_local(async move {
+                    let entries = proxy.list_folder(&id).await.unwrap_or_default();
+                    crate::stack::menu(&entries, proxy.clone())
+                        .popup_at_pointer(Some(&trigger));
+                });
+            }
             1 => {
                 let id = id.clone();
                 let proxy = proxy.clone();
@@ -225,8 +269,14 @@ pub fn item_button(
                 });
             }
             3 => {
-                let menu = context_menu(&menu_item, menu_proxy.clone());
-                menu.popup_at_pointer(Some(event));
+                let item = menu_item.clone();
+                let proxy = menu_proxy.clone();
+                let trigger = event.clone();
+                glib::spawn_future_local(async move {
+                    let windows = proxy.item_windows(&item.id).await.unwrap_or_default();
+                    context_menu(&item, &windows, proxy.clone())
+                        .popup_at_pointer(Some(&trigger));
+                });
             }
             _ => {}
         }
@@ -291,6 +341,28 @@ mod tests {
             windows,
             active,
         }
+    }
+
+    #[test]
+    fn a_title_short_enough_to_fit_is_left_exactly_as_it_is() {
+        assert_eq!(elide("Untitled Document 1", 48), "Untitled Document 1");
+    }
+
+    #[test]
+    fn a_long_window_title_is_cut_rather_than_stretching_the_menu() {
+        let long = "a".repeat(120);
+
+        let short = elide(&long, 48);
+
+        assert_eq!(short.chars().count(), 48);
+        assert!(short.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn eliding_counts_characters_not_bytes() {
+        let accented = "ação ".repeat(20);
+
+        assert_eq!(elide(&accented, 10).chars().count(), 10);
     }
 
     #[test]
