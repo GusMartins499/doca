@@ -247,19 +247,28 @@ impl Config {
             .unwrap_or_else(|| &self.environments[0])
     }
 
-    /// The environment a cycle key should land on, with the workspace to switch
-    /// to in order to get there.
+    /// The environment on screen: the one chosen by hand, if it still exists,
+    /// and otherwise the one this workspace calls for.
     ///
-    /// Catch-all environments are never a destination: they exist to cover the
-    /// workspaces nobody claimed, and have no workspace of their own to switch
-    /// to. Neither is the environment you are already in, so a setup with one
-    /// real environment has nowhere to cycle and says so.
-    pub fn next_environment(&self, workspace: i32) -> Option<(String, i32)> {
-        let current = &self.environment_for(workspace).name;
+    /// A dock is not a workspace. Environments follow the workspace by default
+    /// — that is what `workspaces` is for — but a key can put any of them on
+    /// screen without moving anything, and that choice is what `chosen` holds.
+    pub fn environment_shown(&self, chosen: Option<&str>, workspace: i32) -> &Environment {
+        chosen
+            .and_then(|name| self.environment_named(name))
+            .unwrap_or_else(|| self.environment_for(workspace))
+    }
+
+    /// The environment a cycle key should land on, by name.
+    ///
+    /// Plain config order, wrapping round, catch-alls included: switching by
+    /// hand needs no workspace to switch to, so an environment without one is
+    /// as good a destination as any. One environment has nowhere to go.
+    pub fn next_environment_after(&self, current: &str) -> Option<&Environment> {
         let position = self
             .environments
             .iter()
-            .position(|environment| &environment.name == current)
+            .position(|environment| environment.name == current)
             .unwrap_or(0);
 
         self.environments
@@ -267,13 +276,17 @@ impl Config {
             .cycle()
             .skip(position + 1)
             .take(self.environments.len())
-            .filter(|environment| !environment.is_catch_all() && &environment.name != current)
-            .find_map(|environment| {
-                environment
-                    .workspaces
-                    .first()
-                    .map(|target| (environment.name.clone(), *target))
-            })
+            .find(|environment| environment.name != current)
+    }
+
+    /// Whether some environment asked for this workspace by name.
+    ///
+    /// A workspace only a catch-all covers was never really claimed, so moving
+    /// onto one is no reason to drop a dock the user chose by hand.
+    pub fn workspace_is_claimed(&self, workspace: i32) -> bool {
+        self.environments
+            .iter()
+            .any(|environment| environment.claims(workspace))
     }
 
     pub fn appearance(&self) -> Appearance {
@@ -298,18 +311,16 @@ impl Config {
             .find(|environment| environment.name == name)
     }
 
-    pub fn pin(&mut self, workspace: i32, id: &str) {
-        let name = self.environment_for(workspace).name.clone();
-        if let Some(environment) = self.environment_mut(&name) {
+    pub fn pin(&mut self, name: &str, id: &str) {
+        if let Some(environment) = self.environment_mut(name) {
             if !environment.pinned.iter().any(|existing| existing == id) {
                 environment.pinned.push(id.to_string());
             }
         }
     }
 
-    pub fn unpin(&mut self, workspace: i32, id: &str) {
-        let name = self.environment_for(workspace).name.clone();
-        if let Some(environment) = self.environment_mut(&name) {
+    pub fn unpin(&mut self, name: &str, id: &str) {
+        if let Some(environment) = self.environment_mut(name) {
             environment.pinned.retain(|existing| existing != id);
         }
     }
@@ -344,12 +355,12 @@ mod tests {
     "#;
 
     #[test]
-    fn cycling_lands_on_the_next_environment_and_the_workspace_that_reaches_it() {
+    fn cycling_lands_on_the_next_environment_in_config_order() {
         let config = config(THREE_ENVIRONMENTS);
 
         assert_eq!(
-            config.next_environment(0),
-            Some(("Personal".to_string(), 2))
+            config.next_environment_after("Work").map(|e| e.name.as_str()),
+            Some("Personal")
         );
     }
 
@@ -357,52 +368,19 @@ mod tests {
     fn cycling_past_the_last_environment_comes_back_to_the_first() {
         let config = config(THREE_ENVIRONMENTS);
 
-        assert_eq!(config.next_environment(3), Some(("Work".to_string(), 0)));
+        assert_eq!(
+            config.next_environment_after("Music").map(|e| e.name.as_str()),
+            Some("Work")
+        );
     }
 
     #[test]
-    fn cycling_skips_the_catch_all_because_it_owns_no_workspace_to_switch_to() {
+    fn a_dock_with_no_workspace_of_its_own_is_still_somewhere_to_cycle_to() {
         let config = config(
             r#"
             [[environments]]
             name = "Work"
             workspaces = [0]
-
-            [[environments]]
-            name = "Everything else"
-
-            [[environments]]
-            name = "Music"
-            workspaces = [3]
-        "#,
-        );
-
-        assert_eq!(config.next_environment(0), Some(("Music".to_string(), 3)));
-    }
-
-    #[test]
-    fn cycling_out_of_the_catch_all_reaches_a_real_environment() {
-        let config = config(
-            r#"
-            [[environments]]
-            name = "Everything else"
-
-            [[environments]]
-            name = "Work"
-            workspaces = [0]
-        "#,
-        );
-
-        assert_eq!(config.next_environment(7), Some(("Work".to_string(), 0)));
-    }
-
-    #[test]
-    fn one_real_environment_has_nowhere_to_cycle_to() {
-        let config = config(
-            r#"
-            [[environments]]
-            name = "Work"
-            workspaces = [0, 1]
 
             [[environments]]
             name = "Everything else"
@@ -410,17 +388,95 @@ mod tests {
         );
 
         assert_eq!(
-            config.next_environment(0),
-            None,
-            "cycling back into the environment you are already in would move the workspace for nothing"
+            config.next_environment_after("Work").map(|e| e.name.as_str()),
+            Some("Everything else"),
+            "switching by hand needs no workspace to switch to"
         );
+    }
+
+    #[test]
+    fn two_docks_sharing_one_workspace_can_still_be_cycled_between() {
+        let config = config(
+            r#"
+            [[environments]]
+            name = "Tudo"
+
+            [[environments]]
+            name = "Sistema"
+        "#,
+        );
+
+        assert_eq!(
+            config.next_environment_after("Tudo").map(|e| e.name.as_str()),
+            Some("Sistema")
+        );
+        assert_eq!(
+            config.next_environment_after("Sistema").map(|e| e.name.as_str()),
+            Some("Tudo")
+        );
+    }
+
+    #[test]
+    fn one_environment_has_nowhere_to_cycle_to() {
+        let config = config("[[environments]]\nname = \"Work\"\nworkspaces = [0, 1]\n");
+
+        assert_eq!(config.next_environment_after("Work").map(|e| e.name.clone()), None);
     }
 
     #[test]
     fn a_migrated_phase_one_config_has_nowhere_to_cycle_to() {
         let config = config("pinned = [\"code\"]");
+        let only = config.environments[0].name.clone();
 
-        assert_eq!(config.next_environment(0), None);
+        assert!(config.next_environment_after(&only).is_none());
+    }
+
+    #[test]
+    fn a_dock_chosen_by_hand_is_shown_whatever_the_workspace_says() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert_eq!(config.environment_shown(Some("Music"), 0).name, "Music");
+    }
+
+    #[test]
+    fn with_nothing_chosen_the_workspace_decides_as_it_always_did() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert_eq!(config.environment_shown(None, 3).name, "Music");
+    }
+
+    #[test]
+    fn a_chosen_dock_that_was_renamed_away_falls_back_to_the_workspace() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert_eq!(config.environment_shown(Some("Deleted"), 2).name, "Personal");
+    }
+
+    #[test]
+    fn a_workspace_an_environment_asked_for_is_claimed() {
+        let config = config(THREE_ENVIRONMENTS);
+
+        assert!(config.workspace_is_claimed(2));
+    }
+
+    #[test]
+    fn a_workspace_only_a_catch_all_covers_was_never_claimed() {
+        let config = config(
+            r#"
+            [[environments]]
+            name = "Work"
+            workspaces = [0]
+
+            [[environments]]
+            name = "Everything else"
+        "#,
+        );
+
+        assert!(config.workspace_is_claimed(0));
+        assert!(
+            !config.workspace_is_claimed(5),
+            "a catch-all covers a workspace without asking for it"
+        );
     }
 
     #[test]
@@ -595,10 +651,10 @@ mod tests {
     }
 
     #[test]
-    fn pinning_lands_in_the_environment_that_owns_the_workspace() {
+    fn pinning_lands_in_the_dock_that_is_on_screen() {
         let mut config = two_environments();
 
-        config.pin(2, "spotify");
+        config.pin("Personal", "spotify");
 
         assert_eq!(
             config.environment_named("Personal").unwrap().pinned,
@@ -608,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn unpinning_only_touches_the_environment_that_owns_the_workspace() {
+    fn unpinning_only_touches_the_dock_that_is_on_screen() {
         let mut config = config(
             "[[environments]]\n\
              name = \"Work\"\n\
@@ -621,7 +677,7 @@ mod tests {
              pinned = [\"code\"]\n",
         );
 
-        config.unpin(0, "code");
+        config.unpin("Work", "code");
 
         assert!(config.environment_named("Work").unwrap().pinned.is_empty());
         assert_eq!(config.environment_named("Personal").unwrap().pinned, vec!["code"]);
@@ -631,7 +687,7 @@ mod tests {
     fn pinning_the_same_app_twice_in_one_environment_keeps_one_entry() {
         let mut config = two_environments();
 
-        config.pin(0, "code");
+        config.pin("Work", "code");
 
         assert_eq!(config.environment_named("Work").unwrap().pinned, vec!["code"]);
     }

@@ -17,7 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::desktop::DesktopIndex;
-use crate::service::DockService;
+use crate::service::{Chosen, DockService};
 use crate::x11::{spawn_worker, watch_root, RootChange, X11Backend};
 
 #[tokio::main]
@@ -52,6 +52,8 @@ async fn main() -> Result<()> {
         crate::widgets::spawn_hub(crate::widgets::build(&widget_ids, &widget_settings))?;
     tracing::info!(widgets = widget_ids.len(), "widgets started");
 
+    let chosen = Chosen::default();
+
     let connection = zbus::connection::Builder::session()
         .context("cannot reach the session bus")?
         .name(BUS_NAME)
@@ -63,6 +65,7 @@ async fn main() -> Result<()> {
                 widgets: widgets.clone(),
                 index: index.clone(),
                 config: config.clone(),
+                chosen: chosen.clone(),
             },
         )?
         .build()
@@ -89,13 +92,25 @@ async fn main() -> Result<()> {
                 }
                 if announce.workspace {
                     let index = x11.current_workspace().await.unwrap_or(0);
+                    // Moving onto a workspace an environment asked for is a
+                    // choice of its own, and it replaces the one a key made.
+                    // A workspace only a catch-all covers asks for nothing, so
+                    // a dock chosen by hand stays on screen across it.
+                    if config
+                        .lock()
+                        .map(|c| c.workspace_is_claimed(index))
+                        .unwrap_or(false)
+                    {
+                        chosen.clear();
+                    }
                     DockService::workspace_changed(emitter.signal_emitter(), index).await?;
                 }
                 if announce.environment {
                     let index = x11.current_workspace().await.unwrap_or(0);
+                    let picked = chosen.get();
                     let name = config
                         .lock()
-                        .map(|c| c.environment_for(index).name.clone())
+                        .map(|c| c.environment_shown(picked.as_deref(), index).name.clone())
                         .unwrap_or_default();
                     DockService::environment_changed(emitter.signal_emitter(), &name).await?;
                 }
