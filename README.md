@@ -235,9 +235,11 @@ load into a single catch-all environment.
 
 ## Switching environments
 
-Click the chip on the left of the bar, or bind a key to the D-Bus method. The
-dock does not grab keys itself: on Linux the desktop owns the keyboard, and
-the app exposes the action.
+The environment follows the workspace, so your own workspace shortcuts already
+switch it and the bar carries no control for it. To switch environment without
+moving workspace, bind a key to the D-Bus method. The dock does not grab keys
+itself: on Linux the desktop owns the keyboard, and the app exposes the
+action.
 
 ```bash
 KEY=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/primodock/

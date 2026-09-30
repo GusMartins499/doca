@@ -8,15 +8,10 @@ pub const ITEM_SPACING: i32 = 6;
 pub const ITEM_PADDING: i32 = 8;
 pub const BAR_PADDING: i32 = 10;
 
-pub const SWITCHER_WIDTH: i32 = 96;
 pub const MIN_BAR_HEIGHT: i32 = ICON_SIZE + ITEM_PADDING * 2 + BAR_PADDING * 2;
 pub const MAX_BAR_HEIGHT: i32 = MIN_BAR_HEIGHT * 2;
 pub const SCREEN_MARGIN: i32 = 8;
 pub const MIN_ICON_SIZE: i32 = 24;
-
-pub fn switcher_is_useful(environment_count: usize) -> bool {
-    environment_count > 1
-}
 
 pub fn divider() -> gtk::Separator {
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
@@ -36,8 +31,7 @@ pub fn icon_size_for(
     if item_count <= 0 {
         return preferred;
     }
-    let reserved = SWITCHER_WIDTH
-        + ITEM_SPACING * 2
+    let reserved = ITEM_SPACING * 2
         + widget_count * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
         + BAR_PADDING * 2
         + SCREEN_MARGIN * 2;
@@ -47,10 +41,10 @@ pub fn icon_size_for(
 }
 
 pub fn clamp_to_screen(natural: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
-    let widest = (screen.0 - SCREEN_MARGIN * 2).max(SWITCHER_WIDTH);
+    let widest = (screen.0 - SCREEN_MARGIN * 2).max(MIN_BAR_HEIGHT);
     let tallest = MAX_BAR_HEIGHT.min((screen.1 / 3).max(MIN_BAR_HEIGHT));
     (
-        natural.0.clamp(SWITCHER_WIDTH, widest),
+        natural.0.clamp(MIN_BAR_HEIGHT, widest),
         natural.1.clamp(MIN_BAR_HEIGHT, tallest),
     )
 }
@@ -59,34 +53,6 @@ pub fn natural_size(bar: &gtk::Box) -> (i32, i32) {
     let (_, width) = bar.preferred_width();
     let (_, height) = bar.preferred_height();
     (width, height)
-}
-
-pub fn environment_switcher(
-    name: &str,
-    proxy: Rc<PrimoDockProxy<'static>>,
-) -> gtk::Widget {
-    let label = gtk::Label::new(Some(name));
-    label.set_widget_name("environment-name");
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    label.set_max_width_chars(10);
-
-    let chip = gtk::EventBox::new();
-    chip.set_widget_name("environment");
-    chip.set_tooltip_text(Some("Click to switch environment"));
-    chip.set_size_request(SWITCHER_WIDTH, ICON_SIZE);
-    chip.add(&label);
-
-    chip.connect_button_press_event(move |_, _| {
-        let proxy = proxy.clone();
-        glib::spawn_future_local(async move {
-            if let Err(e) = proxy.cycle_environment().await {
-                tracing::warn!("cannot cycle environment: {e}");
-            }
-        });
-        glib::Propagation::Stop
-    });
-
-    chip.upcast()
 }
 
 pub fn scaled_from_file(path: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
@@ -435,17 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn a_single_environment_needs_no_switcher() {
-        assert!(!switcher_is_useful(0));
-        assert!(!switcher_is_useful(1));
-    }
-
-    #[test]
-    fn two_environments_are_worth_a_switcher() {
-        assert!(switcher_is_useful(2));
-    }
-
-    #[test]
     fn a_handful_of_apps_keeps_icons_at_full_size() {
         assert_eq!(icon_size_for(6, 2, SCREEN.0, ICON_SIZE), ICON_SIZE);
     }
@@ -462,8 +417,7 @@ mod tests {
     fn the_shrunken_icons_actually_fit_the_screen_they_were_sized_for() {
         for count in 1..60 {
             let size = icon_size_for(count, 4, SCREEN.0, ICON_SIZE);
-            let reserved = SWITCHER_WIDTH
-                + ITEM_SPACING * 2
+            let reserved = ITEM_SPACING * 2
                 + 4 * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
                 + BAR_PADDING * 2
                 + SCREEN_MARGIN * 2;
@@ -510,7 +464,7 @@ mod tests {
     #[test]
     fn twenty_eight_pinned_apps_cannot_widen_the_bar_past_the_screen() {
         let slot = ICON_SIZE + ITEM_PADDING * 2 + ITEM_SPACING;
-        let twenty_eight = (28 * slot + SWITCHER_WIDTH, MIN_BAR_HEIGHT);
+        let twenty_eight = (28 * slot, MIN_BAR_HEIGHT);
 
         let (width, _) = clamp_to_screen(twenty_eight, SCREEN);
 
@@ -521,7 +475,7 @@ mod tests {
     fn an_empty_bar_is_never_clamped_to_nothing() {
         let (width, height) = clamp_to_screen((0, 0), SCREEN);
 
-        assert_eq!(width, SWITCHER_WIDTH);
+        assert_eq!(width, MIN_BAR_HEIGHT);
         assert_eq!(height, MIN_BAR_HEIGHT);
     }
 

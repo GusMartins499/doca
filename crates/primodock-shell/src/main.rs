@@ -232,20 +232,8 @@ async fn rebuild(
 
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
-    let environments = proxy.list_environments().await.unwrap_or_default();
-
     for child in items.children() {
         items.remove(&child);
-    }
-
-    if dock::switcher_is_useful(environments.len()) {
-        let current = environments
-            .iter()
-            .find(|environment| environment.current)
-            .map(|environment| environment.name.clone())
-            .unwrap_or_default();
-        items.add(&dock::environment_switcher(&current, proxy.clone()));
-        items.add(&dock::divider());
     }
 
     if entries.is_empty() {
@@ -258,12 +246,7 @@ async fn rebuild(
         let icon_size = dock::icon_size_for(
             entries.len() as i32,
             widgets.len() as i32,
-            screen.width()
-                - if dock::switcher_is_useful(environments.len()) {
-                    0
-                } else {
-                    dock::SWITCHER_WIDTH
-                },
+            screen.width(),
             preferred_icon,
         );
         lens.images.borrow_mut().clear();
