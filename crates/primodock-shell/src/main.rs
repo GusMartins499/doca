@@ -1,9 +1,11 @@
 mod dock;
 mod magnify;
 mod motion;
+mod row;
 mod stack;
 mod strut;
 mod theme;
+mod tooltip;
 mod widget_tile;
 
 use std::cell::{Cell, RefCell};
@@ -56,14 +58,23 @@ fn main() -> Result<()> {
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
+    // The icons are drawn above the bar rather than inside it, so a magnified
+    // one rises out of the top the way it does on a dock that is one drawing.
+    // Keeping them inside would mean a bar as tall as the largest icon, with
+    // that much empty air over the row whenever the pointer is elsewhere.
     let items = gtk::Box::new(gtk::Orientation::Horizontal, dock::ITEM_SPACING);
-    items.set_widget_name("bar");
     items.set_halign(gtk::Align::Center);
-    window.add(&items);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    bar.set_widget_name("bar");
+    bar.set_valign(gtk::Align::End);
+    bar.pack_start(&items, true, true, 0);
+    let stage = gtk::Overlay::new();
+    stage.add(&bar);
+    window.add(&stage);
     window.show_all();
 
     glib::spawn_future_local(async move {
-        if let Err(e) = drive(window, items, screen, css).await {
+        if let Err(e) = drive(window, stage, bar, items, screen, css).await {
             tracing::error!("daemon link failed: {e:#}");
         }
     });
@@ -134,72 +145,10 @@ impl Hide {
     }
 }
 
-#[derive(Clone, Default)]
-struct Lens {
-    images: Rc<RefCell<Vec<gtk::Image>>>,
-    roots: Rc<RefCell<Vec<gtk::Widget>>>,
-    base_icon: Rc<Cell<f64>>,
-    base_slot: Rc<Cell<f64>>,
-    offset: Rc<Cell<f64>>,
-    scale: Rc<Cell<f64>>,
-    busy: Rc<Cell<bool>>,
-}
-
-impl Lens {
-    fn remember(&self, base_icon: i32, scale: f64) {
-        self.base_icon.set(base_icon as f64);
-        self.base_slot
-            .set((base_icon + dock::ITEM_PADDING * 2) as f64);
-        self.scale.set(scale);
-    }
-
-    fn capture_offset(&self) {
-        let offset = self
-            .roots
-            .borrow()
-            .first()
-            .map(|root| root.allocation().x() as f64)
-            .unwrap_or(0.0);
-        if offset > 0.0 {
-            self.offset.set(offset);
-        }
-    }
-
-    fn watch(&self) {
-        for root in self.roots.borrow().iter() {
-            let lens = self.clone();
-            root.connect_motion_notify_event(move |widget, event| {
-                lens.capture_offset();
-                lens.focus(Some(widget.allocation().x() as f64 + event.position().0));
-                glib::Propagation::Proceed
-            });
-        }
-    }
-
-    fn focus(&self, pointer_x: Option<f64>) {
-        if self.scale.get() <= 1.0 || self.busy.get() {
-            return;
-        }
-        let images = self.images.borrow();
-        let sizes = magnify::sizes_under_pointer(
-            images.len(),
-            pointer_x,
-            self.base_icon.get(),
-            self.base_slot.get(),
-            dock::ITEM_SPACING as f64,
-            self.offset.get(),
-            self.scale.get(),
-        );
-        for (image, size) in images.iter().zip(sizes) {
-            if image.pixel_size() != size {
-                image.set_pixel_size(size);
-            }
-        }
-    }
-}
-
 async fn drive(
     window: gtk::Window,
+    stage: gtk::Overlay,
+    bar: gtk::Box,
     items: gtk::Box,
     screen: gdk::Rectangle,
     css: gtk::CssProvider,
@@ -208,8 +157,11 @@ async fn drive(
     let proxy: Rc<PrimoDockProxy<'static>> = Rc::new(PrimoDockProxy::new(&connection).await?);
     let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
     let applied: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-    let lens = Lens::default();
     let hide = Hide::default();
+    let label = tooltip::Tooltip::new();
+    let icons = row::Row::new();
+    icons.stage_on(&stage);
+    window.show_all();
     tracing::info!("connected to primodockd");
 
     window.add_events(
@@ -217,14 +169,16 @@ async fn drive(
             | gdk::EventMask::LEAVE_NOTIFY_MASK
             | gdk::EventMask::ENTER_NOTIFY_MASK,
     );
-    let leaving = lens.clone();
+    let leaving = icons.clone();
     let hiding = hide.clone();
+    let hiding_label = label.clone();
     window.connect_leave_notify_event(move |window, event| {
         if event.detail() == gdk::NotifyType::Inferior {
             return glib::Propagation::Proceed;
         }
-        leaving.focus(None);
+        leaving.aim(None);
         hiding.slide(window, false);
+        hiding_label.hide();
         glib::Propagation::Proceed
     });
     let showing = hide.clone();
@@ -233,8 +187,16 @@ async fn drive(
         glib::Propagation::Proceed
     });
 
-    let style = Style { css, applied };
-    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens, &hide).await;
+    icons.serve(proxy.clone());
+    wire(&icons, &label, proxy.clone());
+
+    let chrome = Chrome {
+        style: Style { css, applied },
+        row: icons.clone(),
+        hide,
+        label,
+    };
+    rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
@@ -257,7 +219,7 @@ async fn drive(
             }
             complete => break,
         }
-        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens, &hide).await;
+        rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
     }
     Ok(())
 }
@@ -265,6 +227,96 @@ async fn drive(
 struct Style {
     css: gtk::CssProvider,
     applied: Rc<RefCell<String>>,
+}
+
+/// Clicks, labels and dropped files, by where they land on the row.
+///
+/// The row is one widget, so there is no per-icon handler to hang these on:
+/// every event arrives with an x, and the row says which icon is drawn there.
+/// Name whatever the pointer is on, or take the name away if it is on nothing.
+fn name_what_is_hovered(icons: &row::Row, label: &tooltip::Tooltip) {
+    let Some((index, item)) = icons.hovered() else {
+        label.hide();
+        return;
+    };
+    let origin = icons
+        .area
+        .toplevel()
+        .and_then(|top| top.window())
+        .map(|window| window.position())
+        .unwrap_or((0, 0));
+    let allocation = icons.area.allocation();
+    let (left, width) = icons.rect_of(index);
+    label.point_at(
+        (origin.0 + allocation.x() + left, origin.1 + allocation.y()),
+        width,
+        &item.name,
+    );
+}
+
+fn wire(icons: &row::Row, label: &tooltip::Tooltip, proxy: Rc<PrimoDockProxy<'static>>) {
+    let naming = icons.clone();
+    let naming_label = label.clone();
+    icons.area.connect_motion_notify_event(move |_, event| {
+        naming.aim(Some(event.position().0));
+        name_what_is_hovered(&naming, &naming_label);
+        glib::Propagation::Proceed
+    });
+
+    let leaving = icons.clone();
+    let leaving_label = label.clone();
+    icons.area.connect_leave_notify_event(move |_, _| {
+        leaving.aim(None);
+        leaving_label.hide();
+        glib::Propagation::Proceed
+    });
+
+    let clicked = icons.clone();
+    let clicked_label = label.clone();
+    icons.area.connect_button_press_event(move |_, event| {
+        clicked_label.hide();
+        let Some((index, item)) = clicked.item_at(event.position().0) else {
+            return glib::Propagation::Stop;
+        };
+        let proxy = proxy.clone();
+        let trigger = event.clone();
+
+        match event.button() {
+            1 if stack::is_folder(&item.id) => {
+                glib::spawn_future_local(async move {
+                    let entries = proxy.list_folder(&item.id).await.unwrap_or_default();
+                    stack::menu(&entries, proxy.clone()).popup_at_pointer(Some(&trigger));
+                });
+            }
+            1 => {
+                if item.windows.is_empty() && !stack::is_folder(&item.id) {
+                    clicked.launch(index);
+                }
+                glib::spawn_future_local(async move {
+                    let _ = proxy.activate_item(&item.id).await;
+                });
+            }
+            3 => {
+                glib::spawn_future_local(async move {
+                    let windows = proxy.item_windows(&item.id).await.unwrap_or_default();
+                    dock::context_menu(&item, &windows, proxy.clone())
+                        .popup_at_pointer(Some(&trigger));
+                });
+            }
+            _ => {}
+        }
+        glib::Propagation::Stop
+    });
+
+    dock::accept_file_drops(icons);
+}
+
+/// The pieces of the bar that outlive any one rebuild.
+struct Chrome {
+    style: Style,
+    row: row::Row,
+    hide: Hide,
+    label: tooltip::Tooltip,
 }
 
 impl Style {
@@ -288,14 +340,19 @@ impl Style {
 
 async fn rebuild(
     window: &gtk::Window,
+    bar: &gtk::Box,
     items: &gtk::Box,
     screen: &gdk::Rectangle,
     proxy: Rc<PrimoDockProxy<'static>>,
     tiles: Tiles,
-    style: &Style,
-    lens: &Lens,
-    hide: &Hide,
+    chrome: &Chrome,
 ) {
+    let Chrome {
+        style,
+        row,
+        hide,
+        label,
+    } = chrome;
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
         style.apply(&appearance.theme);
@@ -313,36 +370,55 @@ async fn rebuild(
         .map(|appearance| appearance.magnification)
         .unwrap_or(magnify::DEFAULT_SCALE);
 
+    let appearance_theme = appearance
+        .as_ref()
+        .map(|appearance| appearance.theme.clone())
+        .unwrap_or_else(|| theme::DEFAULT.to_string());
+
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
+
+    // Everything but the row is torn down and built again. The row stays put:
+    // unparenting a widget destroys its window, and the pointer leaving a
+    // window that was taken out from under it is a leave event like any other
+    // — which shut the lens every time a window somewhere took focus.
     for child in items.children() {
-        items.remove(&child);
+        if child != row.perch.clone().upcast::<gtk::Widget>() {
+            items.remove(&child);
+        }
+    }
+    if row.perch.parent().is_none() {
+        items.add(&row.perch);
     }
 
     if entries.is_empty() {
+        row.fill(&[], row::Rest::default());
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
         empty.set_widget_name("empty");
         items.add(&empty);
-        lens.images.borrow_mut().clear();
-        lens.roots.borrow_mut().clear();
     } else {
         let icon_size = dock::icon_size_for(
             entries.len() as i32,
             widgets.len() as i32,
             screen.width(),
             preferred_icon,
+            magnification,
         );
-        lens.images.borrow_mut().clear();
-        lens.roots.borrow_mut().clear();
-        for entry in &entries {
-            let built = dock::item_button(entry, icon_size, lens.busy.clone(), proxy.clone());
-            items.add(&built.root);
-            lens.images.borrow_mut().push(built.image);
-            lens.roots.borrow_mut().push(built.root);
-        }
-        lens.remember(icon_size, magnification);
-        lens.watch();
+        row.fill(
+            &entries,
+            row::Rest::new(
+                icon_size,
+                dock::ITEM_SPACING,
+                dock::ITEM_PADDING,
+                magnification,
+            ),
+        );
+        let (running, active) = theme::dots(&appearance_theme);
+        row.dot_colours(running, active);
     }
+
+    // The dock may have changed under a pointer that never moved.
+    name_what_is_hovered(row, label);
 
     tiles.borrow_mut().clear();
     if !widgets.is_empty() {
@@ -356,25 +432,27 @@ async fn rebuild(
     }
 
     items.show_all();
-    let settled = lens.clone();
-    glib::idle_add_local_once(move || settled.capture_offset());
     for state in &widgets {
         if let Some(tile) = tiles.borrow().get(&state.id) {
             tile.update(state);
         }
     }
 
-    let natural = dock::natural_size(items);
-    let (width, height) = dock::clamp_to_screen(natural, (screen.width(), screen.height()));
-    if (width, height) != natural {
+    // The bar is as wide as its contents ask; the window is that plus the room
+    // a magnified icon rises into, which the bar itself never occupies.
+    let natural = dock::natural_size(bar);
+    let (width, bar_height) = dock::clamp_to_screen(natural, (screen.width(), screen.height()));
+    let height = bar_height + row.overhead();
+    if (width, bar_height) != natural {
         tracing::warn!(
             natural_width = natural.0,
             natural_height = natural.1,
             width,
-            height,
+            bar_height,
             "bar clamped to the screen"
         );
     }
+    bar.set_size_request(width, -1);
     window.set_size_request(width, height);
     window.resize(width, height);
 
@@ -390,8 +468,11 @@ async fn rebuild(
         tracing::warn!("not an X11 window, strut skipped");
         return;
     };
+    // Only the bar takes the screen edge. The room above it is air a magnified
+    // icon passes through, and reserving that would push every window down by
+    // the height of a magnification nobody is looking at.
     let reserved = BottomStrut {
-        height: strut::reserved_height(height, auto_hide),
+        height: strut::reserved_height(bar_height, auto_hide),
         start_x: x.max(0) as u32,
         end_x: (x + width).max(0) as u32,
     };
@@ -402,4 +483,25 @@ async fn rebuild(
     }
 
     tracing::debug!(items = entries.len(), width, "rebuilt");
+}
+
+/// The checks that need a real X display, run in the order GTK demands.
+///
+/// GTK belongs to the thread that starts it, and the test harness hands each
+/// test a thread of its own — so these cannot each be a `#[test]`. They live
+/// beside the code they check and are called from here, where GTK is started
+/// once.
+///
+/// ```text
+/// DISPLAY=:9 cargo test -- --ignored
+/// ```
+#[cfg(test)]
+#[test]
+#[ignore = "needs an X display; run inside scripts/dev-session.sh"]
+fn on_a_display() {
+    gtk::init().expect("no X display");
+
+    dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
+    tooltip::tests::a_label_is_the_size_of_its_own_words();
+    row::tests::a_pointer_that_left_is_not_pointing_at_anything();
 }

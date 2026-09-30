@@ -7,9 +7,40 @@ pub const LAUNCH: Duration = Duration::from_millis(700);
 pub const LAUNCH_SWELL: f64 = 0.28;
 pub const LAUNCH_PULSES: f64 = 2.0;
 
+/// How long the lens takes to open, and to close again. Plank's figure.
+pub const ZOOM: Duration = Duration::from_millis(200);
+
 pub fn ease_out(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
+}
+
+pub fn ease_in(t: f64) -> f64 {
+    t.clamp(0.0, 1.0).powi(3)
+}
+
+/// How far open the lens is, `elapsed` after the pointer arrived or left.
+///
+/// It opens quickly and settles, and closes the other way round — the shape
+/// Plank uses. Reversing mid-way is the caller's job: see `Row::hover`.
+pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
+    if elapsed >= ZOOM {
+        return if opening { 1.0 } else { 0.0 };
+    }
+    let t = elapsed.as_secs_f64() / ZOOM.as_secs_f64();
+    if opening {
+        ease_out(t)
+    } else {
+        1.0 - ease_in(t)
+    }
+}
+
+/// Where to pretend an animation started, so reversing it does not jump.
+///
+/// Leaving halfway through the opening should close from halfway, not from
+/// wide open. Plank does this by moving the start time forward; so does this.
+pub fn reversed_start(elapsed: Duration) -> Duration {
+    ZOOM.saturating_sub(elapsed.min(ZOOM))
 }
 
 pub fn slide_y(progress: f64, shown_y: i32, hidden_y: i32) -> i32 {
@@ -31,12 +62,12 @@ pub fn launch_scale(elapsed: Duration) -> f64 {
     1.0 + LAUNCH_SWELL * pulse * (1.0 - t)
 }
 
-pub fn launch_size(elapsed: Duration, icon_size: i32) -> i32 {
-    (icon_size as f64 * launch_scale(elapsed)).round() as i32
-}
-
 pub fn is_launching(elapsed: Duration) -> bool {
     elapsed < LAUNCH
+}
+
+pub fn is_launching_since(started: std::time::Instant) -> bool {
+    is_launching(started.elapsed())
 }
 
 #[cfg(test)]
@@ -93,6 +124,55 @@ mod tests {
     }
 
     #[test]
+    fn a_lens_opens_from_shut_and_ends_wide_open() {
+        assert_eq!(zoom_progress(Duration::ZERO, true), 0.0);
+        assert_eq!(zoom_progress(ZOOM, true), 1.0);
+        assert_eq!(zoom_progress(ZOOM * 2, true), 1.0);
+    }
+
+    #[test]
+    fn a_lens_closes_from_open_and_ends_shut() {
+        assert_eq!(zoom_progress(Duration::ZERO, false), 1.0);
+        assert_eq!(zoom_progress(ZOOM, false), 0.0);
+        assert_eq!(zoom_progress(ZOOM * 2, false), 0.0);
+    }
+
+    #[test]
+    fn a_lens_only_ever_moves_towards_where_it_is_going() {
+        for opening in [true, false] {
+            let mut previous = zoom_progress(Duration::ZERO, opening);
+            for step in 1..=100 {
+                let current = zoom_progress(ZOOM * step / 100, opening);
+                if opening {
+                    assert!(current >= previous, "the lens shut while opening at {step}");
+                } else {
+                    assert!(current <= previous, "the lens opened while shutting at {step}");
+                }
+                previous = current;
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_halfway_through_closes_from_halfway() {
+        let halfway = ZOOM / 2;
+        let open_to = zoom_progress(halfway, true);
+
+        let closing_from = zoom_progress(reversed_start(halfway), false);
+
+        assert!(
+            (closing_from - open_to).abs() < 0.2,
+            "the lens jumped from {open_to:.2} to {closing_from:.2} on reversing"
+        );
+    }
+
+    #[test]
+    fn leaving_after_it_finished_closes_from_wide_open() {
+        assert_eq!(reversed_start(ZOOM), Duration::ZERO);
+        assert_eq!(reversed_start(ZOOM * 3), Duration::ZERO);
+    }
+
+    #[test]
     fn easing_slows_down_at_the_end_rather_than_stopping_dead() {
         let early = ease_out(0.1) - ease_out(0.0);
         let late = ease_out(1.0) - ease_out(0.9);
@@ -105,7 +185,6 @@ mod tests {
         assert_eq!(launch_scale(Duration::ZERO), 1.0);
         assert_eq!(launch_scale(LAUNCH), 1.0);
         assert_eq!(launch_scale(LAUNCH * 2), 1.0);
-        assert_eq!(launch_size(LAUNCH, 48), 48);
     }
 
     #[test]
