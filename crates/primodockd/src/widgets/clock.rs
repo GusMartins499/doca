@@ -24,6 +24,28 @@ pub fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day as i64 - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+pub fn parse_date(value: &str) -> Option<(i64, u32, u32)> {
+    let mut parts = value.trim().split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
 pub fn weekday(days_since_epoch: i64) -> &'static str {
     WEEKDAYS[(days_since_epoch + 4).rem_euclid(7) as usize]
 }
@@ -39,7 +61,7 @@ pub fn format_clock(seconds_since_epoch: u64, offset_seconds: i64) -> (String, S
     )
 }
 
-fn local_offset_seconds() -> i64 {
+pub fn local_offset_seconds() -> i64 {
     let output = std::process::Command::new("date").arg("+%z").output().ok();
     let Some(output) = output else { return 0 };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -152,6 +174,25 @@ mod tests {
     fn the_epoch_is_a_thursday_in_january() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(weekday(0), "Thu");
+    }
+
+    #[test]
+    fn a_date_and_its_day_number_convert_both_ways() {
+        for days in [0i64, 1, 19_782, 20_000, -1, -719_468 + 1] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days, "round trip failed for {days}");
+        }
+    }
+
+    #[test]
+    fn a_date_string_parses_only_when_it_is_really_a_date() {
+        assert_eq!(parse_date("2026-12-25"), Some((2026, 12, 25)));
+        assert_eq!(parse_date(" 2026-01-01 "), Some((2026, 1, 1)));
+        assert_eq!(parse_date("2026-13-01"), None);
+        assert_eq!(parse_date("2026-00-10"), None);
+        assert_eq!(parse_date("25/12/2026"), None);
+        assert_eq!(parse_date("2026-12-25-01"), None);
+        assert_eq!(parse_date("tomorrow"), None);
     }
 
     #[test]

@@ -195,8 +195,32 @@ the icon grow, push its neighbours, change the distance, and shake.
 | `clock` | time and date | 1s | — |
 | `battery` | charge and time to full or empty | 30s | — |
 | `cpu` | busy share since the last sample | 2s | — |
+| `network` | up and down rates | 2s | — |
 | `music` | MPRIS title and artist | 2s | play/pause, right click resets |
 | `pomodoro` | focus and break blocks | 1s | start/pause, right click resets |
+| `stopwatch` | counting up, with laps | 1s | start/pause, right click resets |
+| `timer` | counting down to a ring | 1s | start/pause, right click resets |
+| `time-progress` | how much of a span has gone | 30s | next span, right click back to today |
+| `countdown` | days to a date | 60s | — |
+| `water` | glasses against a goal | 60s | one more, right click resets |
+| `note` | a line you leave yourself | — | — |
+
+Widgets that need settings take them from a `[widgets.*]` block:
+
+```toml
+[widgets.countdown]
+date = "2026-12-25"
+label = "until Christmas"
+
+[widgets.note]
+text = "Call the dentist\nThursday at four"
+
+[widgets.timer]
+minutes = 15
+
+[widgets.water]
+goal = 8
+```
 
 A poll is not an update. The scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read

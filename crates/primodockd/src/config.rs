@@ -85,10 +85,91 @@ impl Environment {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CountdownSettings {
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+impl Default for CountdownSettings {
+    fn default() -> Self {
+        Self {
+            date: String::new(),
+            label: "until".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteSettings {
+    #[serde(default)]
+    pub text: String,
+}
+
+impl Default for NoteSettings {
+    fn default() -> Self {
+        Self {
+            text: "a note lives here".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimerSettings {
+    #[serde(default = "default_timer_minutes")]
+    pub minutes: u32,
+}
+
+fn default_timer_minutes() -> u32 {
+    10
+}
+
+impl Default for TimerSettings {
+    fn default() -> Self {
+        Self {
+            minutes: default_timer_minutes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaterSettings {
+    #[serde(default = "default_water_goal")]
+    pub goal: u32,
+}
+
+fn default_water_goal() -> u32 {
+    8
+}
+
+impl Default for WaterSettings {
+    fn default() -> Self {
+        Self {
+            goal: default_water_goal(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WidgetSettings {
+    #[serde(default)]
+    pub countdown: CountdownSettings,
+    #[serde(default)]
+    pub note: NoteSettings,
+    #[serde(default)]
+    pub timer: TimerSettings,
+    #[serde(default)]
+    pub water: WaterSettings,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub appearance: Appearance,
+    #[serde(default)]
+    pub widgets: WidgetSettings,
     #[serde(default)]
     pub environments: Vec<Environment>,
     #[serde(default, skip_serializing)]
@@ -101,6 +182,13 @@ pub fn config_path() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("primodock/config.toml")
+}
+
+impl WidgetSettings {
+    #[cfg(test)]
+    pub fn date_is_unset(&self) -> bool {
+        self.countdown.date.trim().is_empty()
+    }
 }
 
 impl Config {
@@ -258,6 +346,35 @@ mod tests {
              workspaces = [2, 3]\n\
              pinned = [\"discord\"]\n",
         )
+    }
+
+    #[test]
+    fn widget_settings_have_usable_defaults_when_the_block_is_absent() {
+        let settings = config("[[environments]]\nname = \"A\"\n").widgets;
+
+        assert_eq!(settings.timer.minutes, 10);
+        assert_eq!(settings.water.goal, 8);
+        assert!(settings.date_is_unset());
+    }
+
+    #[test]
+    fn a_widget_block_only_overrides_the_keys_it_names() {
+        let settings = config("[widgets.timer]\nminutes = 25\n").widgets;
+
+        assert_eq!(settings.timer.minutes, 25);
+        assert_eq!(settings.water.goal, 8);
+    }
+
+    #[test]
+    fn widget_settings_survive_a_round_trip_through_toml() {
+        let original = config(
+            "[widgets.countdown]\ndate = \"2026-12-25\"\nlabel = \"Christmas\"\n",
+        );
+
+        let written = toml::to_string_pretty(&original).unwrap();
+        let reloaded = toml::from_str::<Config>(&written).unwrap().migrated();
+
+        assert_eq!(reloaded.widgets, original.widgets);
     }
 
     #[test]

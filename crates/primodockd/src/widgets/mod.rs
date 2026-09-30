@@ -1,13 +1,22 @@
 pub mod battery;
 pub mod clock;
+pub mod countdown;
 pub mod cpu;
+pub mod note;
+pub mod timer;
+pub mod water;
 pub mod music;
+pub mod network;
 pub mod pomodoro;
+pub mod stopwatch;
+pub mod time_progress;
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use primodock_ipc::WidgetState;
+
+use crate::config::WidgetSettings;
 
 pub trait Widget: Send {
     fn id(&self) -> &str;
@@ -121,9 +130,24 @@ impl WidgetHandle {
     }
 }
 
-pub fn build(ids: &[String]) -> Vec<Box<dyn Widget>> {
+pub fn build(ids: &[String], settings: &WidgetSettings) -> Vec<Box<dyn Widget>> {
     ids.iter()
         .filter_map(|id| match id.as_str() {
+            "stopwatch" => Some(Box::new(stopwatch::Stopwatch::new()) as Box<dyn Widget>),
+            "time-progress" => {
+                Some(Box::new(time_progress::TimeProgress::new()) as Box<dyn Widget>)
+            }
+            "network" => Some(Box::new(network::Network::new()) as Box<dyn Widget>),
+            "countdown" => Some(Box::new(countdown::Countdown::new(
+                settings.countdown.clone(),
+            )) as Box<dyn Widget>),
+            "note" => Some(Box::new(note::Note::new(settings.note.clone())) as Box<dyn Widget>),
+            "timer" => {
+                Some(Box::new(timer::Timer::new(settings.timer.clone())) as Box<dyn Widget>)
+            }
+            "water" => {
+                Some(Box::new(water::Water::new(settings.water.clone())) as Box<dyn Widget>)
+            }
             "clock" => Some(Box::new(clock::Clock::new()) as Box<dyn Widget>),
             "battery" => Some(Box::new(battery::Battery::new()) as Box<dyn Widget>),
             "cpu" => Some(Box::new(cpu::Cpu::new()) as Box<dyn Widget>),
