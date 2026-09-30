@@ -99,8 +99,8 @@ other environment claims.
 | key | |
 |---|---|
 | `theme` | `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
-| `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit. |
-| `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. |
+| `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit, or than fit with the lens open. |
+| `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. The lens needs room to open, which comes out of the icon size on a crowded dock. |
 | `auto_hide` | slides the bar off the bottom edge, leaving a two-pixel sliver to point at, and reserves only that sliver through the strut so maximised windows get the screen back. Pointing at the sliver slides it up; moving away slides it down. |
 | `show_trash` | a trash item at the end of the bar. |
 
@@ -151,9 +151,19 @@ every second and announced once a minute.
 
 ## Switching environments
 
-The environment follows the workspace, so your own workspace shortcuts already
-switch it and the bar carries no control for it. To switch environment without
-moving workspace, bind a key:
+An environment is a dock: its own apps, its own widgets. Two of them can share
+one workspace and be swapped by a key, or each can own a workspace and follow
+it — `workspaces` is what decides which. Leave it off every environment and
+the workspace stops deciding altogether; the first in the file is what you
+start on.
+
+A key puts an environment on screen and moves nothing. The choice stands until
+you step onto a workspace some environment asked for by name: that is a choice
+of its own and replaces the one the key made. A workspace only a catch-all
+covers asks for nothing, so a dock chosen by hand survives moving across it.
+
+The dock does not grab keys itself — on Linux the desktop owns the keyboard —
+so bind one:
 
 ```bash
 ./scripts/bind-key.sh                    # <Super>e cycles environment
@@ -170,9 +180,9 @@ and written back, and a copy-pasted `gsettings set` that assigns the whole
 array drops every shortcut you had. Each action owns a named slot, so running
 it twice for one action moves that binding instead of adding another.
 
-Cycling walks the environments in config order, skips the catch-all — it has
-no workspace of its own to switch to — and refuses when there is only one real
-environment.
+Cycling walks the environments in config order and wraps round, catch-alls
+included: switching by hand needs no workspace to switch to. It refuses when
+there is only one environment, which is the only case with nowhere to go.
 
 ## Development
 
@@ -184,6 +194,15 @@ crates/primodock-shell   the bar: draws, anchors, never talks X11 policy
 
 The D-Bus boundary between the two is load-bearing: when the X11 session goes
 away, the shell is replaced and the daemon survives intact.
+
+The row of icons is one widget that draws them all, not a widget each. A
+widget per icon cannot animate: changing an icon's size changes what it asks
+of its parent, so every frame of the lens renegotiates the layout of the whole
+bar — 33 frames a second with twenty-nine icons, against 60 for a drawing.
+Where an icon goes is a function of its own resting place and the pointer, and
+of nothing else, so growing one cannot shift the rest by accumulation. Both
+the shape of that and its constants come from
+[Plank](https://github.com/ricotz/plank)'s `PositionManager`.
 
 `scripts/dev-session.sh` is a barer version of the sandbox, for a debug build
 with an empty config:
@@ -199,6 +218,18 @@ inside a nested session:
 
 ```bash
 DISPLAY=:9 cargo test -- --ignored
+```
+
+GTK belongs to the thread that starts it and the harness gives each test a
+thread of its own, so those checks live beside the code they check and are
+called from a single `on_a_display` test rather than being `#[test]`s.
+
+Hover has no one to trigger it on a headless screen, so the pointer is moved
+by hand — and, for clicks, pressed for real through XTEST:
+
+```bash
+DISPLAY=:9 cargo run -p primodockd --example warp-pointer -- 700 1035
+DISPLAY=:9 cargo run -p primodockd --example warp-pointer -- 700 1035 click:3
 ```
 
 ## Not implemented
