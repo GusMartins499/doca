@@ -184,13 +184,19 @@ pub fn indicator_state(item: &DockItem) -> &'static str {
     }
 }
 
+pub struct ItemWidgets {
+    pub root: gtk::Widget,
+    pub image: gtk::Image,
+}
+
 pub fn item_button(
     item: &DockItem,
     size: i32,
     proxy: Rc<PrimoDockProxy<'static>>,
-) -> gtk::Widget {
+) -> ItemWidgets {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    column.add(&icon_widget(&item.icon, size));
+    let image = icon_widget(&item.icon, size);
+    column.add(&image);
 
     let indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     indicator.set_widget_name(indicator_state(item));
@@ -200,6 +206,7 @@ pub fn item_button(
     column.add(&indicator);
 
     let button = gtk::EventBox::new();
+    button.add_events(gdk::EventMask::POINTER_MOTION_MASK);
     button.set_widget_name("item");
     button.set_tooltip_text(Some(&item.name));
     button.add(&column);
@@ -207,6 +214,7 @@ pub fn item_button(
     let id = item.id.clone();
     let menu_item = item.clone();
     let menu_proxy = proxy.clone();
+    let proxy_for_drop = proxy.clone();
     button.connect_button_press_event(move |_, event| {
         match event.button() {
             1 => {
@@ -225,7 +233,47 @@ pub fn item_button(
         glib::Propagation::Stop
     });
 
-    button.upcast()
+    accept_file_drops(&button, item, proxy_for_drop);
+
+    ItemWidgets {
+        root: button.upcast(),
+        image,
+    }
+}
+
+fn accept_file_drops(
+    button: &gtk::EventBox,
+    item: &DockItem,
+    proxy: Rc<PrimoDockProxy<'static>>,
+) {
+    const URI_LIST: u32 = 0;
+    let targets = [gtk::TargetEntry::new(
+        "text/uri-list",
+        gtk::TargetFlags::OTHER_APP,
+        URI_LIST,
+    )];
+    button.drag_dest_set(gtk::DestDefaults::ALL, &targets, gdk::DragAction::COPY);
+
+    let id = item.id.clone();
+    button.connect_drag_data_received(move |_, _, _, _, data, _, _| {
+        let paths: Vec<String> = data
+            .uris()
+            .iter()
+            .filter_map(|uri| glib::filename_from_uri(uri).ok())
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let id = id.clone();
+        let proxy = proxy.clone();
+        glib::spawn_future_local(async move {
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            if let Err(e) = proxy.open_with(&id, &refs).await {
+                tracing::warn!("{id} could not open the dropped files: {e}");
+            }
+        });
+    });
 }
 
 #[cfg(test)]

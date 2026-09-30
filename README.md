@@ -7,6 +7,10 @@ Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
 
 ## Status
 
+**Phase 5 — parity, partly.** Magnification on hover, a trash item, and
+dropping files onto an app to open them with it. Stacks, window previews and
+the remaining two dozen widgets are not here.
+
 **Phase 4 — themes.** Three of them, chosen in config, plus a configurable
 icon size. Three, not eight: the shape of the theme system is what matters,
 and more of them is a morning's work once it holds.
@@ -128,6 +132,8 @@ DISPLAY=:9 cargo test -- --ignored
 [appearance]
 theme = "native"
 icon_size = 48
+magnification = 1.6
+show_trash = true
 
 [[environments]]
 name = "Work"
@@ -153,6 +159,15 @@ widgets = ["clock", "music"]
 An unknown name falls back to `native` with a warning rather than leaving the
 bar unstyled. `icon_size` is clamped to 24–96, and shrinks further on its own
 when there are more apps than fit.
+
+## Magnification
+
+`magnification` is how much the icon under the pointer grows, clamped to
+1.0–2.5. `1.0` turns the lens off.
+
+The lens measures distance against the *base* layout, cached when the bar is
+built, not against the current one. Measuring against the live layout makes
+the icon grow, push its neighbours, change the distance, and shake.
 
 ## Widgets
 
