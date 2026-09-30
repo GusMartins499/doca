@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gtk::prelude::*;
 use primodock_ipc::{DockItem, PrimoDockProxy, WindowInfo};
@@ -189,9 +191,28 @@ pub struct ItemWidgets {
     pub image: gtk::Image,
 }
 
+fn pulse(image: &gtk::Image, size: i32, busy: Rc<Cell<bool>>) {
+    if busy.replace(true) {
+        return;
+    }
+    let image = image.clone();
+    let start = Instant::now();
+    glib::timeout_add_local(crate::motion::FRAME, move || {
+        let elapsed = start.elapsed();
+        if !crate::motion::is_launching(elapsed) {
+            image.set_pixel_size(size);
+            busy.set(false);
+            return glib::ControlFlow::Break;
+        }
+        image.set_pixel_size(crate::motion::launch_size(elapsed, size));
+        glib::ControlFlow::Continue
+    });
+}
+
 pub fn item_button(
     item: &DockItem,
     size: i32,
+    busy: Rc<Cell<bool>>,
     proxy: Rc<PrimoDockProxy<'static>>,
 ) -> ItemWidgets {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -212,6 +233,8 @@ pub fn item_button(
     button.add(&column);
 
     let id = item.id.clone();
+    let launches_on_click = item.windows.is_empty() && !crate::stack::is_folder(&item.id);
+    let pulsing = image.clone();
     let menu_item = item.clone();
     let menu_proxy = proxy.clone();
     let proxy_for_drop = proxy.clone();
@@ -228,6 +251,9 @@ pub fn item_button(
                 });
             }
             1 => {
+                if launches_on_click {
+                    pulse(&pulsing, size, busy.clone());
+                }
                 let id = id.clone();
                 let proxy = proxy.clone();
                 glib::spawn_future_local(async move {
