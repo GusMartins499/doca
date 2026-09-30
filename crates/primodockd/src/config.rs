@@ -18,6 +18,8 @@ pub struct Appearance {
     pub magnification: f64,
     #[serde(default = "default_show_trash")]
     pub show_trash: bool,
+    #[serde(default)]
+    pub auto_hide: bool,
 }
 
 fn default_show_trash() -> bool {
@@ -43,6 +45,7 @@ impl Default for Appearance {
             icon_size: default_icon_size(),
             magnification: default_magnification(),
             show_trash: default_show_trash(),
+            auto_hide: false,
         }
     }
 }
@@ -58,6 +61,7 @@ impl Appearance {
                 1.0
             },
             show_trash: self.show_trash,
+            auto_hide: self.auto_hide,
         }
     }
 }
@@ -402,6 +406,12 @@ mod tests {
             config("[appearance]\nicon_size = 2\n").appearance().icon_size,
             MIN_ICON_SIZE
         );
+    }
+
+    #[test]
+    fn auto_hide_is_off_unless_it_is_asked_for() {
+        assert!(!config("[appearance]\ntheme = \"native\"\n").appearance().auto_hide);
+        assert!(config("[appearance]\nauto_hide = true\n").appearance().auto_hide);
     }
 
     #[test]

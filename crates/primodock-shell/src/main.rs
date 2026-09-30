@@ -1,11 +1,13 @@
 mod dock;
 mod magnify;
+mod motion;
 mod stack;
 mod strut;
 mod theme;
 mod widget_tile;
 
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -73,6 +75,66 @@ fn main() -> Result<()> {
 type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
 
 #[derive(Clone, Default)]
+struct Hide {
+    enabled: Rc<Cell<bool>>,
+    shown: Rc<Cell<bool>>,
+    shown_y: Rc<Cell<i32>>,
+    height: Rc<Cell<i32>>,
+    x: Rc<Cell<i32>>,
+    animating: Rc<Cell<bool>>,
+}
+
+impl Hide {
+    fn place(&self, window: &gtk::Window, x: i32, shown_y: i32, height: i32, enabled: bool) {
+        self.x.set(x);
+        self.shown_y.set(shown_y);
+        self.height.set(height);
+        let was_enabled = self.enabled.replace(enabled);
+        if !enabled {
+            self.shown.set(true);
+            window.move_(x, shown_y);
+            return;
+        }
+        if !was_enabled {
+            self.shown.set(false);
+        }
+        let y = if self.shown.get() {
+            shown_y
+        } else {
+            motion::hidden_y(shown_y, height)
+        };
+        window.move_(x, y);
+    }
+
+    fn slide(&self, window: &gtk::Window, to_shown: bool) {
+        if !self.enabled.get() || self.shown.get() == to_shown || self.animating.get() {
+            return;
+        }
+        self.shown.set(to_shown);
+        self.animating.set(true);
+
+        let hide = self.clone();
+        let window = window.clone();
+        let start = Instant::now();
+        glib::timeout_add_local(motion::FRAME, move || {
+            let elapsed = start.elapsed();
+            let raw = elapsed.as_secs_f64() / motion::SLIDE.as_secs_f64();
+            let progress = if to_shown { raw } else { 1.0 - raw };
+
+            let shown_y = hide.shown_y.get();
+            let hidden = motion::hidden_y(shown_y, hide.height.get());
+            window.move_(hide.x.get(), motion::slide_y(progress, shown_y, hidden));
+
+            if raw >= 1.0 {
+                hide.animating.set(false);
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+}
+
+#[derive(Clone, Default)]
 struct Lens {
     images: Rc<RefCell<Vec<gtk::Image>>>,
     roots: Rc<RefCell<Vec<gtk::Widget>>>,
@@ -80,6 +142,7 @@ struct Lens {
     base_slot: Rc<Cell<f64>>,
     offset: Rc<Cell<f64>>,
     scale: Rc<Cell<f64>>,
+    busy: Rc<Cell<bool>>,
 }
 
 impl Lens {
@@ -114,7 +177,7 @@ impl Lens {
     }
 
     fn focus(&self, pointer_x: Option<f64>) {
-        if self.scale.get() <= 1.0 {
+        if self.scale.get() <= 1.0 || self.busy.get() {
             return;
         }
         let images = self.images.borrow();
@@ -146,17 +209,32 @@ async fn drive(
     let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
     let applied: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let lens = Lens::default();
+    let hide = Hide::default();
     tracing::info!("connected to primodockd");
 
-    window.add_events(gdk::EventMask::POINTER_MOTION_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+    window.add_events(
+        gdk::EventMask::POINTER_MOTION_MASK
+            | gdk::EventMask::LEAVE_NOTIFY_MASK
+            | gdk::EventMask::ENTER_NOTIFY_MASK,
+    );
     let leaving = lens.clone();
-    window.connect_leave_notify_event(move |_, _| {
+    let hiding = hide.clone();
+    window.connect_leave_notify_event(move |window, event| {
+        if event.detail() == gdk::NotifyType::Inferior {
+            return glib::Propagation::Proceed;
+        }
         leaving.focus(None);
+        hiding.slide(window, false);
+        glib::Propagation::Proceed
+    });
+    let showing = hide.clone();
+    window.connect_enter_notify_event(move |window, _| {
+        showing.slide(window, true);
         glib::Propagation::Proceed
     });
 
     let style = Style { css, applied };
-    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens).await;
+    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens, &hide).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
@@ -179,7 +257,7 @@ async fn drive(
             }
             complete => break,
         }
-        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens).await;
+        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens, &hide).await;
     }
     Ok(())
 }
@@ -216,6 +294,7 @@ async fn rebuild(
     tiles: Tiles,
     style: &Style,
     lens: &Lens,
+    hide: &Hide,
 ) {
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
@@ -225,6 +304,10 @@ async fn rebuild(
         .as_ref()
         .map(|appearance| appearance.icon_size)
         .unwrap_or(dock::ICON_SIZE);
+    let auto_hide = appearance
+        .as_ref()
+        .map(|appearance| appearance.auto_hide)
+        .unwrap_or(false);
     let magnification = appearance
         .as_ref()
         .map(|appearance| appearance.magnification)
@@ -252,7 +335,7 @@ async fn rebuild(
         lens.images.borrow_mut().clear();
         lens.roots.borrow_mut().clear();
         for entry in &entries {
-            let built = dock::item_button(entry, icon_size, proxy.clone());
+            let built = dock::item_button(entry, icon_size, lens.busy.clone(), proxy.clone());
             items.add(&built.root);
             lens.images.borrow_mut().push(built.image);
             lens.roots.borrow_mut().push(built.root);
@@ -297,7 +380,7 @@ async fn rebuild(
 
     let x = screen.x() + (screen.width() - width) / 2;
     let y = screen.y() + screen.height() - height;
-    window.move_(x, y);
+    hide.place(window, x, y, height, auto_hide);
 
     let Some(gdk_window) = window.window() else {
         tracing::warn!("window is not realised yet, strut skipped");
@@ -308,7 +391,7 @@ async fn rebuild(
         return;
     };
     let reserved = BottomStrut {
-        height: height as u32,
+        height: strut::reserved_height(height, auto_hide),
         start_x: x.max(0) as u32,
         end_x: (x + width).max(0) as u32,
     };

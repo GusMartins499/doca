@@ -165,6 +165,7 @@ impl DockService {
                 theme: appearance.theme,
                 icon_size: appearance.icon_size,
                 magnification: appearance.magnification,
+                auto_hide: appearance.auto_hide,
             }
         })
     }

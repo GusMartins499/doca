@@ -133,6 +133,7 @@ DISPLAY=:9 cargo test -- --ignored
 theme = "native"
 icon_size = 48
 magnification = 1.6
+auto_hide = false
 show_trash = true
 
 [[environments]]
@@ -178,6 +179,27 @@ bytes, so accented titles are cut where you would expect.
 Thumbnail previews are not implemented: on X11 they need composite redirect
 and per-window pixmap capture, which is a great deal of machinery for a
 hover effect.
+
+## Auto-hide
+
+`auto_hide = true` slides the bar off the bottom edge, leaving a two-pixel
+sliver to point at, and reserves only that sliver through the strut so
+maximised windows get the screen back. Pointing at the sliver slides it up;
+moving away slides it down.
+
+The sliver is not decoration: a bar with nothing at all on screen can never be
+summoned, which `a_hidden_bar_leaves_a_sliver_on_screen_to_be_pointed_at`
+pins.
+
+## Launch animation
+
+Clicking an app that is not running swells its icon and lets it settle over
+700ms. It is a scale pulse rather than the original's vertical hop: GTK3 has
+no CSS transform and ignores negative margins, so lifting an icon would mean
+reserving empty headroom in the bar forever.
+
+The pulse and the magnification lens both write the icon size, so a pulse
+holds a flag that the lens respects while it runs.
 
 ## Magnification
 

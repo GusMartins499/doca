@@ -47,6 +47,7 @@ pub struct Appearance {
     pub theme: String,
     pub icon_size: i32,
     pub magnification: f64,
+    pub auto_hide: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

@@ -3,6 +3,15 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
 use x11rb::wrapper::ConnectionExt as _;
 
+pub fn reserved_height(bar_height: i32, auto_hide: bool) -> u32 {
+    let height = if auto_hide {
+        crate::motion::PEEK
+    } else {
+        bar_height
+    };
+    height.max(0) as u32
+}
+
 pub struct BottomStrut {
     pub height: u32,
     pub start_x: u32,
@@ -62,6 +71,32 @@ pub fn apply(xid: u32, strut: &BottomStrut) -> Result<()> {
 mod tests {
     use super::*;
     use x11rb::protocol::xproto::{CreateWindowAux, WindowClass};
+
+    #[test]
+    fn a_bar_that_stays_put_reserves_its_whole_height() {
+        assert_eq!(reserved_height(84, false), 84);
+    }
+
+    #[test]
+    fn a_bar_that_hides_reserves_only_the_sliver_it_leaves_behind() {
+        assert_eq!(reserved_height(84, true), crate::motion::PEEK as u32);
+    }
+
+    #[test]
+    fn hiding_gives_back_almost_all_of_the_space_it_was_holding() {
+        let kept = reserved_height(84, false);
+        let given_back = kept - reserved_height(84, true);
+
+        assert!(
+            given_back as f64 / kept as f64 > 0.9,
+            "auto-hide that keeps the strut reserves the screen for nothing"
+        );
+    }
+
+    #[test]
+    fn a_nonsense_height_does_not_wrap_around_to_a_huge_reservation() {
+        assert_eq!(reserved_height(-10, false), 0);
+    }
 
     fn read_back(xid: u32) -> Vec<u32> {
         let (conn, _) = x11rb::connect(None).unwrap();
