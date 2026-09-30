@@ -6,6 +6,7 @@ use zbus::object_server::SignalEmitter;
 use crate::config::Config;
 use crate::desktop::DesktopIndex;
 use crate::model;
+use crate::trash;
 use crate::widgets::WidgetHandle;
 use crate::x11::XHandle;
 
@@ -40,7 +41,11 @@ impl DockService {
             (environment.pinned.clone(), environment.clone())
         })?;
         let visible = model::windows_in(&environment, &windows);
-        Ok(model::build(&self.index, &pinned, &visible))
+        let mut items = model::build(&self.index, &pinned, &visible);
+        if self.with_config(|config| config.appearance().show_trash)? {
+            items.push(trash::item(trash::count_in(&trash::trash_files_dir())));
+        }
+        Ok(items)
     }
 
     fn update_config(&self, change: impl FnOnce(&mut Config)) -> zbus::fdo::Result<()> {
@@ -49,6 +54,17 @@ impl DockService {
         })?;
         change(&mut config);
         config.save().map_err(failed)
+    }
+
+    fn open_path(&self, path: &str) -> zbus::fdo::Result<()> {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(failed)?;
+        Ok(())
     }
 
     fn spawn(&self, id: &str) -> zbus::fdo::Result<()> {
@@ -75,6 +91,9 @@ impl DockService {
     }
 
     async fn activate_item(&self, id: &str) -> zbus::fdo::Result<()> {
+        if id == trash::ID {
+            return self.open_path(&trash::trash_files_dir().to_string_lossy());
+        }
         let workspace = self.workspace().await?;
         let windows = self.x11.list_windows().await.map_err(failed)?;
         let environment = self.with_config(|config| config.environment_for(workspace).clone())?;
@@ -95,6 +114,30 @@ impl DockService {
         self.spawn(id)
     }
 
+    async fn open_with(&self, id: &str, paths: Vec<String>) -> zbus::fdo::Result<()> {
+        let entry = self
+            .index
+            .get(id)
+            .ok_or_else(|| zbus::fdo::Error::Failed(format!("no desktop entry for {id}")))?;
+        let quoted: Vec<String> = paths
+            .iter()
+            .filter(|path| std::path::Path::new(path).exists())
+            .map(|path| format!("'{}'", path.replace('\'', "'\\''")))
+            .collect();
+        if quoted.is_empty() {
+            return Err(zbus::fdo::Error::Failed("no readable path dropped".into()));
+        }
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec {} {}", entry.exec, quoted.join(" ")))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(failed)?;
+        Ok(())
+    }
+
     async fn pin_item(&self, id: &str) -> zbus::fdo::Result<()> {
         let workspace = self.workspace().await?;
         self.update_config(|config| config.pin(workspace, id))
@@ -111,6 +154,7 @@ impl DockService {
             Appearance {
                 theme: appearance.theme,
                 icon_size: appearance.icon_size,
+                magnification: appearance.magnification,
             }
         })
     }

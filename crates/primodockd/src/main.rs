@@ -2,6 +2,7 @@ mod config;
 mod desktop;
 mod model;
 mod service;
+mod trash;
 mod widgets;
 mod x11;
 

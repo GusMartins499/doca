@@ -42,10 +42,11 @@ pub struct WidgetState {
 
 pub const NO_PROGRESS: f64 = -1.0;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct Appearance {
     pub theme: String,
     pub icon_size: i32,
+    pub magnification: f64,
 }
 
 #[zbus::proxy(
@@ -67,6 +68,7 @@ pub trait PrimoDock {
     fn list_items(&self) -> zbus::Result<Vec<DockItem>>;
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
+    fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
     fn pin_item(&self, id: &str) -> zbus::Result<()>;
     fn unpin_item(&self, id: &str) -> zbus::Result<()>;
     fn close_window(&self, id: u32) -> zbus::Result<()>;

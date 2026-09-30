@@ -1,9 +1,10 @@
 mod dock;
+mod magnify;
 mod strut;
 mod theme;
 mod widget_tile;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -70,6 +71,69 @@ fn main() -> Result<()> {
 
 type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
 
+#[derive(Clone, Default)]
+struct Lens {
+    images: Rc<RefCell<Vec<gtk::Image>>>,
+    roots: Rc<RefCell<Vec<gtk::Widget>>>,
+    base_icon: Rc<Cell<f64>>,
+    base_slot: Rc<Cell<f64>>,
+    offset: Rc<Cell<f64>>,
+    scale: Rc<Cell<f64>>,
+}
+
+impl Lens {
+    fn remember(&self, base_icon: i32, scale: f64) {
+        self.base_icon.set(base_icon as f64);
+        self.base_slot
+            .set((base_icon + dock::ITEM_PADDING * 2) as f64);
+        self.scale.set(scale);
+    }
+
+    fn capture_offset(&self) {
+        let offset = self
+            .roots
+            .borrow()
+            .first()
+            .map(|root| root.allocation().x() as f64)
+            .unwrap_or(0.0);
+        if offset > 0.0 {
+            self.offset.set(offset);
+        }
+    }
+
+    fn watch(&self) {
+        for root in self.roots.borrow().iter() {
+            let lens = self.clone();
+            root.connect_motion_notify_event(move |widget, event| {
+                lens.capture_offset();
+                lens.focus(Some(widget.allocation().x() as f64 + event.position().0));
+                glib::Propagation::Proceed
+            });
+        }
+    }
+
+    fn focus(&self, pointer_x: Option<f64>) {
+        if self.scale.get() <= 1.0 {
+            return;
+        }
+        let images = self.images.borrow();
+        let sizes = magnify::sizes_under_pointer(
+            images.len(),
+            pointer_x,
+            self.base_icon.get(),
+            self.base_slot.get(),
+            dock::ITEM_SPACING as f64,
+            self.offset.get(),
+            self.scale.get(),
+        );
+        for (image, size) in images.iter().zip(sizes) {
+            if image.pixel_size() != size {
+                image.set_pixel_size(size);
+            }
+        }
+    }
+}
+
 async fn drive(
     window: gtk::Window,
     items: gtk::Box,
@@ -80,10 +144,18 @@ async fn drive(
     let proxy: Rc<PrimoDockProxy<'static>> = Rc::new(PrimoDockProxy::new(&connection).await?);
     let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
     let applied: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let lens = Lens::default();
     tracing::info!("connected to primodockd");
 
+    window.add_events(gdk::EventMask::POINTER_MOTION_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+    let leaving = lens.clone();
+    window.connect_leave_notify_event(move |_, _| {
+        leaving.focus(None);
+        glib::Propagation::Proceed
+    });
+
     let style = Style { css, applied };
-    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style).await;
+    rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
@@ -106,7 +178,7 @@ async fn drive(
             }
             complete => break,
         }
-        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style).await;
+        rebuild(&window, &items, &screen, proxy.clone(), tiles.clone(), &style, &lens).await;
     }
     Ok(())
 }
@@ -142,6 +214,7 @@ async fn rebuild(
     proxy: Rc<PrimoDockProxy<'static>>,
     tiles: Tiles,
     style: &Style,
+    lens: &Lens,
 ) {
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
@@ -151,6 +224,10 @@ async fn rebuild(
         .as_ref()
         .map(|appearance| appearance.icon_size)
         .unwrap_or(dock::ICON_SIZE);
+    let magnification = appearance
+        .as_ref()
+        .map(|appearance| appearance.magnification)
+        .unwrap_or(magnify::DEFAULT_SCALE);
 
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
@@ -174,6 +251,8 @@ async fn rebuild(
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
         empty.set_widget_name("empty");
         items.add(&empty);
+        lens.images.borrow_mut().clear();
+        lens.roots.borrow_mut().clear();
     } else {
         let icon_size = dock::icon_size_for(
             entries.len() as i32,
@@ -186,9 +265,16 @@ async fn rebuild(
                 },
             preferred_icon,
         );
+        lens.images.borrow_mut().clear();
+        lens.roots.borrow_mut().clear();
         for entry in &entries {
-            items.add(&dock::item_button(entry, icon_size, proxy.clone()));
+            let built = dock::item_button(entry, icon_size, proxy.clone());
+            items.add(&built.root);
+            lens.images.borrow_mut().push(built.image);
+            lens.roots.borrow_mut().push(built.root);
         }
+        lens.remember(icon_size, magnification);
+        lens.watch();
     }
 
     tiles.borrow_mut().clear();
@@ -203,6 +289,8 @@ async fn rebuild(
     }
 
     items.show_all();
+    let settled = lens.clone();
+    glib::idle_add_local_once(move || settled.capture_offset());
     for state in &widgets {
         if let Some(tile) = tiles.borrow().get(&state.id) {
             tile.update(state);

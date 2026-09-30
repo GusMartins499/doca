@@ -8,12 +8,24 @@ pub const DEFAULT_THEME: &str = "native";
 pub const MIN_ICON_SIZE: i32 = 24;
 pub const MAX_ICON_SIZE: i32 = 96;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Appearance {
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_icon_size")]
     pub icon_size: i32,
+    #[serde(default = "default_magnification")]
+    pub magnification: f64,
+    #[serde(default = "default_show_trash")]
+    pub show_trash: bool,
+}
+
+fn default_show_trash() -> bool {
+    true
+}
+
+fn default_magnification() -> f64 {
+    1.6
 }
 
 fn default_theme() -> String {
@@ -29,6 +41,8 @@ impl Default for Appearance {
         Self {
             theme: default_theme(),
             icon_size: default_icon_size(),
+            magnification: default_magnification(),
+            show_trash: default_show_trash(),
         }
     }
 }
@@ -38,6 +52,12 @@ impl Appearance {
         Self {
             theme: self.theme.trim().to_lowercase(),
             icon_size: self.icon_size.clamp(MIN_ICON_SIZE, MAX_ICON_SIZE),
+            magnification: if self.magnification.is_finite() {
+                self.magnification.clamp(1.0, 2.5)
+            } else {
+                1.0
+            },
+            show_trash: self.show_trash,
         }
     }
 }
@@ -262,6 +282,22 @@ mod tests {
             config("[appearance]\nicon_size = 2\n").appearance().icon_size,
             MIN_ICON_SIZE
         );
+    }
+
+    #[test]
+    fn magnification_is_kept_inside_a_range_that_still_looks_like_a_dock() {
+        assert_eq!(config("[appearance]\nmagnification = 99.0\n").appearance().magnification, 2.5);
+        assert_eq!(config("[appearance]\nmagnification = 0.2\n").appearance().magnification, 1.0);
+    }
+
+    #[test]
+    fn magnification_of_one_is_how_it_is_turned_off() {
+        assert_eq!(config("[appearance]\nmagnification = 1.0\n").appearance().magnification, 1.0);
+    }
+
+    #[test]
+    fn a_nonsense_magnification_turns_the_lens_off_rather_than_breaking_layout() {
+        assert_eq!(config("[appearance]\nmagnification = nan\n").appearance().magnification, 1.0);
     }
 
     #[test]
