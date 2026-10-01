@@ -2,6 +2,7 @@ mod config;
 mod desktop;
 mod folder;
 mod model;
+mod patch;
 mod service;
 mod trash;
 mod widgets;

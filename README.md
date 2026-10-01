@@ -190,6 +190,38 @@ Cycling walks the environments in config order and wraps round, catch-alls
 included: switching by hand needs no workspace to switch to. It refuses when
 there is only one environment, which is the only case with nowhere to go.
 
+## Changing the configuration while it runs
+
+Everything in `config.toml` that the dock can change, it can change on the bus,
+and the bar applies it without being restarted. The daemon is the only writer:
+it validates what arrives, writes the file beside itself and renames it into
+place — so a session that dies mid-write leaves the old config intact rather
+than half a TOML — and then announces `ConfigChanged`, which the bar answers by
+re-reading and reapplying the theme, the icon size, the lens, the auto-hide and
+the trash on the window already on screen.
+
+| method | |
+|---|---|
+| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
+| `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written and announced — a widget already running keeps the setting it started with until the daemon restarts. |
+| `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |
+| `RemoveEnvironment(s)` | removes a dock. The last one cannot go: something always has to be on screen. |
+| `RenameEnvironment(s, s)` → `s` | renames a dock, and follows the rename if that dock is the one a key put on screen. |
+| `SetEnvironmentWorkspaces(s, ai)` | which workspaces a dock claims, tidied: sorted, deduplicated, negatives dropped. An empty list makes it the catch-all. |
+| `SetEnvironmentWidgets(s, as)` | the widgets a dock shows, in the order it shows them. |
+| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. `PinItem`/`UnpinItem` remain the only way the set changes. |
+
+Anything refused comes back as `InvalidArgs` with the reason in it, and nothing
+is written. Numbers may be sent as any integer width, or as text, so a
+keybinding or a `gdbus call` typed by hand works as well as a GUI does:
+
+```bash
+gdbus call --session --dest io.github.gusmartins499.Doca \
+    --object-path /io/github/gusmartins499/Doca \
+    --method io.github.gusmartins499.Doca1.SetAppearance \
+    '{"theme": <"midnight">, "icon_size": <int32 64>}'
+```
+
 ## Development
 
 ```

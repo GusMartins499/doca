@@ -131,8 +131,15 @@ impl Hide {
             return;
         }
         if !was_enabled {
-            self.shown.set(false);
+            // Auto-hide has just been switched on, and the bar is on screen
+            // because until now it had no reason not to be. Sliding it away
+            // shows what the toggle did; dropping it there a frame later
+            // reads as the dock having crashed.
+            self.shown.set(true);
             self.settle();
+            window.move_(x, shown_y);
+            self.slide(window, false);
+            return;
         }
         // A rebuild lands at any moment, the middle of a slide included. The
         // bar has already been told where to go; moving it now would undo the
@@ -247,11 +254,18 @@ async fn drive(
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
     let mut widget_changed = proxy.receive_widget_changed().await?;
+    let mut config_changed = proxy.receive_config_changed().await?;
 
     loop {
         futures_util::select! {
             _ = futures_util::StreamExt::next(&mut items_changed) => {}
             _ = futures_util::StreamExt::next(&mut environment_changed) => {}
+            // The config was written, so the look may have moved under us.
+            // A rebuild re-reads `appearance()` and reapplies all of it —
+            // theme, icon size, lens, auto-hide, strut — on the window that
+            // is already on screen, which is what makes a preferences window
+            // possible without asking anyone to restart the dock.
+            _ = futures_util::StreamExt::next(&mut config_changed) => {}
             signal = futures_util::StreamExt::next(&mut widget_changed) => {
                 if let Some(signal) = signal {
                     if let Ok(args) = signal.args() {
