@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Doca
+GenericName=Dock Preferences
+Comment=Change the dock — theme, size, docks, widgets and keys
+Exec=doca-prefs
+Icon=preferences-desktop
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+Keywords=dock;panel;taskbar;doca;
+StartupNotify=true
+StartupWMClass=doca-prefs
+X-GNOME-Settings-Panel=doca

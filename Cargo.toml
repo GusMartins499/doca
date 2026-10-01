@@ -4,6 +4,7 @@ members = [
     "crates/doca-ipc",
     "crates/docad",
     "crates/doca-shell",
+    "crates/doca-prefs",
 ]
 
 [workspace.package]

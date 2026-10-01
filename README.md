@@ -223,6 +223,39 @@ Cycling walks the environments in config order and wraps round, catch-alls
 included: switching by hand needs no workspace to switch to. It refuses when
 there is only one environment, which is the only case with nowhere to go.
 
+## Preferences
+
+```bash
+doca-prefs
+```
+
+Also from **right-clicking the dock → Preferences…**, and from the applications
+menu once `packaging/doca-prefs.desktop` is installed. It is single-instance:
+opening it again brings the window you have to the front rather than starting a
+second writer.
+
+Every control applies as it moves. There is no Apply and no OK — a dialog that
+asked you to confirm what you had just chosen would be the TOML again, with
+buttons. The window writes only through the bus, so the daemon stays the one
+thing that validates and saves, and a change made anywhere else — a bound key,
+a second window — moves these controls too.
+
+The **Appearance** tab is live: theme, icon size, magnification, auto-hide and
+the trash. The theme list comes from the shared contract rather than being
+written out in the window, so a theme added to the dock appears here without
+anyone remembering to. **Docks**, **Widgets** and **Shortcuts** are named but
+not yet built — each arrives with its own slice of #21, and each tab says what
+it will hold rather than being hidden until then.
+
+With no daemon running the window says so in a line, instead of drawing
+controls that would all look like they had worked and changed nothing.
+
+A separate binary rather than a window inside the dock, for three reasons: the
+shell draws the bar and reserves the screen edge, and a fault in a settings
+window must not take that down; the window leaves memory when it closes; and
+the daemon stays the single source of truth, which makes this window just
+another caller on the bus, no different from a keybinding.
+
 ## Changing the configuration while it runs
 
 Everything in `config.toml` that the dock can change, it can change on the bus,
@@ -261,6 +294,7 @@ gdbus call --session --dest io.github.gusmartins499.Doca \
 crates/doca-ipc     shared D-Bus contract
 crates/docad        the daemon: windows, workspaces, state
 crates/doca-shell   the bar: draws, anchors, never talks X11 policy
+crates/doca-prefs   the preferences window: writes only through the bus
 ```
 
 The D-Bus boundary between the two is load-bearing: when the X11 session goes

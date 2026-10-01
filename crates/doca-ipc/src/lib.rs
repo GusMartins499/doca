@@ -63,6 +63,26 @@ pub struct Appearance {
     pub cursor_theme: String,
 }
 
+/// The themes the bar can wear, in the order something listing them should.
+///
+/// Here rather than in the shell because three crates need to agree on it: the
+/// shell owns the stylesheets, the daemon validates what is asked for, and a
+/// preferences window has to offer the list without writing it out by hand —
+/// a hand-written copy is a list that goes stale the first time a theme is
+/// added.
+pub const THEMES: [&str; 4] = ["system", "native", "midnight", "paper"];
+
+/// The theme a config that never mentioned one gets.
+pub const DEFAULT_THEME: &str = "native";
+
+/// The limits every writer is held to, so a window can show them as a range
+/// instead of guessing and being corrected after the fact.
+pub const MIN_ICON_SIZE: i32 = 24;
+pub const MAX_ICON_SIZE: i32 = 96;
+/// 1.0 is how the lens is turned off, so it is also the floor.
+pub const MIN_MAGNIFICATION: f64 = 1.0;
+pub const MAX_MAGNIFICATION: f64 = 2.5;
+
 /// The keys `SetAppearance` understands, by the name they carry on the wire.
 pub mod appearance_key {
     pub const THEME: &str = "theme";

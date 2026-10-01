@@ -1,4 +1,4 @@
-pub const DEFAULT: &str = "native";
+pub use doca_ipc::DEFAULT_THEME as DEFAULT;
 
 /// The theme that has no colours of its own.
 pub const SYSTEM: &str = "system";
@@ -122,8 +122,12 @@ const SYSTEM_CSS: &str = "
     #tooltip-label { color: @theme_fg_color; font-size: 12px; }
 ";
 
+/// The themes on offer, from the contract rather than from here.
+///
+/// The stylesheets are this module's business; the list of names is shared
+/// with the daemon that validates them and the window that offers them.
 pub fn names() -> [&'static str; 4] {
-    [SYSTEM, "native", "midnight", "paper"]
+    doca_ipc::THEMES
 }
 
 /// The themes that carry their own palette, as opposed to borrowing one.
