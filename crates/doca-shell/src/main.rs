@@ -85,14 +85,37 @@ fn main() -> Result<()> {
 
 type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
 
-#[derive(Clone, Default)]
+/// The bar's own movement: where it sits, and the slide between the two places.
+///
+/// `shown` is where the bar is *going*, not where it is. Where it is comes from
+/// `since` and the curve in `motion` — one source of truth, read afresh every
+/// frame, so a slide can be turned round halfway without anyone having to know
+/// how far along it was.
+#[derive(Clone)]
 struct Hide {
     enabled: Rc<Cell<bool>>,
     shown: Rc<Cell<bool>>,
     shown_y: Rc<Cell<i32>>,
     height: Rc<Cell<i32>>,
     x: Rc<Cell<i32>>,
-    animating: Rc<Cell<bool>>,
+    /// When the bar was last told where to go.
+    since: Rc<Cell<Instant>>,
+    ticking: Rc<Cell<bool>>,
+}
+
+impl Default for Hide {
+    fn default() -> Self {
+        Self {
+            enabled: Rc::new(Cell::new(false)),
+            shown: Rc::new(Cell::new(false)),
+            shown_y: Rc::new(Cell::new(0)),
+            height: Rc::new(Cell::new(0)),
+            x: Rc::new(Cell::new(0)),
+            // Far enough back that the bar is already wherever it was sent.
+            since: Rc::new(Cell::new(Instant::now() - motion::SLIDE)),
+            ticking: Rc::new(Cell::new(false)),
+        }
+    }
 }
 
 impl Hide {
@@ -103,41 +126,64 @@ impl Hide {
         let was_enabled = self.enabled.replace(enabled);
         if !enabled {
             self.shown.set(true);
+            self.settle();
             window.move_(x, shown_y);
             return;
         }
         if !was_enabled {
             self.shown.set(false);
+            self.settle();
         }
-        let y = if self.shown.get() {
-            shown_y
-        } else {
-            motion::hidden_y(shown_y, height)
-        };
-        window.move_(x, y);
-    }
-
-    fn slide(&self, window: &gtk::Window, to_shown: bool) {
-        if !self.enabled.get() || self.shown.get() == to_shown || self.animating.get() {
+        // A rebuild lands at any moment, the middle of a slide included. The
+        // bar has already been told where to go; moving it now would undo the
+        // frame the slide just drew.
+        if self.ticking.get() {
             return;
         }
-        self.shown.set(to_shown);
-        self.animating.set(true);
+        window.move_(x, self.y());
+    }
 
+    /// Where the bar is this instant, part-way through a slide or at rest.
+    fn y(&self) -> i32 {
+        let shown_y = self.shown_y.get();
+        let hidden = motion::hidden_y(shown_y, self.height.get());
+        let progress = motion::slide_progress(self.since.get().elapsed(), self.shown.get());
+        motion::slide_y(progress, shown_y, hidden)
+    }
+
+    /// Declare the slide over, wherever it was going.
+    fn settle(&self) {
+        self.since.set(Instant::now() - motion::SLIDE);
+    }
+
+    /// Send the bar up or down, from wherever it happens to be.
+    ///
+    /// Asking for the way it is already going is nothing; asking for the other
+    /// way turns it round at the position it is at, and the time left shrinks
+    /// with the distance left. Dropping the request instead — which is what
+    /// this did — left the pointer inside a bar that stayed hidden until the
+    /// mouse moved again.
+    fn slide(&self, window: &gtk::Window, to_shown: bool) {
+        if !self.enabled.get() || self.shown.replace(to_shown) == to_shown {
+            return;
+        }
+        let elapsed = self.since.get().elapsed();
+        self.since
+            .set(Instant::now() - motion::reversed_start(elapsed, motion::SLIDE));
+        self.run(window);
+    }
+
+    /// Draw the slide on the compositor's clock, and stop once it has arrived.
+    fn run(&self, window: &gtk::Window) {
+        if self.ticking.replace(true) {
+            return;
+        }
         let hide = self.clone();
-        let window = window.clone();
-        let start = Instant::now();
-        glib::timeout_add_local(motion::FRAME, move || {
-            let elapsed = start.elapsed();
-            let raw = elapsed.as_secs_f64() / motion::SLIDE.as_secs_f64();
-            let progress = if to_shown { raw } else { 1.0 - raw };
-
-            let shown_y = hide.shown_y.get();
-            let hidden = motion::hidden_y(shown_y, hide.height.get());
-            window.move_(hide.x.get(), motion::slide_y(progress, shown_y, hidden));
-
-            if raw >= 1.0 {
-                hide.animating.set(false);
+        let moving = window.clone();
+        window.add_tick_callback(move |_, _| {
+            moving.move_(hide.x.get(), hide.y());
+            if hide.since.get().elapsed() >= motion::SLIDE {
+                hide.ticking.set(false);
                 return glib::ControlFlow::Break;
             }
             glib::ControlFlow::Continue

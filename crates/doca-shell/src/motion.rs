@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 pub const SLIDE: Duration = Duration::from_millis(160);
+/// A frame on a sixty-hertz screen. Nothing animates on this any more — both
+/// the bar and the row ride the compositor's own clock — and it is kept as the
+/// yardstick for how far a thing may move between two frames.
+#[cfg(test)]
 pub const FRAME: Duration = Duration::from_millis(16);
 pub const PEEK: i32 = 2;
 pub const LAUNCH: Duration = Duration::from_millis(700);
@@ -39,14 +43,40 @@ pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
 ///
 /// Leaving halfway through the opening should close from halfway, not from
 /// wide open. Plank does this by moving the start time forward; so does this.
-pub fn reversed_start(elapsed: Duration) -> Duration {
-    ZOOM.saturating_sub(elapsed.min(ZOOM))
+///
+/// It lands exactly, rather than nearly: `ease_out` and `ease_in` are each
+/// other's mirror, so a reversal at `t` resumes at `span - t` on the other
+/// curve at the very position it was at. The time left shrinks with the
+/// distance left, which is why reversing a slide that barely started is over
+/// almost at once.
+pub fn reversed_start(elapsed: Duration, span: Duration) -> Duration {
+    span.saturating_sub(elapsed.min(span))
 }
 
+/// How far down the bar has slid, `elapsed` after it was told where to go.
+///
+/// `1.0` is on screen and `0.0` is tucked away. Showing eases out and hiding
+/// eases in — the same mirrored pair the lens uses, so `reversed_start` can
+/// turn one into the other mid-flight.
+pub fn slide_progress(elapsed: Duration, showing: bool) -> f64 {
+    if elapsed >= SLIDE {
+        return if showing { 1.0 } else { 0.0 };
+    }
+    let t = elapsed.as_secs_f64() / SLIDE.as_secs_f64();
+    if showing {
+        ease_out(t)
+    } else {
+        1.0 - ease_in(t)
+    }
+}
+
+/// Where the bar sits, `progress` of the way onto the screen.
+///
+/// `progress` is already eased: it comes from `slide_progress`, which knows
+/// which way the bar is going.
 pub fn slide_y(progress: f64, shown_y: i32, hidden_y: i32) -> i32 {
-    let eased = ease_out(progress);
     let travel = (hidden_y - shown_y) as f64;
-    shown_y + (travel * (1.0 - eased)).round() as i32
+    shown_y + (travel * (1.0 - progress.clamp(0.0, 1.0))).round() as i32
 }
 
 pub fn hidden_y(shown_y: i32, height: i32) -> i32 {
@@ -158,7 +188,7 @@ mod tests {
         let halfway = ZOOM / 2;
         let open_to = zoom_progress(halfway, true);
 
-        let closing_from = zoom_progress(reversed_start(halfway), false);
+        let closing_from = zoom_progress(reversed_start(halfway, ZOOM), false);
 
         assert!(
             (closing_from - open_to).abs() < 0.2,
@@ -168,8 +198,78 @@ mod tests {
 
     #[test]
     fn leaving_after_it_finished_closes_from_wide_open() {
-        assert_eq!(reversed_start(ZOOM), Duration::ZERO);
-        assert_eq!(reversed_start(ZOOM * 3), Duration::ZERO);
+        assert_eq!(reversed_start(ZOOM, ZOOM), Duration::ZERO);
+        assert_eq!(reversed_start(ZOOM * 3, ZOOM), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_slide_is_tucked_away_at_the_start_and_on_screen_at_the_end() {
+        assert_eq!(slide_progress(Duration::ZERO, true), 0.0);
+        assert_eq!(slide_progress(SLIDE, true), 1.0);
+        assert_eq!(slide_progress(SLIDE * 2, true), 1.0);
+
+        assert_eq!(slide_progress(Duration::ZERO, false), 1.0);
+        assert_eq!(slide_progress(SLIDE, false), 0.0);
+        assert_eq!(slide_progress(SLIDE * 2, false), 0.0);
+    }
+
+    #[test]
+    fn a_slide_only_ever_moves_towards_where_it_was_sent() {
+        for showing in [true, false] {
+            let mut previous = slide_progress(Duration::ZERO, showing);
+            for step in 1..=100 {
+                let current = slide_progress(SLIDE * step / 100, showing);
+                if showing {
+                    assert!(current >= previous, "the bar fell back while rising at {step}");
+                } else {
+                    assert!(current <= previous, "the bar rose while falling at {step}");
+                }
+                previous = current;
+            }
+        }
+    }
+
+    /// The reason this issue existed: the pointer arrives mid-hide and the bar
+    /// has to come back from wherever it is, without a jump.
+    #[test]
+    fn turning_a_slide_round_never_jumps_further_than_one_frame_of_travel() {
+        let hidden = hidden_y(SHOWN, HEIGHT);
+        let travel = (hidden - SHOWN) as f64;
+        let one_frame = travel * (FRAME.as_secs_f64() / SLIDE.as_secs_f64());
+
+        for step in 0..=100 {
+            let at = SLIDE * step / 100;
+            let before = slide_y(slide_progress(at, false), SHOWN, hidden);
+            let after = slide_y(
+                slide_progress(reversed_start(at, SLIDE), true),
+                SHOWN,
+                hidden,
+            );
+
+            assert!(
+                (before - after).abs() as f64 <= one_frame.ceil(),
+                "turning round at {step}% jumped {} px, more than the {one_frame:.1} px a frame moves",
+                (before - after).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn turning_round_early_is_over_early() {
+        let tenth = SLIDE / 10;
+
+        let left = SLIDE - reversed_start(tenth, SLIDE);
+
+        assert_eq!(
+            left, tenth,
+            "reversing a tenth of the way in should cost a tenth of the time, not all of it"
+        );
+    }
+
+    #[test]
+    fn a_slide_that_finished_turns_round_from_the_very_end() {
+        assert_eq!(reversed_start(SLIDE, SLIDE), Duration::ZERO);
+        assert_eq!(reversed_start(SLIDE * 4, SLIDE), Duration::ZERO);
     }
 
     #[test]
