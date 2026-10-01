@@ -268,8 +268,9 @@ impl Row {
             return;
         }
         let elapsed = self.hover_since.get().elapsed();
-        self.hover_since
-            .set(Instant::now() - crate::motion::reversed_start(elapsed));
+        self.hover_since.set(
+            Instant::now() - crate::motion::reversed_start(elapsed, crate::motion::ZOOM),
+        );
     }
 
     /// The magnification in force this instant, part-way through opening or
