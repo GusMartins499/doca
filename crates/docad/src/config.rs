@@ -6,12 +6,13 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ENVIRONMENT: &str = "Default";
-pub const DEFAULT_THEME: &str = "native";
-pub const MIN_ICON_SIZE: i32 = 24;
-pub const MAX_ICON_SIZE: i32 = 96;
-/// 1.0 is how the lens is turned off, so it is also the floor.
-pub const MIN_MAGNIFICATION: f64 = 1.0;
-pub const MAX_MAGNIFICATION: f64 = 2.5;
+
+// The look of the dock is a contract between three crates, so its names and
+// limits live in the one they all depend on.
+pub use doca_ipc::{
+    DEFAULT_THEME, MAX_ICON_SIZE, MAX_MAGNIFICATION, MIN_ICON_SIZE, MIN_MAGNIFICATION,
+};
+
 pub const MIN_TIMER_MINUTES: u32 = 1;
 pub const MAX_TIMER_MINUTES: u32 = 24 * 60;
 pub const MIN_WATER_GOAL: u32 = 1;

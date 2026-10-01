@@ -273,6 +273,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "doca-prefs"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "doca-ipc",
+ "futures-util",
+ "glib",
+ "gtk",
+ "tracing",
+ "tracing-subscriber",
+ "zbus",
+]
+
+[[package]]
 name = "doca-shell"
 version = "0.0.1"
 dependencies = [

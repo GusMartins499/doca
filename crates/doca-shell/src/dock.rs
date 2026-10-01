@@ -188,9 +188,43 @@ pub fn context_menu(
         menu.append(&close);
     }
 
+    menu.append(&gtk::SeparatorMenuItem::new());
+    menu.append(&preferences());
+
     menu.show_all();
     menu
 }
+
+/// The way into the preferences window from the dock itself.
+///
+/// This is the hole Plank leaves: its own preferences are only reachable by
+/// typing `plank --preferences` in a terminal, so nobody who installed it ever
+/// finds them. The dock is the thing the user is looking at when they want to
+/// change it, so it is where the way in belongs.
+///
+/// Spawned rather than linked: the window is a separate process on purpose, so
+/// a fault in it cannot take down the bar that reserves the screen edge.
+pub fn preferences() -> gtk::MenuItem {
+    let entry = gtk::MenuItem::with_label("Preferences…");
+    entry.connect_activate(move |_| {
+        // Single-instance, so a second click reaches the window already open
+        // and brings it forward instead of starting a rival writer.
+        match std::process::Command::new(PREFERENCES)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => tracing::info!("opened the preferences window"),
+            Err(e) => tracing::error!("cannot open {PREFERENCES}: {e}"),
+        }
+    });
+    entry
+}
+
+/// The preferences binary, by name: the workspace installs it beside the
+/// others, so whatever found `doca-shell` on PATH finds this too.
+const PREFERENCES: &str = "doca-prefs";
 
 /// Files dropped on the row open with whichever app they landed on.
 pub fn accept_file_drops(icons: &crate::row::Row) {

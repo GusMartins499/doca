@@ -1,0 +1,18 @@
+[package]
+name = "doca-prefs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "doca-prefs"
+path = "src/main.rs"
+
+[dependencies]
+doca-ipc.workspace = true
+zbus.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gtk = "0.18"
+glib = "0.18"
+futures-util = "0.3"

@@ -33,7 +33,7 @@ for tool in "$SERVER" dbus-run-session openbox; do
     }
 done
 
-for binary in docad doca-shell; do
+for binary in docad doca-shell doca-prefs; do
     [ -x "$ROOT/target/release/$binary" ] || {
         echo "missing $binary — run: cargo build --release" >&2
         exit 1
@@ -64,6 +64,9 @@ sleep 2
 
 export DISPLAY="$DISPLAY_NUM"
 export XDG_CONFIG_HOME="$SANDBOX/config"
+# The dock's "Preferences…" spawns doca-prefs by name, so the sandbox has to
+# find the one that was just built rather than one installed on the system.
+export PATH="$ROOT/target/release:$PATH"
 
 cat <<INFO
 
