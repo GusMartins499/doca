@@ -75,6 +75,9 @@ icon_size = 48
 magnification = 1.6
 auto_hide = false
 show_trash = true
+icon_theme = ""       # empty follows the system
+gtk_theme = ""
+cursor_theme = ""
 
 [[environments]]
 name = "Work"
@@ -98,11 +101,41 @@ other environment claims.
 
 | key | |
 |---|---|
-| `theme` | `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
+| `theme` | `system` (borrows the colours of the GTK theme in force), `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
 | `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit, or than fit with the lens open. |
 | `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. The lens needs room to open, which comes out of the icon size on a crowded dock. |
 | `auto_hide` | slides the bar off the bottom edge, leaving a two-pixel sliver to point at, and reserves only that sliver through the strut so maximised windows get the screen back. Pointing at the sliver slides it up; moving away slides it down. |
 | `show_trash` | a trash item at the end of the bar. |
+| `icon_theme` | an icon theme for the dock alone. Empty follows `gtk-icon-theme-name`, which is what GNOME Tweaks → Appearance → Icons sets. |
+| `gtk_theme` | a GTK theme for the dock alone, which is what `theme = "system"` reads its colours from. Empty follows the system. |
+| `cursor_theme` | a cursor theme for the dock's own windows. Empty follows the system. |
+
+A name no theme answers to is not an error: GTK falls back on its own and the
+log says what was asked for, so the dock stays usable. Clearing an override
+back to `""` restores whatever the desktop asked for, without a restart.
+
+### Following the system
+
+With `theme = "system"` the bar takes `@theme_bg_color`, `@theme_fg_color`,
+`@theme_selected_bg_color` and `@borders` from the GTK theme instead of carrying
+a palette of its own, and changing the theme in GNOME Tweaks is reflected
+without restarting anything — the dock reloads the stylesheet, and a change of
+icon theme reloads the icons on the bar.
+
+Two things worth knowing before choosing it:
+
+- **The GNOME Shell theme is out of reach.** A *Shell* theme is a
+  `gnome-shell.css` loaded by the GNOME Shell process; the dock is an ordinary
+  GTK3 window, not a Shell extension, and cannot read it. What `system` follows
+  is the *Applications* theme — the one GNOME Tweaks sets under Appearance →
+  Applications. Picking `Sweet-Dark-v40` for both is what makes them match; the
+  dock only ever sees the Applications half.
+- **A theme that defines none of those four colours falls back to `native`**,
+  with the missing names in the log. GTK accepts a stylesheet naming colours
+  the theme never defined — the load succeeds and the declaration simply draws
+  as nothing, which on a translucent window means an *invisible* bar. So the
+  colours are looked up before the sheet is trusted rather than waiting for a
+  failure that never arrives.
 
 ### Folders
 
@@ -202,7 +235,7 @@ the trash on the window already on screen.
 
 | method | |
 |---|---|
-| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
+| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
 | `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written and announced — a widget already running keeps the setting it started with until the daemon restarts. |
 | `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |
 | `RemoveEnvironment(s)` | removes a dock. The last one cannot go: something always has to be on screen. |

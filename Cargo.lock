@@ -277,6 +277,7 @@ name = "doca-shell"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-channel",
  "doca-ipc",
  "futures-util",
  "gdk",

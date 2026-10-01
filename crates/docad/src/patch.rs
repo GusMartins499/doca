@@ -33,6 +33,9 @@ pub fn appearance<'a>(
             }
             key::AUTO_HIDE => patched.auto_hide = flag(value).context("auto_hide")?,
             key::SHOW_TRASH => patched.show_trash = flag(value).context("show_trash")?,
+            key::ICON_THEME => patched.icon_theme = text(value).context("icon_theme")?,
+            key::GTK_THEME => patched.gtk_theme = text(value).context("gtk_theme")?,
+            key::CURSOR_THEME => patched.cursor_theme = text(value).context("cursor_theme")?,
             unknown => bail!(
                 "no appearance key {unknown}; known keys are {}",
                 key::ALL.join(", ")
@@ -134,6 +137,9 @@ mod tests {
             magnification: 1.6,
             show_trash: true,
             auto_hide: false,
+            icon_theme: String::new(),
+            gtk_theme: String::new(),
+            cursor_theme: String::new(),
         }
     }
 
@@ -171,6 +177,33 @@ mod tests {
         assert_eq!(patched.magnification, 2.0);
         assert!(patched.auto_hide);
         assert!(!patched.show_trash);
+    }
+
+    #[test]
+    fn a_theme_of_the_system_can_be_overridden_for_the_dock_alone() {
+        let patched = patch(vec![
+            (key::ICON_THEME, Value::from("Papirus-Dark")),
+            (key::GTK_THEME, Value::from("Adwaita-dark")),
+            (key::CURSOR_THEME, Value::from("McMojave-cursors")),
+        ])
+        .unwrap();
+
+        assert_eq!(patched.icon_theme, "Papirus-Dark");
+        assert_eq!(patched.gtk_theme, "Adwaita-dark");
+        assert_eq!(patched.cursor_theme, "McMojave-cursors");
+    }
+
+    #[test]
+    fn an_override_is_given_back_to_the_system_with_an_empty_name() {
+        let mut base = base();
+        base.icon_theme = "Papirus-Dark".to_string();
+        let given_back =
+            appearance(&base, vec![(key::ICON_THEME, &Value::from(""))]).unwrap();
+
+        assert!(
+            given_back.icon_theme.is_empty(),
+            "there has to be a way back to whatever GNOME Tweaks says"
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod appearance;
 mod dock;
 mod magnify;
 mod motion;
@@ -248,7 +249,26 @@ async fn drive(
         row: icons.clone(),
         hide,
         label,
+        themes: appearance::Themes::capture(),
     };
+
+    // A theme switched in GNOME Tweaks arrives as a GtkSettings notification,
+    // on the GTK thread, with no way to await a rebuild from there — so the
+    // handlers only name the property, and the loop below does the work.
+    let (theme_moved, theme_moves) = async_channel::unbounded::<&'static str>();
+    let mut theme_moves = Box::pin(theme_moves);
+    if let Some(settings) = gtk::Settings::default() {
+        for property in [
+            appearance::GTK_THEME,
+            appearance::ICON_THEME,
+            appearance::CURSOR_THEME,
+        ] {
+            let telling = theme_moved.clone();
+            settings.connect_notify_local(Some(property), move |_, _| {
+                let _ = telling.send_blocking(property);
+            });
+        }
+    }
     rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
@@ -266,6 +286,23 @@ async fn drive(
             // is already on screen, which is what makes a preferences window
             // possible without asking anyone to restart the dock.
             _ = futures_util::StreamExt::next(&mut config_changed) => {}
+            property = futures_util::StreamExt::next(&mut theme_moves) => {
+                let Some(property) = property else { continue };
+                let Some(themes) = &chrome.themes else { continue };
+                // Tell a change the desktop made from one we made ourselves:
+                // only the desktop's changes what "follow the system" means.
+                themes.absorb(property);
+                let redo = appearance::redo_for(property, &chrome.style.applied.borrow().clone());
+                if !redo.anything() {
+                    continue;
+                }
+                if redo.stylesheet {
+                    chrome.style.invalidate();
+                }
+                if redo.icons {
+                    chrome.row.reload_icons();
+                }
+            }
             signal = futures_util::StreamExt::next(&mut widget_changed) => {
                 if let Some(signal) = signal {
                     if let Ok(args) = signal.args() {
@@ -377,11 +414,13 @@ struct Chrome {
     row: row::Row,
     hide: Hide,
     label: tooltip::Tooltip,
+    /// None when GTK has no settings to override, which no real session is.
+    themes: Option<appearance::Themes>,
 }
 
 impl Style {
-    fn apply(&self, requested: &str) {
-        let resolved = theme::resolve(requested);
+    fn apply(&self, requested: &str, context: &gtk::StyleContext) {
+        let resolved = self.usable(theme::resolve(requested), context);
         if *self.applied.borrow() == resolved {
             return;
         }
@@ -393,8 +432,55 @@ impl Style {
                 tracing::info!(theme = resolved, "theme applied");
                 *self.applied.borrow_mut() = resolved.to_string();
             }
-            Err(e) => tracing::error!("theme {resolved} failed to load: {e}"),
+            // A sheet that fails to load fails whole, leaving the bar with no
+            // style at all — which `system` can do on a GTK theme that names
+            // none of the colours it borrows. A dock in the wrong colours is
+            // worth having; an unstyled one is not.
+            Err(e) => {
+                tracing::error!("theme {resolved} failed to load: {e}");
+                if resolved == theme::DEFAULT {
+                    return;
+                }
+                match self.css.load_from_data(theme::css(theme::DEFAULT).as_bytes()) {
+                    Ok(()) => {
+                        tracing::warn!("{resolved} did not load, falling back to {}", theme::DEFAULT);
+                        *self.applied.borrow_mut() = theme::DEFAULT.to_string();
+                    }
+                    Err(e) => tracing::error!("even {} failed to load: {e}", theme::DEFAULT),
+                }
+            }
         }
+    }
+
+    /// The sheet to actually load, which is not always the one asked for.
+    ///
+    /// `system` borrows its colours from the GTK theme, and GTK will happily
+    /// load a sheet naming colours the theme never defined — leaving a
+    /// translucent dock with an invisible bar. Checking first is the only way
+    /// to catch that, because nothing fails.
+    fn usable(&self, resolved: &'static str, context: &gtk::StyleContext) -> &'static str {
+        if resolved != theme::SYSTEM {
+            return resolved;
+        }
+        let missing = theme::missing_colours(context);
+        if missing.is_empty() {
+            return resolved;
+        }
+        tracing::warn!(
+            missing = missing.join(", "),
+            "the GTK theme does not define the colours the system theme borrows, using {}",
+            theme::DEFAULT
+        );
+        theme::DEFAULT
+    }
+
+    /// Forget which sheet is loaded, so the next apply loads it again.
+    ///
+    /// The cache exists because a rebuild happens several times a minute and
+    /// the theme almost never moves. `system` is the exception: the sheet is
+    /// the same string, and the colours it reads are not.
+    fn invalidate(&self) {
+        self.applied.borrow_mut().clear();
     }
 }
 
@@ -412,10 +498,17 @@ async fn rebuild(
         row,
         hide,
         label,
+        themes,
     } = chrome;
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
-        style.apply(&appearance.theme);
+        // The overrides go first: the `system` sheet reads named colours out
+        // of the GTK theme in force, so loading it before switching themes
+        // would read them from the one on its way out.
+        if let Some(themes) = themes {
+            themes.apply(appearance);
+        }
+        style.apply(&appearance.theme, &row.area.style_context());
     }
     let preferred_icon = appearance
         .as_ref()
@@ -429,11 +522,6 @@ async fn rebuild(
         .as_ref()
         .map(|appearance| appearance.magnification)
         .unwrap_or(magnify::DEFAULT_SCALE);
-
-    let appearance_theme = appearance
-        .as_ref()
-        .map(|appearance| appearance.theme.clone())
-        .unwrap_or_else(|| theme::DEFAULT.to_string());
 
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
@@ -473,7 +561,10 @@ async fn rebuild(
                 magnification,
             ),
         );
-        let (running, active) = theme::dots(&appearance_theme);
+        // The row draws its own dots, so for `system` they are looked up as
+        // values rather than read from the sheet.
+        let (running, active) =
+            theme::dots_for(&style.applied.borrow(), &row.area.style_context());
         row.dot_colours(running, active);
     }
 
@@ -564,4 +655,70 @@ fn on_a_display() {
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
+    an_undefined_colour_is_not_something_gtk_reports();
+    a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();
+    the_system_sheet_loads_against_a_real_gtk_theme();
+}
+
+/// Why `system` is guarded by a lookup and not by a load error.
+///
+/// GTK does *not* refuse a sheet that names a colour the theme never defined:
+/// the load returns `Ok` and the declaration resolves to nothing when drawn.
+/// On a translucent dock that is an invisible bar — a worse outcome than an
+/// ugly one, and a silent one. So `Style::usable` looks the colours up
+/// instead of waiting for a failure that never comes.
+///
+/// If a future GTK starts refusing these, this check fails and says so, and
+/// the guard can be simplified to the load error after all.
+#[cfg(test)]
+fn an_undefined_colour_is_not_something_gtk_reports() {
+    let provider = gtk::CssProvider::new();
+
+    assert!(
+        provider
+            .load_from_data(b"#bar { background: @no_such_colour_anywhere; }")
+            .is_ok(),
+        "GTK now refuses an undefined named colour; the lookup guard in \
+         Style::usable can be replaced by the load error"
+    );
+}
+
+/// The fallback in `Style::apply` loads `native` through the same provider
+/// that just failed, which is only a rescue if the failure leaves the
+/// provider usable rather than poisoned.
+#[cfg(test)]
+fn a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another() {
+    let provider = gtk::CssProvider::new();
+
+    assert!(
+        provider.load_from_data(b"#bar { no-such-prop: 3px; }").is_err(),
+        "a malformed sheet should fail, or there is nothing for the \
+         fallback to catch"
+    );
+    assert!(
+        provider
+            .load_from_data(theme::css(theme::DEFAULT).as_bytes())
+            .is_ok(),
+        "the provider was left unusable by the failure, so falling back \
+         through it would leave the bar unstyled"
+    );
+}
+
+/// The system sheet against whatever theme this session is actually wearing.
+#[cfg(test)]
+fn the_system_sheet_loads_against_a_real_gtk_theme() {
+    let provider = gtk::CssProvider::new();
+
+    if let Err(e) = provider.load_from_data(theme::css(theme::SYSTEM).as_bytes()) {
+        panic!("the system sheet does not load under this GTK theme: {e}");
+    }
+
+    // And the colours it borrows are really there to borrow, so an ordinary
+    // theme does not trip the fallback.
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    let missing = theme::missing_colours(&gtk::prelude::WidgetExt::style_context(&window));
+    assert!(
+        missing.is_empty(),
+        "this GTK theme defines none of {missing:?}, so system would fall back here"
+    );
 }
