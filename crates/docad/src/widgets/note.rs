@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use doca_ipc::{WidgetState, NO_PROGRESS};
 
-use crate::config::NoteSettings;
+use crate::config::{NoteSettings, WidgetSettings};
 
 use super::Widget;
 
@@ -46,11 +46,28 @@ impl Widget for Note {
             active: false,
         }
     }
+
+    fn adopt(&mut self, settings: &WidgetSettings) {
+        self.settings = settings.note.clone();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_rewritten_elsewhere_is_the_note_the_widget_shows() {
+        let mut note = Note::new(NoteSettings { text: "old".into() });
+        assert_eq!(note.poll().label, "old");
+
+        note.adopt(&WidgetSettings {
+            note: NoteSettings { text: "new".into() },
+            ..WidgetSettings::default()
+        });
+
+        assert_eq!(note.poll().label, "new");
+    }
 
     #[test]
     fn a_one_line_note_is_the_label_with_a_plain_caption() {

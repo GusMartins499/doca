@@ -5,12 +5,14 @@
 //! confirmation worth having. A dialog that asked the user to press OK to see
 //! what they had just chosen would be the TOML again, with buttons.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use doca_ipc::{appearance_key as key, Appearance};
 use gtk::prelude::*;
 use zbus::zvariant::Value;
+
+use crate::chrome::{pretty, Filling};
 
 /// Where a moved control sends its one key.
 ///
@@ -20,27 +22,6 @@ use zbus::zvariant::Value;
 /// the kind of thing that works until it doesn't; this makes it observable.
 pub type Send = Rc<dyn Fn(&'static str, Value<'static>)>;
 
-/// Whether the controls are being filled in from the daemon right now.
-///
-/// Setting a widget's value fires its own `changed` handler, which would send
-/// back the value that had just arrived — harmless once, a loop the moment
-/// something else is also writing. Every handler asks this first.
-#[derive(Clone, Default)]
-struct Filling(Rc<Cell<bool>>);
-
-impl Filling {
-    /// Do something to the widgets without their handlers answering back.
-    fn while_filling(&self, fill: impl FnOnce()) {
-        self.0.set(true);
-        fill();
-        self.0.set(false);
-    }
-
-    fn is_filling(&self) -> bool {
-        self.0.get()
-    }
-}
-
 pub struct Tab {
     pub root: gtk::Widget,
     theme: gtk::ComboBoxText,
@@ -49,6 +30,11 @@ pub struct Tab {
     magnify: gtk::Switch,
     auto_hide: gtk::Switch,
     show_trash: gtk::Switch,
+    /// Setting a widget's value fires its own `changed` handler, which here
+    /// really would send the value that had just arrived straight back —
+    /// every control in this tab writes on a value changing, because that is
+    /// what makes the look follow the slider. Harmless once, a loop the
+    /// moment something else is also writing.
     filling: Filling,
     /// Kept because the lens switch makes it insensitive, and wiring happens
     /// after the widgets are built.
@@ -257,15 +243,6 @@ impl Tab {
                 switch.set_state(on);
             }
         });
-    }
-}
-
-/// A theme's name as a person reads it.
-fn pretty(name: &str) -> String {
-    let mut letters = name.chars();
-    match letters.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + letters.as_str(),
-        None => String::new(),
     }
 }
 

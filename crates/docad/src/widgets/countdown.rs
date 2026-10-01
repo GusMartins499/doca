@@ -4,7 +4,9 @@ use doca_ipc::{WidgetState, NO_PROGRESS};
 
 use crate::config::CountdownSettings;
 
-use super::clock::{days_from_civil, local_offset_seconds, parse_date};
+use doca_ipc::parse_date;
+
+use super::clock::{days_from_civil, local_offset_seconds};
 use super::Widget;
 
 pub fn days_until(target: (i64, u32, u32), today: i64) -> i64 {

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use doca_ipc::WidgetState;
 
-use crate::config::TimerSettings;
+use crate::config::{TimerSettings, WidgetSettings};
 
 use super::Widget;
 
@@ -111,6 +111,23 @@ impl Widget for Timer {
         self.state()
     }
 
+    /// A new length, without yanking a countdown already under way.
+    ///
+    /// A timer sitting at its full length has not started, so it simply
+    /// becomes the new length — which is what someone who just typed 15 in a
+    /// settings window is asking for. One that is running, paused part-way or
+    /// has rung keeps the number on screen and takes the new length at its
+    /// next reset: changing the setting is not the same as pressing reset,
+    /// and silently doing both would lose a count nobody asked to lose.
+    fn adopt(&mut self, settings: &WidgetSettings) {
+        let full = Duration::from_secs(settings.timer.minutes.max(1) as u64 * 60);
+        let idle = !self.running && !self.rang && self.remaining == self.full;
+        self.full = full;
+        if idle {
+            self.remaining = full;
+        }
+    }
+
     fn invoke(&mut self, action: &str) {
         match action {
             "toggle" => self.toggle(),
@@ -133,6 +150,59 @@ mod tests {
         for _ in 0..seconds {
             timer.tick(Duration::from_secs(1));
         }
+    }
+
+    fn minutes(minutes: u32) -> WidgetSettings {
+        WidgetSettings {
+            timer: TimerSettings { minutes },
+            ..WidgetSettings::default()
+        }
+    }
+
+    #[test]
+    fn a_new_length_is_shown_at_once_by_a_timer_that_never_started() {
+        let mut timer = timer(10);
+
+        timer.adopt(&minutes(15));
+
+        assert_eq!(timer.remaining(), Duration::from_secs(15 * 60));
+        assert_eq!(timer.state().label, "15:00");
+    }
+
+    #[test]
+    fn a_running_timer_keeps_counting_the_count_it_was_already_on() {
+        let mut timer = timer(10);
+        timer.toggle();
+        run(&mut timer, 30);
+
+        timer.adopt(&minutes(15));
+
+        assert_eq!(timer.remaining(), Duration::from_secs(9 * 60 + 30));
+        assert_eq!(timer.state().detail, "running");
+    }
+
+    #[test]
+    fn a_timer_paused_part_way_is_not_moved_either() {
+        let mut timer = timer(10);
+        timer.toggle();
+        run(&mut timer, 60);
+        timer.toggle();
+
+        timer.adopt(&minutes(2));
+
+        assert_eq!(timer.remaining(), Duration::from_secs(9 * 60));
+    }
+
+    #[test]
+    fn the_new_length_is_what_a_reset_goes_back_to() {
+        let mut timer = timer(10);
+        timer.toggle();
+        run(&mut timer, 60);
+
+        timer.adopt(&minutes(5));
+        timer.reset();
+
+        assert_eq!(timer.remaining(), Duration::from_secs(5 * 60));
     }
 
     #[test]

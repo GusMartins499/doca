@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use doca_ipc::{
-    Appearance, DockItem, EnvironmentInfo, FolderEntry, WidgetState, WindowInfo,
+    Appearance, Application, DockItem, EnvironmentInfo, FolderEntry, WidgetSettings, WidgetState,
+    WindowInfo,
 };
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedValue, Value};
@@ -123,9 +124,29 @@ impl DockService {
         emitter: &SignalEmitter<'_>,
         change: impl FnOnce(&mut Config) -> anyhow::Result<T>,
     ) -> zbus::fdo::Result<T> {
+        let before = self.widget_shape()?;
         let outcome = self.update_config(change)?;
+        let after = self.widget_shape()?;
+        // Compared rather than always settled, so moving a slider in the
+        // Appearance tab does not re-poll twelve widgets. Compared *here*
+        // rather than named by each method, so a write added later cannot
+        // forget to do it: the only way to change what widgets exist or what
+        // they are set to is to go through this.
+        if after != before {
+            if let Err(e) = self.widgets.settle(after.0, after.1).await {
+                // The config is saved and announced; a hub that did not hear
+                // is a bar showing yesterday's setting, not a failed write.
+                tracing::error!("the widgets did not hear the change: {e:#}");
+            }
+        }
         Self::config_changed(emitter).await?;
         Ok(outcome)
+    }
+
+    /// What widgets there are and what they are set to — the pair the hub is
+    /// built from, and the only thing worth comparing across a write.
+    fn widget_shape(&self) -> zbus::fdo::Result<(Vec<String>, crate::config::WidgetSettings)> {
+        self.with_config(|config| (config.all_widgets(), config.widgets.clone()))
     }
 
     fn launch_path(&self, path: &str) -> zbus::fdo::Result<()> {
@@ -218,11 +239,7 @@ impl DockService {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let name = self.shown().await?.name;
-        self.commit(&emitter, |config| {
-            config.pin(&name, id);
-            Ok(())
-        })
-        .await
+        self.commit(&emitter, |config| config.pin(&name, id)).await
     }
 
     async fn unpin_item(
@@ -231,11 +248,8 @@ impl DockService {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let name = self.shown().await?.name;
-        self.commit(&emitter, |config| {
-            config.unpin(&name, id);
-            Ok(())
-        })
-        .await
+        self.commit(&emitter, |config| config.unpin(&name, id))
+            .await
     }
 
     async fn appearance(&self) -> zbus::fdo::Result<Appearance> {
@@ -261,11 +275,14 @@ impl DockService {
         .await
     }
 
+    async fn widget_settings(&self) -> zbus::fdo::Result<WidgetSettings> {
+        self.with_config(widget_settings_of)
+    }
+
     /// Change one setting of one widget.
     ///
-    /// The value is written and announced; a widget already running keeps the
-    /// setting it was built with until the hub is rebuilt, which is not this
-    /// slice's job.
+    /// The value is written, announced, and handed to the widget that is
+    /// already running — see `commit`.
     async fn set_widget_setting(
         &self,
         widget: &str,
@@ -352,6 +369,47 @@ impl DockService {
         Ok(renamed)
     }
 
+    async fn list_applications(&self) -> zbus::fdo::Result<Vec<Application>> {
+        Ok(self
+            .index
+            .listed()
+            .into_iter()
+            .map(|entry| Application {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                icon: entry.icon.clone(),
+            })
+            .collect())
+    }
+
+    /// Pin to the dock named, which need not be the one on screen.
+    async fn pin_in(
+        &self,
+        name: &str,
+        id: &str,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        // A pin on an id no `.desktop` file answers to draws nothing: it would
+        // sit in the config looking like a bug in the dock rather than a typo
+        // in the call. The bar's own `PinItem` needs no such check — the id it
+        // sends came out of this index.
+        if self.index.get(id).is_none() {
+            return Err(rejected(format!("no application called {id}")));
+        }
+        self.commit(&emitter, |config| config.pin(name, id)).await
+    }
+
+    async fn unpin_in(
+        &self,
+        name: &str,
+        id: &str,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        // No index check: unpinning is how an id the index no longer knows —
+        // an app that was uninstalled — gets out of the config.
+        self.commit(&emitter, |config| config.unpin(name, id)).await
+    }
+
     async fn list_widgets(&self) -> zbus::fdo::Result<Vec<WidgetState>> {
         let wanted = self.shown().await?.widgets;
         let available = self.widgets.list().await.map_err(failed)?;
@@ -395,6 +453,8 @@ impl DockService {
                     name: environment.name.clone(),
                     workspaces: environment.workspaces.clone(),
                     current: environment.name == current,
+                    pinned: environment.pinned.clone(),
+                    widgets: environment.widgets.clone(),
                 })
                 .collect()
         })
@@ -492,6 +552,18 @@ impl DockService {
 }
 
 /// The look of the dock as the bus reports it: sanitised, never raw.
+/// The daemon's settings in the flat shape the bus carries, already clamped.
+fn widget_settings_of(config: &Config) -> WidgetSettings {
+    let settings = config.widgets.sanitised();
+    WidgetSettings {
+        countdown_date: settings.countdown.date,
+        countdown_label: settings.countdown.label,
+        note_text: settings.note.text,
+        timer_minutes: settings.timer.minutes,
+        water_goal: settings.water.goal,
+    }
+}
+
 fn appearance_of(config: &Config) -> Appearance {
     let appearance = config.appearance();
     Appearance {

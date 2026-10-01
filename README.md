@@ -243,9 +243,47 @@ a second window — moves these controls too.
 The **Appearance** tab is live: theme, icon size, magnification, auto-hide and
 the trash. The theme list comes from the shared contract rather than being
 written out in the window, so a theme added to the dock appears here without
-anyone remembering to. **Docks**, **Widgets** and **Shortcuts** are named but
-not yet built — each arrives with its own slice of #21, and each tab says what
-it will hold rather than being hidden until then.
+anyone remembering to.
+
+The **Docks** tab is the part a terminal was the only way to reach. Docks are
+added, removed and renamed on the left; on the right are the workspaces that
+dock claims, the apps it pins and the widgets it shows. The workspace field
+counts from 0, the same as the config file, so a hand-edited TOML and this
+window never disagree about which workspace is which; left empty, the dock
+covers whatever no other dock asked for. **Add app…** opens a box you can type
+in, over every installed application — searching the id as well as the name,
+because the id is what the file holds. Pins reorder with Up and Down, which
+move one pin a place and nothing else.
+
+A name is renamed when you press Enter, not as you type: a rename sent letter
+by letter would ask the daemon for "W", then "Wo", then "Wor". Remove greys out
+on the last dock, because the daemon refuses to remove it and a button that is
+always refused is better greyed than argued with. Anything else refused — a
+name already taken — is shown as the sentence the daemon sent back.
+
+The **Widgets** tab is what each widget is *set to* — which is a different
+question from which docks show it, and the reason the two live in different
+tabs: the countdown counts to one date no matter how many docks show it, while
+showing it is a property of the dock. Four of the twelve take settings — a
+countdown's date and caption, a note's text, a timer's length, a water goal —
+and the other eight say so rather than leaving a blank pane. Under each name is
+the line that answers the question this tab exists for: **Shown in Work and
+Home**, or, when nothing shows it, where to turn it on. A date is checked
+before it is sent, because the daemon accepts any text and the widget would
+just show "bad date" in the bar with no room to say why; an empty date is
+allowed, since that is how a countdown is turned off. The date and caption go
+out when you press Enter, the note when you click away or press its button —
+Enter belongs in a note.
+
+A setting reaches the widget that is already running, without restarting
+anything, and without resetting what it was counting: a new water goal keeps
+today's glasses, and a timer already counting down keeps its count and takes
+the new length at its next reset. Changing which widgets a dock shows works
+the same way — the ones that stay are carried over, not rebuilt, so adding a
+widget to one dock does not reset the stopwatch in another.
+
+**Shortcuts** is named but not yet built — it arrives with its own slice of
+#21, and says what it will hold rather than being hidden until then.
 
 With no daemon running the window says so in a line, instead of drawing
 controls that would all look like they had worked and changed nothing.
@@ -269,13 +307,17 @@ the trash on the window already on screen.
 | method | |
 |---|---|
 | `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
-| `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written and announced — a widget already running keeps the setting it started with until the daemon restarts. |
+| `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written, announced, and handed to the widget that is already running — which keeps whatever it was counting. A key nobody knows is refused rather than ignored, and a value out of range is brought back in. |
+| `WidgetSettings()` → `(sssuu)` | what every widget setting is, already clamped. The counterpart of `SetWidgetSetting`, flat and named the same way, so a window can put them straight on its controls. |
 | `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |
 | `RemoveEnvironment(s)` | removes a dock. The last one cannot go: something always has to be on screen. |
 | `RenameEnvironment(s, s)` → `s` | renames a dock, and follows the rename if that dock is the one a key put on screen. |
 | `SetEnvironmentWorkspaces(s, ai)` | which workspaces a dock claims, tidied: sorted, deduplicated, negatives dropped. An empty list makes it the catch-all. |
 | `SetEnvironmentWidgets(s, as)` | the widgets a dock shows, in the order it shows them. |
-| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. `PinItem`/`UnpinItem` remain the only way the set changes. |
+| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. |
+| `PinIn(s, s)` / `UnpinIn(s, s)` | pin and unpin in the dock named, which need not be the one on screen — that is the whole difference from `PinItem`/`UnpinItem`, which act where the user is looking because that is what a click on the bar means. `PinIn` refuses an id no `.desktop` file answers to; `UnpinIn` does not, since that is how an uninstalled app gets out of the config. |
+| `ListEnvironments()` → `a(saibasas)` | every dock: its name, the workspaces it claims, whether it is the one on screen, what it pins and which widgets it shows. Everything a writer can change about a dock is something a reader can see. |
+| `ListApplications()` → `a(sss)` | every installed application — id, name, icon — sorted by name, for a window that has to offer a choice of them. Entries marked `NoDisplay` are left out, the same ones a desktop menu leaves out. |
 
 Anything refused comes back as `InvalidArgs` with the reason in it, and nothing
 is written. Numbers may be sent as any integer width, or as text, so a
@@ -287,6 +329,30 @@ gdbus call --session --dest io.github.gusmartins499.Doca \
     --method io.github.gusmartins499.Doca1.SetAppearance \
     '{"theme": <"midnight">, "icon_size": <int32 64>}'
 ```
+
+## Checking it against a real session
+
+`cargo test` covers everything that can be decided without a bus. Two things
+cannot be, and have scripts of their own:
+
+```bash
+cargo build --release && ./scripts/check-live.sh
+```
+
+starts a daemon and the preferences window on a nested display with a session
+bus and a config of their own, and asserts the part with no controls in it:
+that a change made from anywhere else reaches the window. Writing is a method
+call and hearing is a signal, and the two break apart — every control can work
+while the window quietly stops following. It waits for the subscription rather
+than for the window, because the window is drawn well before it subscribes.
+
+```bash
+DISPLAY=:9 cargo test -p doca-shell -- --ignored
+DISPLAY=:9 cargo test -p doca-prefs -- --ignored
+```
+
+run the checks that need real GTK widgets — the ones that would otherwise be
+assertions about what GTK probably does.
 
 ## Development
 

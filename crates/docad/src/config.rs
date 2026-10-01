@@ -10,13 +10,9 @@ pub const DEFAULT_ENVIRONMENT: &str = "Default";
 // The look of the dock is a contract between three crates, so its names and
 // limits live in the one they all depend on.
 pub use doca_ipc::{
-    DEFAULT_THEME, MAX_ICON_SIZE, MAX_MAGNIFICATION, MIN_ICON_SIZE, MIN_MAGNIFICATION,
+    DEFAULT_THEME, MAX_ICON_SIZE, MAX_MAGNIFICATION, MAX_TIMER_MINUTES, MAX_WATER_GOAL,
+    MIN_ICON_SIZE, MIN_MAGNIFICATION, MIN_TIMER_MINUTES, MIN_WATER_GOAL,
 };
-
-pub const MIN_TIMER_MINUTES: u32 = 1;
-pub const MAX_TIMER_MINUTES: u32 = 24 * 60;
-pub const MIN_WATER_GOAL: u32 = 1;
-pub const MAX_WATER_GOAL: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Appearance {
@@ -262,12 +258,14 @@ impl WidgetSettings {
     /// written to disk — a silently ignored setting is the kind of thing the
     /// user reads as "the dock is broken".
     pub fn set(&mut self, widget: &str, key: &str, value: Setting) -> Result<()> {
+        use doca_ipc::widget_key as k;
+
         match (widget, key) {
-            ("countdown", "date") => self.countdown.date = value.into_text()?,
-            ("countdown", "label") => self.countdown.label = value.into_text()?,
-            ("note", "text") => self.note.text = value.into_text()?,
-            ("timer", "minutes") => self.timer.minutes = value.into_count()?,
-            ("water", "goal") => self.water.goal = value.into_count()?,
+            (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
+            (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
+            (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
+            (k::TIMER, k::MINUTES) => self.timer.minutes = value.into_count()?,
+            (k::WATER, k::GOAL) => self.water.goal = value.into_count()?,
             _ => anyhow::bail!("no setting {key} on widget {widget}"),
         }
         *self = self.sanitised();
@@ -454,18 +452,26 @@ impl Config {
             .find(|environment| environment.name == name)
     }
 
-    pub fn pin(&mut self, name: &str, id: &str) {
-        if let Some(environment) = self.environment_mut(name) {
-            if !environment.pinned.iter().any(|existing| existing == id) {
-                environment.pinned.push(id.to_string());
-            }
+    /// Pin an app to a dock, at the end of what it already pins.
+    ///
+    /// Naming a dock that does not exist is an error rather than a no-op: a
+    /// window editing a dock that was renamed under it would otherwise get a
+    /// success for a write that went nowhere, and show a pin the file does not
+    /// have.
+    pub fn pin(&mut self, name: &str, id: &str) -> Result<()> {
+        let id = Self::usable_id(id)?;
+        let environment = self.named_mut(name)?;
+        if !environment.pinned.contains(&id) {
+            environment.pinned.push(id);
         }
+        Ok(())
     }
 
-    pub fn unpin(&mut self, name: &str, id: &str) {
-        if let Some(environment) = self.environment_mut(name) {
-            environment.pinned.retain(|existing| existing != id);
-        }
+    pub fn unpin(&mut self, name: &str, id: &str) -> Result<()> {
+        let id = Self::usable_id(id)?;
+        let environment = self.named_mut(name)?;
+        environment.pinned.retain(|existing| *existing != id);
+        Ok(())
     }
 
     fn environment_mut(&mut self, name: &str) -> Option<&mut Environment> {
@@ -586,6 +592,16 @@ impl Config {
             environment.name = to.clone();
         }
         Ok(to)
+    }
+
+    /// An app id with nothing but whitespace in it pins nothing, and would
+    /// sit in the file for ever looking like a pin that failed to draw.
+    fn usable_id(id: &str) -> Result<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            anyhow::bail!("a pin needs an application");
+        }
+        Ok(id.to_string())
     }
 
     fn usable_name(name: &str) -> Result<String> {
@@ -801,6 +817,22 @@ mod tests {
         )
     }
 
+    /// The other half of `doca_ipc::widget_key::ALL`: a window builds its
+    /// controls from that list, so every pair in it has to be a pair this
+    /// accepts. A key renamed on one side alone fails here.
+    #[test]
+    fn every_setting_a_window_is_offered_is_a_setting_that_can_be_written() {
+        for (widget, key) in doca_ipc::widget_key::ALL {
+            let mut settings = WidgetSettings::default();
+
+            let written = settings
+                .set(widget, key, Setting::Text("1".to_string()))
+                .or_else(|_| settings.set(widget, key, Setting::Count(1)));
+
+            assert!(written.is_ok(), "{widget}.{key} was refused");
+        }
+    }
+
     #[test]
     fn widget_settings_have_usable_defaults_when_the_block_is_absent() {
         let settings = config("[[environments]]\nname = \"A\"\n").widgets;
@@ -924,7 +956,7 @@ mod tests {
     fn pinning_lands_in_the_dock_that_is_on_screen() {
         let mut config = two_environments();
 
-        config.pin("Personal", "spotify");
+        config.pin("Personal", "spotify").unwrap();
 
         assert_eq!(
             config.environment_named("Personal").unwrap().pinned,
@@ -947,17 +979,37 @@ mod tests {
              pinned = [\"code\"]\n",
         );
 
-        config.unpin("Work", "code");
+        config.unpin("Work", "code").unwrap();
 
         assert!(config.environment_named("Work").unwrap().pinned.is_empty());
         assert_eq!(config.environment_named("Personal").unwrap().pinned, vec!["code"]);
     }
 
     #[test]
+    fn pinning_to_a_dock_that_does_not_exist_is_refused_rather_than_ignored() {
+        let mut config = two_environments();
+
+        let refused = config.pin("Renamed yesterday", "code");
+
+        assert!(
+            refused.is_err(),
+            "a window editing a dock that moved would get a success for nothing"
+        );
+        assert_eq!(config.environment_named("Work").unwrap().pinned, vec!["code"]);
+    }
+
+    #[test]
+    fn a_pin_with_no_application_in_it_is_refused() {
+        let mut config = two_environments();
+
+        assert!(config.pin("Work", "   ").is_err());
+    }
+
+    #[test]
     fn pinning_the_same_app_twice_in_one_environment_keeps_one_entry() {
         let mut config = two_environments();
 
-        config.pin("Work", "code");
+        config.pin("Work", "code").unwrap();
 
         assert_eq!(config.environment_named("Work").unwrap().pinned, vec!["code"]);
     }

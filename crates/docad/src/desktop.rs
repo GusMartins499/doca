@@ -143,6 +143,21 @@ impl DesktopIndex {
         self.entries.len()
     }
 
+    /// Every app worth offering in a list, by name.
+    ///
+    /// `NoDisplay` is the entry's own request not to appear in menus — it is
+    /// how a `.desktop` file says "I exist so something can hand a file to
+    /// me, not so a person can launch me". A pin picker that showed those
+    /// would bury the twenty apps the user has in two hundred they have never
+    /// heard of. `get` still finds them, so a pin on one keeps working.
+    pub fn listed(&self) -> Vec<&DesktopEntry> {
+        let mut shown: Vec<&DesktopEntry> =
+            self.entries.iter().filter(|entry| !entry.no_display).collect();
+        // Case-insensitively, or an alphabetical list puts Zoom before brave.
+        shown.sort_by_key(|entry| (entry.name.to_lowercase(), entry.id.clone()));
+        shown
+    }
+
     pub fn get(&self, id: &str) -> Option<&DesktopEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
@@ -210,6 +225,53 @@ mod tests {
             no_display: false,
             path: PathBuf::from(format!("/usr/share/applications/{id}.desktop")),
         }
+    }
+
+    fn hidden(id: &str) -> DesktopEntry {
+        DesktopEntry {
+            no_display: true,
+            ..entry(id, format!("/usr/bin/{id}").as_str(), None)
+        }
+    }
+
+    fn named(id: &str, name: &str) -> DesktopEntry {
+        DesktopEntry {
+            name: name.to_string(),
+            ..entry(id, format!("/usr/bin/{id}").as_str(), None)
+        }
+    }
+
+    #[test]
+    fn an_entry_that_asked_not_to_be_listed_is_not_offered() {
+        let index = DesktopIndex::from_entries(vec![
+            named("code", "Code"),
+            hidden("org.gnome.Settings.desktop-handler"),
+        ]);
+
+        let listed: Vec<&str> = index.listed().iter().map(|e| e.id.as_str()).collect();
+
+        assert_eq!(listed, ["code"]);
+        assert!(
+            index.get("org.gnome.Settings.desktop-handler").is_some(),
+            "a pin on a hidden entry still has to resolve, or it would stop drawing"
+        );
+    }
+
+    #[test]
+    fn the_list_reads_alphabetically_whatever_case_the_names_are_in() {
+        let index = DesktopIndex::from_entries(vec![
+            named("zoom", "Zoom"),
+            named("brave", "brave-browser"),
+            named("ardour", "Ardour"),
+        ]);
+
+        let listed: Vec<&str> = index.listed().iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(
+            listed,
+            ["Ardour", "brave-browser", "Zoom"],
+            "sorting by byte would file every lowercase name after Zoom"
+        );
     }
 
     fn index() -> DesktopIndex {

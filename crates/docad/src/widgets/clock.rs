@@ -35,17 +35,6 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-pub fn parse_date(value: &str) -> Option<(i64, u32, u32)> {
-    let mut parts = value.trim().split('-');
-    let year: i64 = parts.next()?.parse().ok()?;
-    let month: u32 = parts.next()?.parse().ok()?;
-    let day: u32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    Some((year, month, day))
-}
-
 pub fn weekday(days_since_epoch: i64) -> &'static str {
     WEEKDAYS[(days_since_epoch + 4).rem_euclid(7) as usize]
 }
@@ -182,17 +171,6 @@ mod tests {
             let (y, m, d) = civil_from_days(days);
             assert_eq!(days_from_civil(y, m, d), days, "round trip failed for {days}");
         }
-    }
-
-    #[test]
-    fn a_date_string_parses_only_when_it_is_really_a_date() {
-        assert_eq!(parse_date("2026-12-25"), Some((2026, 12, 25)));
-        assert_eq!(parse_date(" 2026-01-01 "), Some((2026, 1, 1)));
-        assert_eq!(parse_date("2026-13-01"), None);
-        assert_eq!(parse_date("2026-00-10"), None);
-        assert_eq!(parse_date("25/12/2026"), None);
-        assert_eq!(parse_date("2026-12-25-01"), None);
-        assert_eq!(parse_date("tomorrow"), None);
     }
 
     #[test]

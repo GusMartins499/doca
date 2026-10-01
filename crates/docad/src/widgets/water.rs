@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use doca_ipc::WidgetState;
 
-use crate::config::WaterSettings;
+use crate::config::{WaterSettings, WidgetSettings};
 
 use super::Widget;
 
@@ -69,6 +69,14 @@ impl Widget for Water {
         self.state()
     }
 
+    /// A new goal, and the glasses already counted today.
+    ///
+    /// Resetting `drunk` here would be a settings change that quietly undoes
+    /// the user's afternoon.
+    fn adopt(&mut self, settings: &WidgetSettings) {
+        self.goal = settings.water.goal.max(1);
+    }
+
     fn invoke(&mut self, action: &str) {
         match action {
             "toggle" | "drink" => self.drink(),
@@ -85,6 +93,36 @@ mod tests {
 
     fn water(goal: u32) -> Water {
         Water::new(WaterSettings { goal })
+    }
+
+    fn goal_of(goal: u32) -> WidgetSettings {
+        WidgetSettings {
+            water: WaterSettings { goal },
+            ..WidgetSettings::default()
+        }
+    }
+
+    #[test]
+    fn a_new_goal_does_not_forget_what_was_already_drunk() {
+        let mut water = water(8);
+        water.drink();
+        water.drink();
+
+        water.adopt(&goal_of(4));
+
+        assert_eq!(water.state().label, "2/4");
+    }
+
+    #[test]
+    fn a_goal_the_day_has_already_passed_counts_as_done() {
+        let mut water = water(8);
+        for _ in 0..3 {
+            water.drink();
+        }
+
+        water.adopt(&goal_of(2));
+
+        assert!(water.state().active);
     }
 
     #[test]
