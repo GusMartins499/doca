@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Binds a key on your desktop to a PrimoDock action.
+# Binds a key on your desktop to a Doca action.
 #
 # The dock does not grab keys. On Linux the keyboard belongs to the desktop, so
 # the dock exposes its actions on D-Bus and GNOME is told which key calls them.
@@ -22,9 +22,9 @@ set -uo pipefail
 MEDIA_KEYS=org.gnome.settings-daemon.plugins.media-keys
 SLOT_SCHEMA="$MEDIA_KEYS.custom-keybinding"
 SLOT_ROOT=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
-BUS=dev.oprimo.PrimoDock
-OBJECT=/dev/oprimo/PrimoDock
-INTERFACE=dev.oprimo.PrimoDock1
+BUS=io.github.gusmartins499.Doca
+OBJECT=/io/github/gusmartins499/Doca
+INTERFACE=io.github.gusmartins499.Doca1
 
 command -v gsettings >/dev/null || {
     echo "gsettings not found — this script configures GNOME, and needs it" >&2
@@ -94,7 +94,7 @@ if [ "${1:-}" = "--list" ]; then
     mine=0
     for slot in "${SLOTS[@]:-}"; do
         case "$slot" in
-        "$SLOT_ROOT"/primodock-*/) ;;
+        "$SLOT_ROOT"/doca-*/) ;;
         *) continue ;;
         esac
         mine=1
@@ -102,7 +102,7 @@ if [ "${1:-}" = "--list" ]; then
             "$(gsettings get "$SLOT_SCHEMA:$slot" binding)" \
             "$(gsettings get "$SLOT_SCHEMA:$slot" name)"
     done
-    [ "$mine" = "0" ] && echo "no PrimoDock keys bound"
+    [ "$mine" = "0" ] && echo "no Doca keys bound"
     exit 0
 fi
 
@@ -116,12 +116,12 @@ KEY="${1:-<Super>e}"
 ENVIRONMENT="${2:-}"
 
 if [ -n "$ENVIRONMENT" ]; then
-    SLOT="$SLOT_ROOT/primodock-$(slug "$ENVIRONMENT")/"
-    LABEL="PrimoDock: $ENVIRONMENT"
+    SLOT="$SLOT_ROOT/doca-$(slug "$ENVIRONMENT")/"
+    LABEL="Doca: $ENVIRONMENT"
     COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.SetEnvironment \"$ENVIRONMENT\""
 else
-    SLOT="$SLOT_ROOT/primodock-cycle/"
-    LABEL="PrimoDock: cycle environment"
+    SLOT="$SLOT_ROOT/doca-cycle/"
+    LABEL="Doca: cycle environment"
     COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.CycleEnvironment"
 fi
 

@@ -1,9 +1,9 @@
-# PrimoDock Linux
+# Doca
 
 A native dock for Linux with per-environment profiles and live widgets.
 No Electron, no webview.
 
-Port of [PrimoDock](https://dock.oprimo.dev) (macOS) to Linux.
+Doca is a Linux port of [PrimoDock](https://dock.oprimo.dev) (macOS).
 
 ![The dock, with pinned apps on the left and clock, CPU and battery widgets on the right](docs/screenshot.png)
 
@@ -46,7 +46,7 @@ This is the way to evaluate the dock at no risk.
 ./scripts/try-it.sh
 ```
 
-Stops Plank, runs PrimoDock in its place, and restarts Plank when you press
+Stops Plank, runs Doca in its place, and restarts Plank when you press
 Ctrl-C. Two docks cannot share a screen edge — both reserve space through the
 same strut protocol and each reacts to the other's reservation — so they take
 turns rather than fight. On first run it seeds a config from your Plank
@@ -59,14 +59,14 @@ If the dock ever covers the terminal you started it from, switch to a text
 console with `Ctrl+Alt+F3`, log in, and run:
 
 ```bash
-pkill -x primodock-shell; pkill -x primodockd; setsid plank &
+pkill -x doca-shell; pkill -x docad; setsid plank &
 ```
 
 `Ctrl+Alt+F2` returns to the desktop.
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/primodock/config.toml`:
+`$XDG_CONFIG_HOME/doca/config.toml`:
 
 ```toml
 [appearance]
@@ -180,6 +180,12 @@ and written back, and a copy-pasted `gsettings set` that assigns the whole
 array drops every shortcut you had. Each action owns a named slot, so running
 it twice for one action moves that binding instead of adding another.
 
+Keys bound before this project was renamed from PrimoDock to Doca sit in slots
+named `primodock-*`, still calling a bus name that no longer answers: dead keys,
+and `--list` does not see them to say so. Rebind each one with the commands
+above, then delete the old entries — they show up under Settings → Keyboard →
+Custom Shortcuts, named `PrimoDock: …`.
+
 Cycling walks the environments in config order and wraps round, catch-alls
 included: switching by hand needs no workspace to switch to. It refuses when
 there is only one environment, which is the only case with nowhere to go.
@@ -187,9 +193,9 @@ there is only one environment, which is the only case with nowhere to go.
 ## Development
 
 ```
-crates/primodock-ipc     shared D-Bus contract
-crates/primodockd        the daemon: windows, workspaces, state
-crates/primodock-shell   the bar: draws, anchors, never talks X11 policy
+crates/doca-ipc     shared D-Bus contract
+crates/docad        the daemon: windows, workspaces, state
+crates/doca-shell   the bar: draws, anchors, never talks X11 policy
 ```
 
 The D-Bus boundary between the two is load-bearing: when the X11 session goes
@@ -228,8 +234,8 @@ Hover has no one to trigger it on a headless screen, so the pointer is moved
 by hand — and, for clicks, pressed for real through XTEST:
 
 ```bash
-DISPLAY=:9 cargo run -p primodockd --example warp-pointer -- 700 1035
-DISPLAY=:9 cargo run -p primodockd --example warp-pointer -- 700 1035 click:3
+DISPLAY=:9 cargo run -p docad --example warp-pointer -- 700 1035
+DISPLAY=:9 cargo run -p docad --example warp-pointer -- 700 1035 click:3
 ```
 
 ## Not implemented

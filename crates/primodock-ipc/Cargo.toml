@@ -1,8 +1,0 @@
-[package]
-name = "primodock-ipc"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-zbus.workspace = true
-serde.workspace = true

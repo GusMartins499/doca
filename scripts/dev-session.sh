@@ -39,7 +39,7 @@ if [ -z "$WM" ]; then
     exit 1
 fi
 
-for binary in primodockd primodock-shell; do
+for binary in docad doca-shell; do
     [ -x "$ROOT/target/debug/$binary" ] || {
         echo "missing $binary — run: cargo build" >&2
         exit 1
@@ -71,4 +71,4 @@ dbus-run-session -- bash -c '
     "$2" &
     sleep 1
     exec "$3"
-' _ "$WM" "$ROOT/target/debug/primodockd" "$ROOT/target/debug/primodock-shell"
+' _ "$WM" "$ROOT/target/debug/docad" "$ROOT/target/debug/doca-shell"

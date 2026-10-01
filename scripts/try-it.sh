@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Runs PrimoDock on your real session, in place of Plank, and puts Plank back
+# Runs Doca on your real session, in place of Plank, and puts Plank back
 # when you stop it.
 #
 # Two docks cannot share an edge: both reserve space through the same strut
@@ -17,10 +17,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/primodock/config.toml"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/doca/config.toml"
 PLANK_WAS_RUNNING=0
 
-for binary in primodockd primodock-shell; do
+for binary in docad doca-shell; do
     [ -x "$ROOT/target/release/$binary" ] || {
         echo "missing $binary — run: cargo build --release" >&2
         exit 1
@@ -40,9 +40,9 @@ restore() {
     [ "$RESTORED" = "1" ] && exit $code
     RESTORED=1
     echo
-    echo "stopping PrimoDock"
-    pkill -x primodock-shell 2>/dev/null
-    pkill -x primodockd 2>/dev/null
+    echo "stopping Doca"
+    pkill -x doca-shell 2>/dev/null
+    pkill -x docad 2>/dev/null
     if [ "$PLANK_WAS_RUNNING" = "1" ] && ! pgrep -x plank >/dev/null; then
         echo "restarting Plank"
         setsid plank >/dev/null 2>&1 < /dev/null &
@@ -67,7 +67,7 @@ cat <<'ESCAPE'
 
     press  Ctrl+Alt+F3   to reach a text console, log in, then run
 
-      pkill -x primodock-shell; pkill -x primodockd; setsid plank &
+      pkill -x doca-shell; pkill -x docad; setsid plank &
 
     press  Ctrl+Alt+F2   to come back to the desktop.
 
@@ -82,20 +82,20 @@ ESCAPE
 # daemon, which read the config when *it* started — so config changes appear
 # to have been ignored, with the reason buried in the scrollback. Whatever is
 # already running is stopped first.
-if pgrep -x primodockd >/dev/null || pgrep -x primodock-shell >/dev/null; then
-    echo "stopping a PrimoDock that was already running"
-    pkill -x primodock-shell 2>/dev/null
-    pkill -x primodockd 2>/dev/null
+if pgrep -x docad >/dev/null || pgrep -x doca-shell >/dev/null; then
+    echo "stopping a Doca that was already running"
+    pkill -x doca-shell 2>/dev/null
+    pkill -x docad 2>/dev/null
     sleep 1
 fi
 
 echo "config: $CONFIG"
-"$ROOT/target/release/primodockd" &
+"$ROOT/target/release/docad" &
 sleep 1
-"$ROOT/target/release/primodock-shell" &
+"$ROOT/target/release/doca-shell" &
 
 echo
-echo "PrimoDock is running. Left click activates, right click pins or closes."
+echo "Doca is running. Left click activates, right click pins or closes."
 echo "The environment follows the workspace. Press Ctrl-C to stop and get"
 echo "Plank back."
 wait

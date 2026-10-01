@@ -1,0 +1,23 @@
+[package]
+name = "docad"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "docad"
+path = "src/main.rs"
+
+[dependencies]
+doca-ipc.workspace = true
+zbus.workspace = true
+serde.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+x11rb = { version = "0.13", features = ["xtest"] }
+async-channel = "2"
+toml = "0.8"
+
+[dev-dependencies]
+futures-lite = "2"

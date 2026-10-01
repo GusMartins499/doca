@@ -265,6 +265,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "doca-ipc"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "zbus",
+]
+
+[[package]]
+name = "doca-shell"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "doca-ipc",
+ "futures-util",
+ "gdk",
+ "gdkx11",
+ "glib",
+ "gtk",
+ "tracing",
+ "tracing-subscriber",
+ "x11rb",
+ "zbus",
+]
+
+[[package]]
+name = "docad"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "doca-ipc",
+ "futures-lite",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "x11rb",
+ "zbus",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,48 +909,6 @@ dependencies = [
  "pin-project-lite",
  "rustix",
  "windows-sys",
-]
-
-[[package]]
-name = "primodock-ipc"
-version = "0.0.1"
-dependencies = [
- "serde",
- "zbus",
-]
-
-[[package]]
-name = "primodock-shell"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "futures-util",
- "gdk",
- "gdkx11",
- "glib",
- "gtk",
- "primodock-ipc",
- "tracing",
- "tracing-subscriber",
- "x11rb",
- "zbus",
-]
-
-[[package]]
-name = "primodockd"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-channel",
- "futures-lite",
- "primodock-ipc",
- "serde",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "x11rb",
- "zbus",
 ]
 
 [[package]]

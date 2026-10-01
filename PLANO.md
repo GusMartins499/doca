@@ -1,6 +1,6 @@
-# PrimoDock Linux — plano técnico
+# Doca — plano técnico
 
-Porte nativo do PrimoDock (macOS) para Linux, alvo inicial: a máquina do autor.
+Doca é um porte nativo do PrimoDock (macOS) para Linux, alvo inicial: a máquina do autor.
 Restrição dura: **nativo, nada de Electron ou webview**.
 
 ---
@@ -78,14 +78,14 @@ Mesmo começando em X11, vale separar desde o dia um:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  primodock-shell   (a camada que desenha)   │
+│  doca-shell   (a camada que desenha)   │
 │  ─ X11:     GTK3, processo próprio          │
 │  ─ Wayland: extensão GJS/St no Shell        │
 │  Ícones · temas · ampliação · tiles         │
 └──────────────────┬──────────────────────────┘
                    │  DBus  (o contrato)
 ┌──────────────────┴──────────────────────────┐
-│  primodockd   (o cérebro, nativo, portátil) │
+│  docad   (o cérebro, nativo, portátil) │
 │  Ambientes · perfis · config · persistência │
 │  Fontes de dados dos widgets · temas        │
 │  Índice de .desktop · tradução de janelas   │
@@ -105,7 +105,7 @@ configuração, os ambientes e a persistência. Ou seja, 70% do trabalho.
 
 Sem essa fronteira, migrar depois significa reescrever tudo.
 
-### Contrato DBus (`dev.oprimo.PrimoDock`)
+### Contrato DBus (`io.github.gusmartins499.Doca`)
 
 ```
 Métodos

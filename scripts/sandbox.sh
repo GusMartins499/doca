@@ -33,7 +33,7 @@ for tool in "$SERVER" dbus-run-session openbox; do
     }
 done
 
-for binary in primodockd primodock-shell; do
+for binary in docad doca-shell; do
     [ -x "$ROOT/target/release/$binary" ] || {
         echo "missing $binary — run: cargo build --release" >&2
         exit 1
@@ -41,9 +41,9 @@ for binary in primodockd primodock-shell; do
 done
 
 SANDBOX="$ROOT/.sandbox"
-mkdir -p "$SANDBOX/config/primodock"
-if [ ! -f "$SANDBOX/config/primodock/config.toml" ]; then
-    cp "$ROOT/examples/config-from-plank.toml" "$SANDBOX/config/primodock/config.toml"
+mkdir -p "$SANDBOX/config/doca"
+if [ ! -f "$SANDBOX/config/doca/config.toml" ]; then
+    cp "$ROOT/examples/config-from-plank.toml" "$SANDBOX/config/doca/config.toml"
 fi
 
 SERVER_PID=""
@@ -56,7 +56,7 @@ trap cleanup EXIT INT TERM HUP
 if [ "$HEADLESS" = "1" ]; then
     Xvfb "$DISPLAY_NUM" -screen 0 "${GEOMETRY}x24" >/dev/null 2>&1 &
 else
-    Xephyr -br -ac -noreset -title "PrimoDock sandbox — close this window to stop" \
+    Xephyr -br -ac -noreset -title "Doca sandbox — close this window to stop" \
         -screen "$GEOMETRY" "$DISPLAY_NUM" >/dev/null 2>&1 &
 fi
 SERVER_PID=$!
@@ -67,8 +67,8 @@ export XDG_CONFIG_HOME="$SANDBOX/config"
 
 cat <<INFO
 
-  PrimoDock sandbox on $DISPLAY_NUM at $GEOMETRY
-  config: $XDG_CONFIG_HOME/primodock/config.toml
+  Doca sandbox on $DISPLAY_NUM at $GEOMETRY
+  config: $XDG_CONFIG_HOME/doca/config.toml
 
   Nothing here touches your desktop. Your Plank keeps running.
   Close the window, or press Ctrl-C here, to stop.
@@ -88,5 +88,5 @@ dbus-run-session -- bash -c '
     (gnome-calculator >/dev/null 2>&1 &) || true
     (gedit >/dev/null 2>&1 &) || true
     wait
-' _ "$ROOT/target/release/primodockd" "$ROOT/target/release/primodock-shell" \
+' _ "$ROOT/target/release/docad" "$ROOT/target/release/doca-shell" \
     2> >(grep -vE "$NOISE" >&2)

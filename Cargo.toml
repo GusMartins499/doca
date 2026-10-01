@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/primodock-ipc",
-    "crates/primodockd",
-    "crates/primodock-shell",
+    "crates/doca-ipc",
+    "crates/docad",
+    "crates/doca-shell",
 ]
 
 [workspace.package]
@@ -12,7 +12,7 @@ edition = "2021"
 rust-version = "1.75"
 
 [workspace.dependencies]
-primodock-ipc = { path = "crates/primodock-ipc" }
+doca-ipc = { path = "crates/doca-ipc" }
 zbus = "5"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
