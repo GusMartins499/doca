@@ -56,6 +56,11 @@ pub struct Appearance {
     pub magnification: f64,
     pub auto_hide: bool,
     pub show_trash: bool,
+    /// An icon, GTK or cursor theme for the dock alone. Empty follows the
+    /// system, which is what it does unless someone says otherwise.
+    pub icon_theme: String,
+    pub gtk_theme: String,
+    pub cursor_theme: String,
 }
 
 /// The keys `SetAppearance` understands, by the name they carry on the wire.
@@ -65,8 +70,20 @@ pub mod appearance_key {
     pub const MAGNIFICATION: &str = "magnification";
     pub const AUTO_HIDE: &str = "auto_hide";
     pub const SHOW_TRASH: &str = "show_trash";
+    pub const ICON_THEME: &str = "icon_theme";
+    pub const GTK_THEME: &str = "gtk_theme";
+    pub const CURSOR_THEME: &str = "cursor_theme";
 
-    pub const ALL: [&str; 5] = [THEME, ICON_SIZE, MAGNIFICATION, AUTO_HIDE, SHOW_TRASH];
+    pub const ALL: [&str; 8] = [
+        THEME,
+        ICON_SIZE,
+        MAGNIFICATION,
+        AUTO_HIDE,
+        SHOW_TRASH,
+        ICON_THEME,
+        GTK_THEME,
+        CURSOR_THEME,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

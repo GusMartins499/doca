@@ -1,5 +1,8 @@
 pub const DEFAULT: &str = "native";
 
+/// The theme that has no colours of its own.
+pub const SYSTEM: &str = "system";
+
 const SHARED: &str = "
     window { background: transparent; }
     /* The padding here must stay dock::ITEM_PADDING: the icon size is worked
@@ -80,7 +83,56 @@ const PAPER: &str = "
     #tooltip-label { color: #26241f; font-size: 12px; }
 ";
 
-pub fn names() -> [&'static str; 3] {
+/// The bar in whatever colours the GTK theme already uses.
+///
+/// Every colour here is a named one the active theme defines, so the dock
+/// follows Sweet-Dark-v40, Adwaita or anything else the user picked in GNOME
+/// Tweaks instead of carrying a palette of its own.
+///
+/// `alpha()` is not decoration: the dock is a translucent window
+/// (`set_app_paintable(true)`), and `@theme_bg_color` on its own is opaque —
+/// a solid `#bar` would turn the dock into a grey slab with square corners
+/// showing through the rounding.
+///
+/// A theme that defines none of these makes `load_from_data` fail *whole*,
+/// which would leave the bar unstyled rather than merely wrong-coloured.
+/// `Style::apply` falls back to `native` when that happens.
+const SYSTEM_CSS: &str = "
+    #bar {
+        background: alpha(@theme_bg_color, 0.82);
+        border-radius: 18px;
+        border: 1px solid alpha(@borders, 0.8);
+        padding: 10px;
+    }
+    #item:hover { background: alpha(@theme_fg_color, 0.10); }
+    #widget:hover { background: alpha(@theme_fg_color, 0.10); }
+    #widget.active { background: alpha(@theme_selected_bg_color, 0.22); }
+    #separator { background: alpha(@theme_fg_color, 0.12); }
+    #indicator { background: alpha(@theme_fg_color, 0.45); }
+    #indicator-active { background: @theme_selected_bg_color; }
+    #widget-label { color: @theme_fg_color; font-size: 15px; font-weight: 600; }
+    #widget-detail { color: alpha(@theme_fg_color, 0.55); font-size: 10px; }
+    #widget-progress { background: alpha(@theme_fg_color, 0.14); }
+    #widget-progress progress { background: @theme_selected_bg_color; }
+    #empty { color: alpha(@theme_fg_color, 0.55); font-size: 13px; padding: 12px; }
+    #tooltip {
+        background: alpha(@theme_bg_color, 0.96);
+        border: 1px solid alpha(@borders, 0.8);
+    }
+    #tooltip-label { color: @theme_fg_color; font-size: 12px; }
+";
+
+pub fn names() -> [&'static str; 4] {
+    [SYSTEM, "native", "midnight", "paper"]
+}
+
+/// The themes that carry their own palette, as opposed to borrowing one.
+///
+/// `system` is every bit a theme, but it has no colours to assert anything
+/// about until a GTK theme is loaded under it — so the checks that read
+/// colours out of a string run over these.
+#[cfg(test)]
+pub fn self_coloured() -> [&'static str; 3] {
     ["native", "midnight", "paper"]
 }
 
@@ -91,6 +143,7 @@ pub fn exists(name: &str) -> bool {
 
 pub fn css(name: &str) -> String {
     let body = match name {
+        SYSTEM => SYSTEM_CSS,
         "midnight" => MIDNIGHT,
         "paper" => PAPER,
         _ => NATIVE,
@@ -105,6 +158,8 @@ pub fn css(name: &str) -> String {
 /// constants in the drawing code, so a new theme sets them in one place.
 pub fn dots(name: &str) -> (gdk::RGBA, gdk::RGBA) {
     match resolve(name) {
+        // `system` has no dots of its own to give; `dots_for` asks the GTK
+        // theme and only lands here if it has nothing to say either.
         "midnight" => (
             gdk::RGBA::new(0.29, 0.33, 0.41, 1.0),
             gdk::RGBA::new(0.478, 0.635, 0.969, 1.0),
@@ -118,6 +173,61 @@ pub fn dots(name: &str) -> (gdk::RGBA, gdk::RGBA) {
             gdk::RGBA::new(0.298, 0.553, 1.0, 1.0),
         ),
     }
+}
+
+/// The colours the `system` sheet borrows and cannot do without.
+///
+/// GTK does not refuse a sheet that names a colour the theme never defined —
+/// `load_from_data` returns `Ok` and the declaration simply resolves to
+/// nothing when it is drawn. For a translucent dock that means an invisible
+/// bar rather than an ugly one, which is the worse failure of the two: there
+/// is nothing on screen to tell the user what went wrong.
+///
+/// So the colours are looked up before the sheet is trusted.
+pub const BORROWED_COLOURS: [&str; 4] = [
+    "theme_bg_color",
+    "theme_fg_color",
+    "theme_selected_bg_color",
+    "borders",
+];
+
+/// Which of the borrowed colours this GTK theme does not define.
+///
+/// Empty means `system` will draw. Anything else is a reason to fall back,
+/// and worth naming in the log — "your theme does not define borders" is
+/// something a user can act on.
+pub fn missing_colours(context: &gtk::StyleContext) -> Vec<&'static str> {
+    BORROWED_COLOURS
+        .into_iter()
+        .filter(|name| lookup(context, name).is_none())
+        .collect()
+}
+
+/// The dots to draw, asking the GTK theme first when the theme is `system`.
+///
+/// The row draws these itself, so unlike everything else in `system` they
+/// cannot come from the stylesheet — they have to be looked up as values.
+/// A GTK theme that names neither colour leaves the dots to `native`, which
+/// is the same fallback the stylesheet takes.
+pub fn dots_for(name: &str, context: &gtk::StyleContext) -> (gdk::RGBA, gdk::RGBA) {
+    if resolve(name) != SYSTEM {
+        return dots(name);
+    }
+    let (fallback_running, fallback_active) = dots(DEFAULT);
+    let running = lookup(context, "theme_fg_color")
+        .map(|colour| faded(colour, 0.45))
+        .unwrap_or(fallback_running);
+    let active = lookup(context, "theme_selected_bg_color").unwrap_or(fallback_active);
+    (running, active)
+}
+
+fn lookup(context: &gtk::StyleContext, name: &str) -> Option<gdk::RGBA> {
+    gtk::prelude::StyleContextExt::lookup_color(context, name)
+}
+
+/// The same colour, as faint as the stylesheet draws the running dot.
+fn faded(colour: gdk::RGBA, alpha: f64) -> gdk::RGBA {
+    gdk::RGBA::new(colour.red(), colour.green(), colour.blue(), alpha)
 }
 
 pub fn resolve(requested: &str) -> &'static str {
@@ -145,7 +255,7 @@ mod tests {
 
     #[test]
     fn every_theme_says_what_its_indicator_dots_look_like() {
-        for name in names() {
+        for name in self_coloured() {
             let (running, active) = dots(name);
 
             assert!(running.alpha() > 0.0, "{name} draws no indicator at all");
@@ -207,5 +317,88 @@ mod tests {
     #[test]
     fn the_fallback_theme_is_one_of_the_real_ones() {
         assert!(exists(DEFAULT));
+    }
+
+    #[test]
+    fn the_system_theme_is_offered_and_is_not_the_default() {
+        assert!(exists(SYSTEM), "the option has to exist for a window to list it");
+        assert_eq!(resolve(SYSTEM), SYSTEM);
+        assert_ne!(
+            DEFAULT, SYSTEM,
+            "a config that never asked to follow the system must not start following it"
+        );
+    }
+
+    #[test]
+    fn every_colour_the_system_sheet_names_is_one_it_checks_for() {
+        let css = css(SYSTEM);
+
+        for name in BORROWED_COLOURS {
+            assert!(
+                css.contains(&format!("@{name}")),
+                "{name} is checked for but never used"
+            );
+        }
+        // The other way round is the one that bites: a colour used but not
+        // checked would pass the guard and then draw as nothing.
+        for line in css.lines() {
+            for word in line.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '@')) {
+                if let Some(name) = word.strip_prefix('@') {
+                    assert!(
+                        BORROWED_COLOURS.contains(&name),
+                        "the system sheet uses @{name} without checking the theme defines it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_system_theme_borrows_every_colour_and_hardcodes_none() {
+        let css = css(SYSTEM);
+
+        for named in [
+            "@theme_bg_color",
+            "@theme_fg_color",
+            "@theme_selected_bg_color",
+            "@borders",
+        ] {
+            assert!(css.contains(named), "system never asks the theme for {named}");
+        }
+        for literal in ["rgba(", "#4c8dff", "#7aa2f7", "#c67c4e"] {
+            assert!(
+                !css.replace(SHARED, "").contains(literal),
+                "system writes {literal} of its own instead of borrowing a colour"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bar_of_a_translucent_dock_is_never_painted_opaque() {
+        // `@theme_bg_color` on its own is opaque, and the dock's window is
+        // paintable: a solid #bar shows its square corners through the
+        // rounding. Every background in the system sheet goes through alpha().
+        for line in css(SYSTEM).lines() {
+            let line = line.trim();
+            if line.starts_with("background:") || line.starts_with("background :") {
+                assert!(
+                    line.contains("alpha(") || line.contains("transparent"),
+                    "an opaque background slipped into the system sheet: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_self_coloured_theme_keeps_its_own_dots_whatever_gtk_says() {
+        // `dots_for` only asks GTK when the theme is `system`, so the three
+        // fixed themes are unaffected by whatever the desktop is wearing.
+        for name in self_coloured() {
+            assert_eq!(
+                dots(name),
+                dots(name),
+                "{name} should not depend on a style context at all"
+            );
+        }
     }
 }

@@ -233,6 +233,16 @@ impl Row {
         self.area.queue_draw();
     }
 
+    /// Forget every icon, so the next fill loads them again.
+    ///
+    /// `fill` keeps an entry whose icon *name* has not changed, which is what
+    /// stops the row reloading thirty icons every time a window takes focus.
+    /// A new icon theme changes none of those names and all of those pictures,
+    /// so it is the one case where the cache has to be thrown away.
+    pub fn reload_icons(&self) {
+        self.entries.borrow_mut().clear();
+    }
+
     pub fn serve(&self, proxy: Rc<DocaProxy<'static>>) {
         *self.proxy.borrow_mut() = Some(proxy);
     }

@@ -500,5 +500,8 @@ fn appearance_of(config: &Config) -> Appearance {
         magnification: appearance.magnification,
         auto_hide: appearance.auto_hide,
         show_trash: appearance.show_trash,
+        icon_theme: appearance.icon_theme,
+        gtk_theme: appearance.gtk_theme,
+        cursor_theme: appearance.cursor_theme,
     }
 }

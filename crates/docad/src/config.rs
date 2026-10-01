@@ -29,6 +29,18 @@ pub struct Appearance {
     pub show_trash: bool,
     #[serde(default)]
     pub auto_hide: bool,
+    /// The icon theme to use instead of the system's. Empty follows the system.
+    ///
+    /// Empty rather than `Option` on purpose: these three cross the bus inside
+    /// `Appearance`, and an absent value there would mean a nullable field in
+    /// the signature for no gain — "follow the system" and "no override" are
+    /// the same thing, and the empty string says it.
+    #[serde(default)]
+    pub icon_theme: String,
+    #[serde(default)]
+    pub gtk_theme: String,
+    #[serde(default)]
+    pub cursor_theme: String,
 }
 
 fn default_show_trash() -> bool {
@@ -55,6 +67,9 @@ impl Default for Appearance {
             magnification: default_magnification(),
             show_trash: default_show_trash(),
             auto_hide: false,
+            icon_theme: String::new(),
+            gtk_theme: String::new(),
+            cursor_theme: String::new(),
         }
     }
 }
@@ -71,6 +86,9 @@ impl Appearance {
             },
             show_trash: self.show_trash,
             auto_hide: self.auto_hide,
+            icon_theme: self.icon_theme.trim().to_string(),
+            gtk_theme: self.gtk_theme.trim().to_string(),
+            cursor_theme: self.cursor_theme.trim().to_string(),
         }
     }
 }
@@ -1023,6 +1041,9 @@ mod tests {
             magnification: f64::NAN,
             show_trash: true,
             auto_hide: true,
+            icon_theme: "  Papirus-Dark  ".to_string(),
+            gtk_theme: String::new(),
+            cursor_theme: String::new(),
         });
         config.save_to(&path).unwrap();
 
@@ -1036,6 +1057,10 @@ mod tests {
         assert_eq!(reloaded.theme, "midnight");
         assert_eq!(reloaded.icon_size, MAX_ICON_SIZE);
         assert_eq!(reloaded.magnification, MIN_MAGNIFICATION);
+        assert_eq!(
+            reloaded.icon_theme, "Papirus-Dark",
+            "a theme name is looked up verbatim, so stray spaces would simply miss"
+        );
     }
 
     #[test]
