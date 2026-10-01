@@ -340,11 +340,17 @@ cargo build --release && ./scripts/check-live.sh
 ```
 
 starts a daemon and the preferences window on a nested display with a session
-bus and a config of their own, and asserts the part with no controls in it:
-that a change made from anywhere else reaches the window. Writing is a method
+bus and a config of their own, and asserts two things no unit test can reach.
+
+That a change made from anywhere else reaches the window. Writing is a method
 call and hearing is a signal, and the two break apart — every control can work
 while the window quietly stops following. It waits for the subscription rather
 than for the window, because the window is drawn well before it subscribes.
+
+And that a widget setting reaches the widget that is already running: it drinks
+two glasses, moves the water goal to four, and expects `2/4` back. A widget
+rebuilt instead of told would answer `0/4`, and the value landing in the config
+file would prove nothing either way.
 
 ```bash
 DISPLAY=:9 cargo test -p doca-shell -- --ignored
@@ -352,7 +358,9 @@ DISPLAY=:9 cargo test -p doca-prefs -- --ignored
 ```
 
 run the checks that need real GTK widgets — the ones that would otherwise be
-assertions about what GTK probably does.
+assertions about what GTK probably does. They need an X server on `:9`, which
+either `./scripts/dev-session.sh` or `./scripts/sandbox.sh` leaves running in
+another terminal.
 
 ## Development
 
