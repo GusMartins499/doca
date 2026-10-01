@@ -50,7 +50,10 @@ Stops Plank, runs Doca in its place, and restarts Plank when you press
 Ctrl-C. Two docks cannot share a screen edge — both reserve space through the
 same strut protocol and each reacts to the other's reservation — so they take
 turns rather than fight. On first run it seeds a config from your Plank
-launchers so the dock is not empty.
+launchers so the dock is not empty. Right-clicking the dock opens
+**Preferences…**, which edits that same config while it runs — the script puts
+the freshly built binaries on `PATH` so the window that opens is the one you
+just compiled.
 
 If the script is killed outright rather than interrupted, Plank will not come
 back on its own: `setsid plank >/dev/null 2>&1 &`.
@@ -59,7 +62,7 @@ If the dock ever covers the terminal you started it from, switch to a text
 console with `Ctrl+Alt+F3`, log in, and run:
 
 ```bash
-pkill -x doca-shell; pkill -x docad; setsid plank &
+pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 ```
 
 `Ctrl+Alt+F2` returns to the desktop.

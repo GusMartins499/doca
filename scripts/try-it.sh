@@ -20,12 +20,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/doca/config.toml"
 PLANK_WAS_RUNNING=0
 
-for binary in docad doca-shell; do
+for binary in docad doca-shell doca-prefs; do
     [ -x "$ROOT/target/release/$binary" ] || {
         echo "missing $binary — run: cargo build --release" >&2
         exit 1
     }
 done
+
+# The dock's "Preferences…" spawns doca-prefs by name, on the assumption that
+# whatever found doca-shell on PATH finds it too. Nothing here is installed, so
+# without this the menu entry fails with "No such file or directory" in a log
+# nobody is reading, and the window simply never appears.
+export PATH="$ROOT/target/release:$PATH"
 
 if [ ! -f "$CONFIG" ]; then
     echo "no config yet, seeding one from your Plank launchers:"
@@ -41,6 +47,9 @@ restore() {
     RESTORED=1
     echo
     echo "stopping Doca"
+    # The preferences window too: it is a separate process the dock spawned,
+    # and it would otherwise outlive the dock it was opened to configure.
+    pkill -x doca-prefs 2>/dev/null
     pkill -x doca-shell 2>/dev/null
     pkill -x docad 2>/dev/null
     if [ "$PLANK_WAS_RUNNING" = "1" ] && ! pgrep -x plank >/dev/null; then
@@ -67,7 +76,7 @@ cat <<'ESCAPE'
 
     press  Ctrl+Alt+F3   to reach a text console, log in, then run
 
-      pkill -x doca-shell; pkill -x docad; setsid plank &
+      pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 
     press  Ctrl+Alt+F2   to come back to the desktop.
 
@@ -84,6 +93,7 @@ ESCAPE
 # already running is stopped first.
 if pgrep -x docad >/dev/null || pgrep -x doca-shell >/dev/null; then
     echo "stopping a Doca that was already running"
+    pkill -x doca-prefs 2>/dev/null
     pkill -x doca-shell 2>/dev/null
     pkill -x docad 2>/dev/null
     sleep 1
@@ -95,7 +105,8 @@ sleep 1
 "$ROOT/target/release/doca-shell" &
 
 echo
-echo "Doca is running. Left click activates, right click pins or closes."
+echo "Doca is running. Left click activates, right click pins or closes —"
+echo "or opens Preferences, which edits this same config while it runs."
 echo "The environment follows the workspace. Press Ctrl-C to stop and get"
 echo "Plank back."
 wait
