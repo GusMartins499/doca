@@ -14,6 +14,19 @@ pub const LAUNCH_PULSES: f64 = 2.0;
 /// How long the lens takes to open, and to close again. Plank's figure.
 pub const ZOOM: Duration = Duration::from_millis(200);
 
+/// How long an icon takes to arrive on the row, or to leave it.
+///
+/// The bar's own figure, deliberately: an app that opens slides the bar wider
+/// and grows an icon into the room that opened, and the two are one movement
+/// rather than two of different lengths.
+pub const ENTRY: Duration = SLIDE;
+
+/// How large an arriving icon starts, as a fraction of its full size.
+///
+/// Far enough below one to read as growing out of the bar, near enough that
+/// what grows is recognisably the icon and not a dot.
+pub const ENTRY_FROM: f64 = 0.55;
+
 /// The fastest the lens travels along the bar when it has to catch up.
 ///
 /// Measured rather than picked. With 48px icons, a pointer swept across the
@@ -49,6 +62,33 @@ pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
     } else {
         1.0 - ease_in(t)
     }
+}
+
+/// How present an icon is, `elapsed` after it joined the row or left it.
+///
+/// `1.0` is on the bar with its own size and no transparency, `0.0` is not
+/// there at all. The same mirrored pair the lens and the bar use, so
+/// `reversed_start` turns one into the other mid-flight: an app that opens
+/// and closes again before its icon finished arriving leaves from where it
+/// had got to, rather than from full size.
+pub fn entry_progress(elapsed: Duration, arriving: bool) -> f64 {
+    if elapsed >= ENTRY {
+        return if arriving { 1.0 } else { 0.0 };
+    }
+    let t = elapsed.as_secs_f64() / ENTRY.as_secs_f64();
+    if arriving {
+        ease_out(t)
+    } else {
+        1.0 - ease_in(t)
+    }
+}
+
+/// How big an icon is drawn, `progress` of the way onto the row.
+///
+/// `progress` is already eased: it comes from `entry_progress`, which knows
+/// which way the icon is going.
+pub fn entry_scale(progress: f64) -> f64 {
+    ENTRY_FROM + (1.0 - ENTRY_FROM) * progress.clamp(0.0, 1.0)
 }
 
 /// Where the lens is aimed `step` later, closing on the pointer.
@@ -369,6 +409,73 @@ mod tests {
         let twice = aimed(aimed(0.0, 1200.0, half), 1200.0, half);
 
         assert!((once - twice).abs() < 1e-9, "{once} against {twice}");
+    }
+
+    #[test]
+    fn an_icon_arrives_from_nothing_and_ends_fully_there() {
+        assert_eq!(entry_progress(Duration::ZERO, true), 0.0);
+        assert_eq!(entry_progress(ENTRY, true), 1.0);
+        assert_eq!(entry_progress(ENTRY * 2, true), 1.0);
+    }
+
+    #[test]
+    fn an_icon_leaves_from_fully_there_and_ends_at_nothing() {
+        assert_eq!(entry_progress(Duration::ZERO, false), 1.0);
+        assert_eq!(entry_progress(ENTRY, false), 0.0);
+        assert_eq!(entry_progress(ENTRY * 2, false), 0.0);
+    }
+
+    #[test]
+    fn an_icon_only_ever_moves_towards_where_it_is_going() {
+        for arriving in [true, false] {
+            let mut previous = entry_progress(Duration::ZERO, arriving);
+            for step in 1..=100 {
+                let current = entry_progress(ENTRY * step / 100, arriving);
+                if arriving {
+                    assert!(current >= previous, "the icon faded while arriving at {step}");
+                } else {
+                    assert!(current <= previous, "the icon grew while leaving at {step}");
+                }
+                previous = current;
+            }
+        }
+    }
+
+    /// An app that opens and closes again before its icon finished arriving:
+    /// common enough — a splash screen, a crash, a `--help` in a terminal —
+    /// and the one case a stored size could not have turned round.
+    #[test]
+    fn an_icon_that_leaves_mid_arrival_goes_from_the_size_it_had_reached() {
+        let halfway = ENTRY / 2;
+        let grown_to = entry_progress(halfway, true);
+
+        let leaving_from = entry_progress(reversed_start(halfway, ENTRY), false);
+
+        assert!(
+            (leaving_from - grown_to).abs() < 0.2,
+            "the icon jumped from {grown_to:.2} to {leaving_from:.2} on turning round"
+        );
+    }
+
+    #[test]
+    fn an_arriving_icon_grows_and_never_overshoots_its_own_size() {
+        assert_eq!(entry_scale(1.0), 1.0);
+        assert_eq!(entry_scale(0.0), ENTRY_FROM);
+        assert!(ENTRY_FROM > 0.0, "an icon that starts at nothing has nothing to grow");
+
+        let mut previous = entry_scale(0.0);
+        for step in 1..=100 {
+            let current = entry_scale(entry_progress(ENTRY * step / 100, true));
+            assert!(current >= previous, "the icon shrank while arriving at {step}");
+            assert!(current <= 1.0, "the icon grew past its own size at {step}");
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn progress_outside_an_arrival_is_clamped_rather_than_extrapolated() {
+        assert_eq!(entry_scale(-1.0), ENTRY_FROM);
+        assert_eq!(entry_scale(5.0), 1.0);
     }
 
     #[test]

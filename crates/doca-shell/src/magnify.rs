@@ -105,6 +105,51 @@ pub fn base_centre(index: usize, base_slot: f64, spacing: f64, offset: f64) -> f
     offset + index as f64 * (base_slot + spacing) + base_slot / 2.0
 }
 
+/// The run a number of slots takes, spacing between them and not after.
+fn run(slots: f64, base_slot: f64, spacing: f64) -> f64 {
+    if slots <= 0.0 {
+        return 0.0;
+    }
+    slots * (base_slot + spacing) - spacing
+}
+
+/// Where the icons sit at rest while some of them are still arriving or
+/// leaving.
+///
+/// `presence` is one figure per icon, from `motion::entry_progress`: an icon
+/// takes that fraction of a slot and of the spacing beside it, so the row
+/// contracts and expands by fractions of a pixel rather than in slot-sized
+/// steps, and the neighbours of an app that just opened slide apart instead
+/// of appearing somewhere new.
+///
+/// The run is centred on the room the *settled* row occupies — `settled` is
+/// how many icons are staying, which is the width the bar was given. That is
+/// what keeps the group still: while one end of the row is animating the run
+/// is narrower than the bar, and centring it means the other icons stay where
+/// the bar put them instead of being dragged along by the one that moved.
+///
+/// With every icon fully present this is `base_centre`, exactly, which is the
+/// case the row is in except for the few frames after something opened.
+pub fn centres(
+    presence: &[f64],
+    base_slot: f64,
+    spacing: f64,
+    offset: f64,
+    settled: usize,
+) -> Vec<f64> {
+    let present: f64 = presence.iter().sum();
+    let mut x = offset
+        + (run(settled as f64, base_slot, spacing) - run(present, base_slot, spacing)) / 2.0;
+    presence
+        .iter()
+        .map(|part| {
+            let centre = x + part * base_slot / 2.0;
+            x += part * (base_slot + spacing);
+            centre
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +163,133 @@ mod tests {
         (0..count)
             .map(|i| place(base_centre(i, SLOT, SPACING, 0.0), pointer, ICON, SCALE))
             .collect()
+    }
+
+    const MARGIN: f64 = 69.0;
+
+    /// The run of icons, measured from the middle of the room it was given.
+    ///
+    /// What the eye judges, and the only frame of reference in which these
+    /// checks mean anything: the bar is centred on the screen, so a row that
+    /// keeps its position relative to the middle of the bar keeps it on
+    /// screen, however much wider or narrower the bar itself became.
+    fn about_the_middle(presence: &[f64], settled: usize) -> Vec<f64> {
+        let room = run(settled as f64, SLOT, SPACING);
+        centres(presence, SLOT, SPACING, MARGIN, settled)
+            .into_iter()
+            .map(|centre| centre - (MARGIN + room / 2.0))
+            .collect()
+    }
+
+    #[test]
+    fn a_row_with_nothing_arriving_sits_exactly_where_its_icons_rest() {
+        let settled = vec![1.0; 6];
+
+        let centres = centres(&settled, SLOT, SPACING, MARGIN, 6);
+
+        for (index, centre) in centres.iter().enumerate() {
+            assert_eq!(*centre, base_centre(index, SLOT, SPACING, MARGIN));
+        }
+    }
+
+    /// The reason the run is centred rather than packed from the left.
+    ///
+    /// An app opens, the bar is given room for one more icon and recentres
+    /// itself on the screen by half of it — so the icons already there must
+    /// move by exactly that half, inside the bar, to stay still on screen.
+    /// Packing the run from the left end instead moved all of them by a whole
+    /// slot at the moment the room appeared, which is the jump this item was
+    /// opened about.
+    #[test]
+    fn the_icons_already_there_do_not_move_when_one_arrives() {
+        let before = about_the_middle(&[1.0; 5], 5);
+
+        // The sixth, third from the left, at the instant it joined.
+        let mut joining = vec![1.0; 6];
+        joining[2] = 0.0;
+        let after = about_the_middle(&joining, 6);
+
+        let others: Vec<f64> = after
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, centre)| *centre)
+            .collect();
+        for (index, (was, is)) in before.iter().zip(&others).enumerate() {
+            assert!(
+                (was - is).abs() < 1e-9,
+                "icon {index} moved {}px when a neighbour appeared",
+                (was - is).abs()
+            );
+        }
+    }
+
+    /// And the other half of it: the space is let go of as the icon shrinks,
+    /// not at the moment it was told to go.
+    #[test]
+    fn the_icons_that_stay_close_the_gap_gradually_and_land_exactly() {
+        let settled = 5;
+        // Six icons in room for five: the third one is leaving.
+        let gap = |presence: f64| {
+            let mut row = vec![1.0; 6];
+            row[2] = presence;
+            about_the_middle(&row, settled)
+        };
+        let closed = about_the_middle(&[1.0; 5], settled);
+
+        let mut previous = gap(1.0);
+        for step in (0..=100).rev() {
+            let current = gap(step as f64 / 100.0);
+            for (index, (was, is)) in previous.iter().zip(&current).enumerate() {
+                // The one that is leaving is not closing any gap: it is
+                // shrinking in place, and its centre creeps with its own
+                // narrowing slot. What matters is the five that stay.
+                if index == 2 {
+                    continue;
+                }
+                let towards = if index < 2 { is >= was } else { is <= was };
+                assert!(towards, "icon {index} moved away from its place at {step}");
+            }
+            previous = current;
+        }
+
+        let landed: Vec<f64> = previous
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, centre)| *centre)
+            .collect();
+        for (index, (ends, should)) in landed.iter().zip(&closed).enumerate() {
+            assert!(
+                (ends - should).abs() < 1e-9,
+                "icon {index} came to rest {}px from where it belongs",
+                (ends - should).abs()
+            );
+        }
+    }
+
+    /// A departing icon is drawn in room the bar has already given up, which
+    /// is only safe because the row keeps a margin at either end for the lens
+    /// to push icons into. If one is ever drawn outside that margin it is cut
+    /// off by the edge of the row's own surface.
+    #[test]
+    fn an_icon_on_its_way_out_is_still_drawn_inside_the_row() {
+        for count in 1..=40usize {
+            for leaving in [0usize, count / 2, count] {
+                let mut row = vec![1.0; count + 1];
+                row[leaving] = 1.0;
+                let settled = count;
+                let width = MARGIN * 2.0 + run(settled as f64, SLOT, SPACING);
+                for (index, centre) in
+                    centres(&row, SLOT, SPACING, MARGIN, settled).iter().enumerate()
+                {
+                    assert!(
+                        centre - SLOT / 2.0 >= 0.0 && centre + SLOT / 2.0 <= width,
+                        "icon {index} of {count} is drawn at {centre}, outside a row {width}px wide"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

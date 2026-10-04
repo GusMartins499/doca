@@ -478,6 +478,19 @@ off the lens's own shape rather than guessed at, and the checks in
 `crates/doca-shell/src/row.rs` hold a jump to what a sweep at that ceiling
 would have cost.
 
+An icon that joins the row grows out of the bar and fades in, and one that
+leaves does the reverse and only then lets go of its place — an app that opens
+no longer makes its neighbours appear somewhere new between two frames. While
+that is happening an icon takes a fraction of a slot rather than all of it, so
+the row contracts and expands by fractions of a pixel; and the run of icons is
+centred on the room the bar was given rather than packed into the start of it,
+which is what lets the bar widen and recentre itself on the screen without the
+icons already there moving at all. The width the bar asks for counts only the
+icons that are staying: a departing one is drawn in the margin the row keeps at
+either end for the lens to push icons into. A resize is not an arrival — moving
+the icon-size slider or changing the icon theme refills the row with every icon
+new to it, and neither fades anything in.
+
 `scripts/dev-session.sh` is a barer version of the sandbox, for a debug build
 with an empty config:
 

@@ -15,21 +15,80 @@ pub const INDICATOR: i32 = 9;
 const DOT_WIDTH: f64 = 6.0;
 const DOT_HEIGHT: f64 = 3.0;
 
+/// How far onto the row an icon has got, and which way it is going.
+///
+/// One instant and one direction, read afresh every frame — the same shape
+/// the lens and the bar use, and for the same reason: an app that opens and
+/// closes again inside a sixth of a second must turn its icon round from
+/// wherever it had got to, and nothing can do that if the position is stored
+/// instead of derived.
+#[derive(Clone, Copy)]
+struct Life {
+    since: Instant,
+    arriving: bool,
+}
+
+impl Life {
+    /// An icon that is simply there: nothing to draw arriving, nothing to wait
+    /// for. What every icon is, except for the few frames after it joined.
+    fn settled() -> Self {
+        Self {
+            since: Instant::now() - crate::motion::ENTRY,
+            arriving: true,
+        }
+    }
+
+    fn arriving() -> Self {
+        Self {
+            since: Instant::now(),
+            arriving: true,
+        }
+    }
+
+    /// Turned round where it stands, rather than restarted.
+    fn reversed(&self) -> Self {
+        Self {
+            since: Instant::now()
+                - crate::motion::reversed_start(self.since.elapsed(), crate::motion::ENTRY),
+            arriving: !self.arriving,
+        }
+    }
+
+    fn presence(&self) -> f64 {
+        crate::motion::entry_progress(self.since.elapsed(), self.arriving)
+    }
+
+    fn leaving(&self) -> bool {
+        !self.arriving
+    }
+
+    fn moving(&self) -> bool {
+        self.since.elapsed() < crate::motion::ENTRY
+    }
+
+    /// Off the row for good: the space it was holding can be let go.
+    fn gone(&self) -> bool {
+        !self.arriving && !self.moving()
+    }
+}
+
 /// One icon, as the row needs it.
 pub struct Entry {
     pub item: DockItem,
     source: Option<gdk_pixbuf::Pixbuf>,
     scaled: RefCell<HashMap<i32, gdk_pixbuf::Pixbuf>>,
     launched: Cell<Option<Instant>>,
+    life: Cell<Life>,
 }
 
 impl Entry {
-    fn from(item: &DockItem, largest: i32) -> Self {
+    fn from(item: &DockItem, largest: i32, arriving: bool) -> Self {
         Self {
             item: item.clone(),
             source: crate::dock::load_pixbuf(&item.icon, largest),
             scaled: RefCell::new(HashMap::new()),
             launched: Cell::new(None),
+            life: Cell::new(if arriving { Life::arriving() } else { Life::settled() }),
         }
     }
 
@@ -124,6 +183,9 @@ pub struct Row {
     pub perch: gtk::Box,
     entries: Rc<RefCell<Vec<Entry>>>,
     rest: Rc<Cell<Rest>>,
+    /// How many icons the bar was sized for — everything in `entries` but
+    /// those on their way out, which are drawn in room the bar no longer has.
+    settled: Rc<Cell<usize>>,
     /// Where the pointer is: what the lens is travelling towards.
     pointer: Rc<Cell<Option<f64>>>,
     /// Where the lens is aimed, which is where the pointer is except when the
@@ -180,6 +242,7 @@ impl Row {
             perch,
             entries: Rc::new(RefCell::new(Vec::new())),
             rest: Rc::new(Cell::new(Rest::default())),
+            settled: Rc::new(Cell::new(0)),
             pointer: Rc::new(Cell::new(None)),
             lens: Rc::new(Cell::new(None)),
             lens_at: Rc::new(Cell::new(Instant::now())),
@@ -214,30 +277,94 @@ impl Row {
     pub fn fill(&self, items: &[DockItem], rest: Rest) {
         let largest = (rest.icon * rest.scale).ceil() as i32;
         let resized = largest != self.largest.replace(largest);
+        // A row that had nothing on it, or one whose icons all just changed
+        // size, is not a row something arrived at. Without this every icon
+        // fades in together whenever the dock starts, the icon theme changes
+        // or the size slider moves a pixel — an animation that announces
+        // nothing, over and over.
+        let announcing = !self.entries.borrow().is_empty() && !resized;
 
-        let mut known: HashMap<String, Entry> = if resized {
-            HashMap::new()
+        let mut old: Vec<Option<Entry>> = if resized {
+            self.entries.borrow_mut().clear();
+            Vec::new()
         } else {
-            self.entries
-                .borrow_mut()
-                .drain(..)
-                .map(|entry| (entry.item.id.clone(), entry))
-                .collect()
+            self.entries.borrow_mut().drain(..).map(Some).collect()
         };
-
-        *self.entries.borrow_mut() = items
+        let mut was_at: HashMap<String, usize> = old
             .iter()
-            .map(|item| match known.remove(&item.id) {
-                Some(entry) if entry.item.icon == item.icon => entry.again(item),
-                _ => Entry::from(item, largest),
+            .enumerate()
+            .filter_map(|(at, entry)| entry.as_ref().map(|e| (e.item.id.clone(), at)))
+            .collect();
+
+        // In the order given, taking what each id already had.
+        let mut staying: Vec<Entry> = Vec::with_capacity(items.len());
+        let mut survived = vec![false; old.len()];
+        for item in items {
+            let Some(at) = was_at.remove(&item.id) else {
+                staying.push(Entry::from(item, largest, announcing));
+                continue;
+            };
+            let entry = old[at].take().expect("one id, one entry");
+            survived[at] = true;
+            if entry.item.icon != item.icon {
+                // The same app wearing a different picture: a load, but not
+                // an arrival — it never left the bar.
+                staying.push(Entry::from(item, largest, false));
+                continue;
+            }
+            if entry.life.get().leaving() {
+                // Closed and reopened before its icon finished going: it
+                // comes back from the size it had shrunk to.
+                entry.life.set(entry.life.get().reversed());
+            }
+            staying.push(entry.again(item));
+        }
+
+        // Whatever the new list did not claim is on its way out. It holds its
+        // slot and its place in the row while it shrinks, and lets go of the
+        // space only once it is gone — which is `step`'s job, a frame at a
+        // time, not this one's.
+        let departing: Vec<(usize, Entry)> = old
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(at, entry)| {
+                let entry = entry.take()?;
+                if entry.life.get().gone() {
+                    return None;
+                }
+                if !entry.life.get().leaving() {
+                    entry.life.set(entry.life.get().reversed());
+                }
+                // Back between the icons it was between: after as many of its
+                // old neighbours as are still on the row.
+                Some((survived[..at].iter().filter(|kept| **kept).count(), entry))
             })
             .collect();
 
+        let mut row = Vec::with_capacity(staying.len() + departing.len());
+        let mut departing = departing.into_iter().peekable();
+        for (index, entry) in staying.into_iter().enumerate() {
+            while departing.peek().is_some_and(|(anchor, _)| *anchor <= index) {
+                row.push(departing.next().expect("peeked").1);
+            }
+            row.push(entry);
+        }
+        row.extend(departing.map(|(_, entry)| entry));
+        *self.entries.borrow_mut() = row;
+
         self.rest.set(rest);
+        self.settled.set(items.len());
+        // The width the bar is given counts only the icons that are staying:
+        // a departing one is drawn in room the bar is already letting go of,
+        // and the row has margin enough at either end to draw it there. What
+        // keeps that from looking like a jump is that the run of icons is
+        // centred on the room rather than packed into the start of it — see
+        // `magnify::centres`.
         let width = rest.width(items.len());
         self.perch.set_size_request(width, rest.resting_height());
         self.area.set_size_request(width, rest.height());
         self.area.queue_draw();
+        self.animate();
     }
 
     /// Forget every icon, so the next fill loads them again.
@@ -263,6 +390,26 @@ impl Row {
 
     pub fn dot_colours(&self, running: gdk::RGBA, active: gdk::RGBA) {
         *self.dots.borrow_mut() = (running, active);
+    }
+
+    /// Where every icon sits at rest this instant, arrivals and departures
+    /// included.
+    ///
+    /// `Rest::centre` is the settled answer and the common one; this is what
+    /// the row actually draws and is clicked on, which differ only while
+    /// something is joining or leaving.
+    fn centres(&self) -> Vec<f64> {
+        let rest = self.rest.get();
+        let entries = self.entries.borrow();
+        let presence: Vec<f64> = entries.iter().map(|entry| entry.life.get().presence()).collect();
+        // The row is in this state every frame but the few after something
+        // opened or closed, and the answer there is exactly where the icons
+        // rest — taken from the same place the rest of the row takes it,
+        // rather than arrived at again by a different route.
+        if entries.len() == self.settled.get() && presence.iter().all(|part| *part >= 1.0) {
+            return (0..entries.len()).map(|index| rest.centre(index)).collect();
+        }
+        magnify::centres(&presence, rest.slot, rest.spacing, rest.margin, self.settled.get())
     }
 
     /// Note where the pointer is. Redrawing waits for the next frame.
@@ -313,6 +460,15 @@ impl Row {
         self.lens.set(Some(crate::motion::aimed(lens, pointer, since)));
     }
 
+    /// Let go of the icons whose leaving is over.
+    ///
+    /// Until this runs they are still in the row, holding the fraction of a
+    /// slot their shrinking left them — which is the whole of what "and only
+    /// then releases the space" means.
+    fn sweep(&self) {
+        self.entries.borrow_mut().retain(|entry| !entry.life.get().gone());
+    }
+
     fn hover(&self, hovering: bool) {
         if self.hovering.replace(hovering) == hovering {
             return;
@@ -350,6 +506,7 @@ impl Row {
         let row = self.clone();
         self.area.add_tick_callback(move |area, _| {
             row.step(Instant::now());
+            row.sweep();
             area.queue_draw();
             if row.resting() {
                 row.ticking.set(false);
@@ -360,12 +517,12 @@ impl Row {
     }
 
     fn resting(&self) -> bool {
-        let launching = self
-            .entries
-            .borrow()
+        let entries = self.entries.borrow();
+        let launching = entries
             .iter()
             .any(|entry| entry.launched.get().is_some_and(crate::motion::is_launching_since));
-        !launching && !self.hovering.get() && self.scale_now() <= 1.0
+        let joining = entries.iter().any(|entry| entry.life.get().moving());
+        !launching && !joining && !self.hovering.get() && self.scale_now() <= 1.0
     }
 
     /// Which icon is under `x`, by what is drawn rather than by what rests there.
@@ -376,8 +533,15 @@ impl Row {
         // are the same once the lens has caught up, and while it has not, the
         // icons are where the lens put them and not where the pointer is.
         let pointer = self.lens().or(Some(x));
-        (0..self.entries.borrow().len()).find(|index| {
-            let placed = magnify::place(rest.centre(*index), pointer, rest.icon, scale);
+        let centres = self.centres();
+        let entries = self.entries.borrow();
+        (0..entries.len()).find(|index| {
+            // An icon on its way out is a picture, not a target: clicking
+            // where an app used to be must not launch it again.
+            if entries[*index].life.get().leaving() {
+                return false;
+            }
+            let placed = magnify::place(centres[*index], pointer, rest.icon, scale);
             (x - placed.centre).abs() <= (placed.size / 2.0).max(rest.slot / 2.0)
         })
     }
@@ -385,9 +549,18 @@ impl Row {
     /// Where an icon is drawn, for something else to point at.
     pub fn rect_of(&self, index: usize) -> (i32, i32) {
         let rest = self.rest.get();
-        let placed =
-            magnify::place(rest.centre(index), self.lens(), rest.icon, self.scale_now());
-        ((placed.centre - placed.size / 2.0) as i32, placed.size as i32)
+        let Some(centre) = self.centres().get(index).copied() else {
+            return (0, 0);
+        };
+        let presence = self
+            .entries
+            .borrow()
+            .get(index)
+            .map(|entry| entry.life.get().presence())
+            .unwrap_or(1.0);
+        let placed = magnify::place(centre, self.lens(), rest.icon, self.scale_now());
+        let size = placed.size * crate::motion::entry_scale(presence);
+        ((placed.centre - size / 2.0) as i32, size as i32)
     }
 
     /// The room a magnified icon rises into, above the bar.
@@ -424,13 +597,14 @@ impl Row {
         let scale = self.scale_now();
         let (running_dot, active_dot) = *self.dots.borrow();
 
+        let centres = self.centres();
         let entries = self.entries.borrow();
-        let placed: Vec<(Placement, bool, bool)> = {
+        let placed: Vec<(Placement, bool, bool, f64)> = {
             entries
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let mut placed = magnify::place(rest.centre(index), pointer, rest.icon, scale);
+                    let mut placed = magnify::place(centres[index], pointer, rest.icon, scale);
                     if let Some(started) = entry.launched.get() {
                         let elapsed = started.elapsed();
                         if crate::motion::is_launching(elapsed) {
@@ -439,20 +613,45 @@ impl Row {
                             entry.launched.set(None);
                         }
                     }
-                    (placed, !entry.item.windows.is_empty(), entry.item.active)
+                    (
+                        placed,
+                        !entry.item.windows.is_empty(),
+                        entry.item.active,
+                        entry.life.get().presence(),
+                    )
                 })
                 .collect()
         };
 
-        for (index, (placed, running, active)) in placed.iter().enumerate() {
+        for (index, (placed, running, active, presence)) in placed.iter().enumerate() {
             let size = magnify::settled(placed.size.round() as i32, rest.icon as i32);
             let Some(pixbuf) = entries.get(index).and_then(|entry| entry.at(size)) else {
                 continue;
             };
             let x = placed.centre - size as f64 / 2.0;
             let y = bottom - size as f64;
+            // An icon that is arriving or leaving is scaled about the spot it
+            // stands on, rather than drawn at a size of its own: every size
+            // an icon takes is a surface to keep, and a sixth of a second of
+            // them is a cache entry a frame for a picture nobody will ask for
+            // again. It grows out of the bar and fades in with it.
+            let growing = *presence < 1.0;
+            if growing {
+                let growth = crate::motion::entry_scale(*presence);
+                let _ = cr.save();
+                cr.translate(placed.centre, bottom);
+                cr.scale(growth, growth);
+                cr.translate(-placed.centre, -bottom);
+            }
             cr.set_source_pixbuf(&pixbuf, x.round(), y.round());
-            let _ = cr.paint();
+            let _ = if growing {
+                cr.paint_with_alpha(*presence)
+            } else {
+                cr.paint()
+            };
+            if growing {
+                let _ = cr.restore();
+            }
 
             if *running {
                 let dot = if *active { active_dot } else { running_dot };
@@ -460,7 +659,7 @@ impl Row {
                     dot.red(),
                     dot.green(),
                     dot.blue(),
-                    dot.alpha(),
+                    dot.alpha() * presence,
                 );
                 cr.rectangle(
                     (placed.centre - DOT_WIDTH / 2.0).round(),
@@ -622,6 +821,169 @@ pub mod tests {
             row.lens(),
             Some(rest.centre(0)),
             "a shut lens took the scenic route to where the pointer already is"
+        );
+    }
+
+    fn apps(count: usize) -> Vec<DockItem> {
+        (0..count).map(|i| item(&format!("app{i}"))).collect()
+    }
+
+    /// Where the icons are, measured from the middle of the row.
+    ///
+    /// The bar is centred on the screen and is given room for exactly the
+    /// icons that are staying, so this is the frame of reference in which the
+    /// row is judged: a position that holds here holds on screen, whatever
+    /// the bar's own width just did.
+    fn about_the_middle(row: &Row) -> Vec<f64> {
+        let half = row.rest.get().width(row.settled.get()) as f64 / 2.0;
+        row.centres().into_iter().map(|centre| centre - half).collect()
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn an_app_that_closed_keeps_its_place_until_it_has_finished_going() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+        let row = Row::new();
+        let five = apps(5);
+        row.fill(&five, rest);
+
+        let mut four = five.clone();
+        four.remove(2);
+        row.fill(&four, rest);
+
+        assert_eq!(
+            row.entries.borrow().len(),
+            5,
+            "the icon that left was dropped on the spot, with the neighbours \
+             closing over it in one jump"
+        );
+        assert_eq!(
+            row.entries.borrow()[2].item.id,
+            "app2",
+            "the departing icon lost its place in the row and is shrinking \
+             somewhere it never stood"
+        );
+        assert!(row.entries.borrow()[2].life.get().leaving());
+        // The room, though, is given up at once: the bar is sized for the
+        // four that stay, and the fifth is drawn in the margin the row keeps
+        // at either end for the lens.
+        assert_eq!(row.perch.size_request().0, rest.width(4));
+
+        // On its way out it is a picture and not a target.
+        let (left, width) = row.rect_of(2);
+        let over_it = left as f64 + width as f64 / 2.0;
+        assert_ne!(
+            row.at(over_it),
+            Some(2),
+            "an app that is leaving can still be clicked, and would be launched again"
+        );
+
+        std::thread::sleep(crate::motion::ENTRY);
+        row.sweep();
+
+        assert_eq!(row.entries.borrow().len(), 4, "the space was never let go of");
+        assert!(
+            row.entries.borrow().iter().all(|entry| entry.item.id != "app2"),
+            "the icon that left is still on the row"
+        );
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn an_app_that_opened_grows_into_the_room_rather_than_appearing_in_it() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+        let row = Row::new();
+        row.fill(&apps(5), rest);
+        let before = about_the_middle(&row);
+
+        // A sixth app, third from the left.
+        let mut six = apps(5);
+        six.insert(2, item("newcomer"));
+        row.fill(&six, rest);
+
+        assert_eq!(row.entries.borrow()[2].item.id, "newcomer");
+        let (_, width) = row.rect_of(2);
+        assert!(
+            width < ICON,
+            "the new icon was drawn at its full {ICON}px the instant it appeared"
+        );
+
+        // And the five that were already there have not moved on screen.
+        let after = about_the_middle(&row);
+        let others: Vec<f64> = after
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 2)
+            .map(|(_, centre)| *centre)
+            .collect();
+        for (index, (was, is)) in before.iter().zip(&others).enumerate() {
+            assert!(
+                (was - is).abs() <= 1.0,
+                "icon {index} jumped {}px when a neighbour opened",
+                (was - is).abs()
+            );
+        }
+
+        std::thread::sleep(crate::motion::ENTRY);
+        assert_eq!(
+            row.rect_of(2).1,
+            ICON,
+            "the new icon never finished arriving"
+        );
+    }
+
+    /// The regression this could so easily have been.
+    ///
+    /// The icon size is a slider in the preferences window, and the icon
+    /// theme is a setting the desktop can change: both refill the row with
+    /// every icon new to it. Neither is an app opening, and animating them
+    /// would mean the whole row fading in and out under the hand of someone
+    /// dragging a slider.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_row_that_was_resized_or_reloaded_is_not_a_row_six_apps_just_opened_on() {
+        let row = Row::new();
+        let five = apps(5);
+
+        row.fill(&five, Rest::new(ICON, 4, 4, SCALE));
+        assert!(
+            row.entries.borrow().iter().all(|entry| !entry.life.get().moving()),
+            "the dock announced every icon it had the moment it started"
+        );
+
+        row.fill(&five, Rest::new(ICON + 8, 4, 4, SCALE));
+        assert!(
+            row.entries.borrow().iter().all(|entry| !entry.life.get().moving()),
+            "moving the icon-size slider faded the whole row in again"
+        );
+
+        row.reload_icons();
+        row.fill(&five, Rest::new(ICON + 8, 4, 4, SCALE));
+        assert!(
+            row.entries.borrow().iter().all(|entry| !entry.life.get().moving()),
+            "a new icon theme faded the whole row in again"
+        );
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn an_app_that_closed_and_opened_again_comes_back_from_where_it_had_got_to() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+        let row = Row::new();
+        let five = apps(5);
+        row.fill(&five, rest);
+
+        let mut four = five.clone();
+        four.remove(2);
+        row.fill(&four, rest);
+        let going = row.entries.borrow()[2].life.get().presence();
+        row.fill(&five, rest);
+
+        let entries = row.entries.borrow();
+        assert_eq!(entries.len(), 5, "the icon came back as well as never leaving");
+        assert_eq!(entries[2].item.id, "app2");
+        assert!(!entries[2].life.get().leaving(), "the icon that came back is still going");
+        assert!(
+            (entries[2].life.get().presence() - going).abs() < 0.2,
+            "the icon jumped from {going:.2} to {:.2} on coming back",
+            entries[2].life.get().presence()
         );
     }
 

@@ -660,6 +660,10 @@ fn on_a_display() {
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
     row::tests::a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports();
     row::tests::a_lens_that_is_shut_aims_at_once_rather_than_travelling();
+    row::tests::an_app_that_closed_keeps_its_place_until_it_has_finished_going();
+    row::tests::an_app_that_opened_grows_into_the_room_rather_than_appearing_in_it();
+    row::tests::a_row_that_was_resized_or_reloaded_is_not_a_row_six_apps_just_opened_on();
+    row::tests::an_app_that_closed_and_opened_again_comes_back_from_where_it_had_got_to();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
     widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();
