@@ -63,6 +63,50 @@ pub fn shows(docks: &[EnvironmentInfo], id: &str) -> String {
     format!("Shown in {}.", listed(&names))
 }
 
+/// Widget ids the docks ask for that nobody answers to.
+///
+/// The daemon drops these with a `warn` when it builds the hub, so they are
+/// invisible everywhere else: the config says a dock shows one, the bar shows
+/// nothing in its place, and this window used to agree with the bar. A typo in
+/// a hand-edited TOML therefore looked exactly like a widget that had not been
+/// turned on. First seen first, so the order does not shuffle between
+/// refreshes.
+pub fn unknown_in(docks: &[EnvironmentInfo]) -> Vec<String> {
+    let mut strangers: Vec<String> = Vec::new();
+    for dock in docks {
+        for id in &dock.widgets {
+            if !doca_ipc::WIDGETS.contains(&id.as_str()) && !strangers.contains(id) {
+                strangers.push(id.clone());
+            }
+        }
+    }
+    strangers
+}
+
+/// Whether this is a widget the dock actually has.
+pub fn is_known(id: &str) -> bool {
+    doca_ipc::WIDGETS.contains(&id)
+}
+
+/// The sentence under the heading for a widget nothing answers to.
+///
+/// It names the docks asking for it and says where to take it out, because the
+/// window cannot: the Docks tab's tick boxes are built from the widgets that
+/// exist, so an id that does not exist has no box to untick.
+pub fn stranger(docks: &[EnvironmentInfo], id: &str) -> String {
+    let names = shown_in(docks, id);
+    format!(
+        "Nothing answers to this name, so {} shows nothing in its place. \
+         Fix the spelling or remove it from the widgets list in \
+         ~/.config/doca/config.toml.",
+        if names.is_empty() {
+            "the dock".to_string()
+        } else {
+            listed(&names)
+        }
+    )
+}
+
 /// Why a typed date cannot be sent, if it cannot.
 ///
 /// Checked here rather than left to the daemon because the daemon accepts any
@@ -79,6 +123,10 @@ pub fn date_trouble(typed: &str) -> Option<String> {
 #[derive(Default)]
 struct State {
     docks: RefCell<Vec<EnvironmentInfo>>,
+    /// The ids in the list, in its order — the known ones, and then whatever
+    /// the config asks for that nobody answers to. Read instead of indexing
+    /// `WIDGETS` directly, which is what tied the list to that constant.
+    shown: RefCell<Vec<String>>,
     selected: RefCell<Option<String>>,
     /// The note as it last stood, to tell a note that was edited from one that
     /// was only looked at. Without it every click away from the text view is a
@@ -120,14 +168,6 @@ impl Tab {
 
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Single);
-        for id in doca_ipc::WIDGETS {
-            let label = gtk::Label::new(Some(&pretty(id)));
-            label.set_xalign(0.0);
-            label.set_margin(6);
-            let row = gtk::ListBoxRow::new();
-            row.add(&label);
-            list.add(&row);
-        }
         let left = scrolling(&list);
         left.set_size_request(150, -1);
         root.pack_start(&left, false, false, 0);
@@ -245,7 +285,7 @@ impl Tab {
 
         root.pack_start(&right, true, true, 0);
 
-        Self {
+        let tab = Self {
             root: root.upcast(),
             list,
             heading,
@@ -259,7 +299,58 @@ impl Tab {
             goal,
             trouble,
             state: Rc::new(State::default()),
+        };
+        tab.list_widgets(&[]);
+        tab
+    }
+
+    /// Fill the list: every widget there is, and then any the config asks for
+    /// that there is not.
+    fn list_widgets(&self, strangers: &[String]) {
+        let shown: Vec<String> = doca_ipc::WIDGETS
+            .iter()
+            .map(|id| id.to_string())
+            .chain(strangers.iter().cloned())
+            .collect();
+        if *self.state.shown.borrow() == shown {
+            return;
         }
+
+        let selected = self.state.selected.borrow().clone();
+        self.state.filling.while_filling(|| {
+            for row in self.list.children() {
+                self.list.remove(&row);
+            }
+            for id in &shown {
+                let label = gtk::Label::new(None);
+                label.set_xalign(0.0);
+                label.set_margin(6);
+                if is_known(id) {
+                    label.set_text(&pretty(id));
+                } else {
+                    // The id as the file spells it, not prettified: what is
+                    // wrong with it is usually the spelling.
+                    label.set_markup(&format!(
+                        "{}  <small>unknown</small>",
+                        glib::markup_escape_text(id)
+                    ));
+                    label.style_context().add_class("dim-label");
+                }
+                let row = gtk::ListBoxRow::new();
+                row.add(&label);
+                self.list.add(&row);
+            }
+            self.list.show_all();
+            if let Some(at) = selected
+                .as_ref()
+                .and_then(|id| shown.iter().position(|shown| shown == id))
+            {
+                if let Some(row) = self.list.row_at_index(at as i32) {
+                    self.list.select_row(Some(&row));
+                }
+            }
+        });
+        self.state.shown.replace(shown);
     }
 
     /// Connect the controls to whatever is listening.
@@ -270,11 +361,14 @@ impl Tab {
         let pages = self.pages.clone();
         let trouble = self.trouble.clone();
         self.list.connect_row_selected(move |_, row| {
+            if state.filling.is_filling() {
+                return;
+            }
             let Some(row) = row else { return };
-            let Some(id) = doca_ipc::WIDGETS.get(row.index() as usize) else {
+            let Some(id) = state.shown.borrow().get(row.index() as usize).cloned() else {
                 return;
             };
-            state.selected.replace(Some(id.to_string()));
+            state.selected.replace(Some(id));
             trouble.set_text("");
             show_selected(&state, &heading, &where_shown, &pages);
         });
@@ -383,6 +477,9 @@ impl Tab {
     /// same list the Docks tab is given.
     pub fn show_docks(&self, docks: &[EnvironmentInfo]) {
         self.state.docks.replace(docks.to_vec());
+        // A widget nobody answers to only exists in the docks' own lists, so
+        // this is the only place it can be noticed.
+        self.list_widgets(&unknown_in(docks));
         if self.state.selected.borrow().is_none() {
             // Nothing picked yet, so pick the first — a blank right-hand pane
             // reads as a tab that failed to load.
@@ -409,9 +506,17 @@ fn show_selected(
     let Some(id) = state.selected.borrow().clone() else {
         return;
     };
-    heading.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(&pretty(&id))));
-    where_shown.set_text(&shows(&state.docks.borrow(), &id));
-    pages.set_visible_child_name(if takes_settings(&id) { &id } else { NOTHING });
+    let known = is_known(&id);
+    heading.set_markup(&format!(
+        "<b>{}</b>",
+        glib::markup_escape_text(&if known { pretty(&id) } else { id.clone() })
+    ));
+    where_shown.set_text(&if known {
+        shows(&state.docks.borrow(), &id)
+    } else {
+        stranger(&state.docks.borrow(), &id)
+    });
+    pages.set_visible_child_name(if known && takes_settings(&id) { &id } else { NOTHING });
 }
 
 fn spin(adjustment: &gtk::Adjustment) -> gtk::SpinButton {
@@ -515,6 +620,63 @@ pub mod on_a_display {
 
     /// Ten of the twelve take no settings, and a blank pane would read as a
     /// tab that failed rather than a widget with nothing to set.
+    /// The issue's own words: it should appear marked as unknown rather than
+    /// vanishing quietly. Before this it was not in the list at all, because
+    /// the list was the contract's twelve and nothing else.
+    pub fn a_widget_nobody_answers_to_still_appears_in_the_list() {
+        let tab = Tab::new();
+
+        tab.show_docks(&[dock("Work", &["clock", "clok"])]);
+
+        let shown = tab.state.shown.borrow().clone();
+        assert_eq!(
+            shown.len(),
+            doca_ipc::WIDGETS.len() + 1,
+            "the stranger did not join the list"
+        );
+        assert_eq!(shown.last().map(String::as_str), Some("clok"));
+        assert_eq!(tab.list.children().len(), shown.len(), "a row short");
+    }
+
+    /// Picking it must say what is wrong, and must not offer settings for a
+    /// widget that does not exist to take them.
+    pub fn picking_a_stranger_says_what_is_wrong_and_offers_nothing() {
+        let (tab, _) = watched();
+        tab.show_docks(&[dock("Work", &["clok"])]);
+
+        let at = tab.state.shown.borrow().iter().position(|id| id == "clok").unwrap();
+        let row = tab.list.row_at_index(at as i32).expect("a row for it");
+        tab.list.select_row(Some(&row));
+
+        assert_eq!(tab.state.selected.borrow().as_deref(), Some("clok"));
+        assert!(tab.where_shown.text().contains("config.toml"), "{}", tab.where_shown.text());
+        assert_eq!(
+            tab.pages.visible_child_name().map(|n| n.to_string()).as_deref(),
+            Some(NOTHING),
+            "a widget that does not exist was offered settings"
+        );
+    }
+
+    /// The list is rebuilt when a stranger appears or goes, and rebuilding a
+    /// list fires `row_selected` — which must not be read as the user picking
+    /// something, nor lose what they had picked.
+    pub fn a_list_rebuilt_around_a_stranger_keeps_what_was_selected() {
+        let (tab, asked) = watched();
+        tab.show_docks(&[dock("Work", &["clock"])]);
+        let at = tab.state.shown.borrow().iter().position(|id| id == "water").unwrap();
+        tab.list.select_row(tab.list.row_at_index(at as i32).as_ref());
+        asked.borrow_mut().clear();
+
+        tab.show_docks(&[dock("Work", &["clock", "clok"])]);
+
+        assert_eq!(
+            tab.state.selected.borrow().as_deref(),
+            Some("water"),
+            "the selection moved when the list grew"
+        );
+        assert!(asked.borrow().is_empty(), "a rebuild wrote: {:?}", asked.borrow());
+    }
+
     pub fn a_widget_with_nothing_to_set_says_so() {
         let (tab, _) = watched();
         tab.show_docks(&[dock("Work", &[])]);
@@ -735,6 +897,27 @@ mod tests {
             pinned: Vec::new(),
             widgets: widgets.iter().map(|id| id.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn a_widget_nobody_answers_to_is_picked_out_of_the_docks_lists() {
+        let docks = vec![
+            dock("Work", &["clock", "clok"]),
+            dock("Home", &["clok", "watr"]),
+        ];
+
+        assert_eq!(unknown_in(&docks), vec!["clok", "watr"], "first seen, once each");
+        assert!(unknown_in(&[dock("Work", &["clock", "water"])]).is_empty());
+    }
+
+    #[test]
+    fn what_is_said_about_a_stranger_names_the_docks_and_the_way_out() {
+        let docks = vec![dock("Work", &["clok"]), dock("Home", &["clok"])];
+
+        let said = stranger(&docks, "clok");
+
+        assert!(said.contains("Work and Home"), "{said}");
+        assert!(said.contains("config.toml"), "no way out offered: {said}");
     }
 
     #[test]

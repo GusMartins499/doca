@@ -330,6 +330,15 @@ impl DockService {
             .await
     }
 
+    async fn reorder_environments(
+        &self,
+        order: Vec<String>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.commit(&emitter, |config| config.reorder_environments(order))
+            .await
+    }
+
     async fn add_environment(
         &self,
         name: &str,

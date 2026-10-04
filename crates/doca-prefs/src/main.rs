@@ -313,6 +313,8 @@ fn on_a_display() {
     docks::on_a_display::a_change_names_the_dock_that_is_selected();
     docks::on_a_display::ticking_a_widget_keeps_the_ones_the_dock_already_had();
     docks::on_a_display::unpinning_names_the_app_the_row_points_at();
+    docks::on_a_display::moving_a_dock_sends_the_whole_new_order();
+    docks::on_a_display::a_dock_at_the_top_cannot_be_moved_off_the_list();
     docks::on_a_display::a_pin_at_the_top_cannot_be_moved_off_the_list();
     docks::on_a_display::moving_a_pin_down_sends_the_whole_new_order();
     docks::on_a_display::a_new_dock_is_asked_for_by_a_name_nothing_is_using();
@@ -324,6 +326,9 @@ fn on_a_display() {
     widgets::on_a_display::the_controls_show_the_settings_they_were_given();
     widgets::on_a_display::selecting_a_widget_shows_that_widgets_own_page();
     widgets::on_a_display::a_widget_with_nothing_to_set_says_so();
+    widgets::on_a_display::a_widget_nobody_answers_to_still_appears_in_the_list();
+    widgets::on_a_display::picking_a_stranger_says_what_is_wrong_and_offers_nothing();
+    widgets::on_a_display::a_list_rebuilt_around_a_stranger_keeps_what_was_selected();
     widgets::on_a_display::the_docks_that_show_a_widget_are_named();
     widgets::on_a_display::a_widget_no_dock_shows_is_told_where_to_turn_it_on();
     widgets::on_a_display::a_spin_writes_its_number_to_its_own_widget_and_key();

@@ -119,6 +119,24 @@ case "$(call PinIn "Studio" "nothing.installed.here")" in
     *InvalidArgs*"no application called"*) ok "a refusal says what was wrong" ;;
     *) fail "the refusal was not something a window could show: $(call PinIn "Studio" "nothing.installed.here")" ;;
 esac
+# The cycle order, which is the order of this list. Only an order: a name
+# nobody knows is refused, and a dock left out keeps its place at the end, so a
+# window working from a list drawn before a rename cannot delete a dock.
+call AddEnvironment "Studio" >/dev/null 2>&1
+case "$(call ReorderEnvironments "['Studio']")" in
+    *error*) fail "reordering the docks was refused: $(call ReorderEnvironments "['Studio']")" ;;
+    *) ok "the docks can be put in a new order" ;;
+esac
+# gdbus wraps the reply in a tuple, so the list opens with `([(`.
+case "$(call ListEnvironments)" in
+    "([('Studio',"*) ok "the dock named first is first, and the rest kept their places" ;;
+    *) fail "the order did not take: $(call ListEnvironments)" ;;
+esac
+case "$(call ReorderEnvironments "['Nowhere']")" in
+    *InvalidArgs*"no dock called Nowhere"*) ok "a reorder cannot invent a dock" ;;
+    *) fail "the refusal was not showable: $(call ReorderEnvironments "['Nowhere']")" ;;
+esac
+
 call RemoveEnvironment "Studio" >/dev/null
 
 # What the Widgets tab reads and writes. The point of these is that the widget

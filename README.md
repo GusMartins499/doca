@@ -133,6 +133,12 @@ Two things worth knowing before choosing it:
   is the *Applications* theme — the one GNOME Tweaks sets under Appearance →
   Applications. Picking `Sweet-Dark-v40` for both is what makes them match; the
   dock only ever sees the Applications half.
+- **A name no theme answers to is a warning, not a refusal.** GTK falls back to
+  something readable on its own, so `icon_theme = "Papirus-Drak"` leaves the
+  dock looking exactly as it did — which is indistinguishable from the setting
+  not working. The dock checks the three override names against `~/.themes`,
+  `~/.icons` and the shared data directories, and says in the log which one is
+  not installed.
 - **A theme that defines none of those four colours falls back to `native`**,
   with the missing names in the log. GTK accepts a stylesheet naming colours
   the theme never defined — the load succeeds and the declaration simply draws
@@ -254,7 +260,10 @@ added, removed and renamed on the left; on the right are the workspaces that
 dock claims, the apps it pins and the widgets it shows. The workspace field
 counts from 0, the same as the config file, so a hand-edited TOML and this
 window never disagree about which workspace is which; left empty, the dock
-covers whatever no other dock asked for. **Add app…** opens a box you can type
+covers whatever no other dock asked for. **Up** and **Down** under the list
+reorder the docks themselves — that order is the order a key cycles through
+them, and until this it was the one piece of the config only a text editor
+could reach. **Add app…** opens a box you can type
 in, over every installed application — searching the id as well as the name,
 because the id is what the file holds. Pins reorder with Up and Down, which
 move one pin a place and nothing else.
@@ -270,7 +279,14 @@ question from which docks show it, and the reason the two live in different
 tabs: the countdown counts to one date no matter how many docks show it, while
 showing it is a property of the dock. Four of the twelve take settings — a
 countdown's date and caption, a note's text, a timer's length, a water goal —
-and the other eight say so rather than leaving a blank pane. Under each name is
+and the other eight say so rather than leaving a blank pane. A widget id in the
+config that nothing answers to — a typo in a hand-edited TOML — appears at the
+end of the list marked *unknown*, spelled the way the file spells it, rather
+than quietly not being there: the daemon drops it with a log line nobody reads,
+and the bar showing nothing looks exactly like a widget that was never turned
+on. Picking it says which docks ask for it and that it has to come out of
+`config.toml`, because the tick boxes in the Docks tab are built from the
+widgets that exist and an id that does not exist has no box to untick. Under each name is
 the line that answers the question this tab exists for: **Shown in Work and
 Home**, or, when nothing shows it, where to turn it on. A date is checked
 before it is sent, because the daemon accepts any text and the widget would
@@ -350,6 +366,7 @@ the trash on the window already on screen.
 | `RenameEnvironment(s, s)` → `s` | renames a dock, and follows the rename if that dock is the one a key put on screen. |
 | `SetEnvironmentWorkspaces(s, ai)` | which workspaces a dock claims, tidied: sorted, deduplicated, negatives dropped. An empty list makes it the catch-all. |
 | `SetEnvironmentWidgets(s, as)` | the widgets a dock shows, in the order it shows them. |
+| `ReorderEnvironments(as)` | reorders the docks themselves, which is the order a key cycles through them. Same contract as `ReorderPinned`: a name nobody knows is refused, and a dock left out keeps its place at the end. |
 | `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. |
 | `PinIn(s, s)` / `UnpinIn(s, s)` | pin and unpin in the dock named, which need not be the one on screen — that is the whole difference from `PinItem`/`UnpinItem`, which act where the user is looking because that is what a click on the bar means. `PinIn` refuses an id no `.desktop` file answers to; `UnpinIn` does not, since that is how an uninstalled app gets out of the config. |
 | `ListEnvironments()` → `a(saibasas)` | every dock: its name, the workspaces it claims, whether it is the one on screen, what it pins and which widgets it shows. Everything a writer can change about a dock is something a reader can see. |

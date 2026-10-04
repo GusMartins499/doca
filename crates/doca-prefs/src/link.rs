@@ -89,6 +89,7 @@ impl Link {
             Action::Pin { name, id } => self.proxy.pin_in(&name, &id).await,
             Action::Unpin { name, id } => self.proxy.unpin_in(&name, &id).await,
             Action::Reorder { name, order } => self.proxy.reorder_pinned(&name, order).await,
+            Action::ReorderDocks(order) => self.proxy.reorder_environments(order).await,
             Action::Widgets { name, widgets } => {
                 self.proxy.set_environment_widgets(&name, widgets).await
             }
