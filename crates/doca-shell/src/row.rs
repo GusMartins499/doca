@@ -124,7 +124,12 @@ pub struct Row {
     pub perch: gtk::Box,
     entries: Rc<RefCell<Vec<Entry>>>,
     rest: Rc<Cell<Rest>>,
+    /// Where the pointer is: what the lens is travelling towards.
     pointer: Rc<Cell<Option<f64>>>,
+    /// Where the lens is aimed, which is where the pointer is except when the
+    /// pointer did not travel to get there. Advanced once a frame.
+    lens: Rc<Cell<Option<f64>>>,
+    lens_at: Rc<Cell<Instant>>,
     largest: Rc<Cell<i32>>,
     /// When the pointer arrived or left, and which of the two it was.
     hovering: Rc<Cell<bool>>,
@@ -176,6 +181,8 @@ impl Row {
             entries: Rc::new(RefCell::new(Vec::new())),
             rest: Rc::new(Cell::new(Rest::default())),
             pointer: Rc::new(Cell::new(None)),
+            lens: Rc::new(Cell::new(None)),
+            lens_at: Rc::new(Cell::new(Instant::now())),
             largest: Rc::new(Cell::new(0)),
             hovering: Rc::new(Cell::new(false)),
             hover_since: Rc::new(Cell::new(Instant::now() - crate::motion::ZOOM)),
@@ -265,12 +272,45 @@ impl Row {
     pub fn aim(&self, pointer: Option<f64>) {
         match pointer {
             Some(x) => {
+                // A shut lens aims wherever it likes: there is nothing on
+                // screen to jump, and travelling to the pointer while closed
+                // would only mean arriving late as it opens. An open one
+                // travels, and `step` is what carries it.
+                if self.scale_now() <= 1.0 {
+                    self.lens.set(Some(x));
+                    self.lens_at.set(Instant::now());
+                }
                 self.pointer.set(Some(x));
                 self.hover(true);
             }
             None => self.hover(false),
         }
         self.animate();
+    }
+
+    /// Where the lens is aimed this instant.
+    ///
+    /// Everything the row draws, and everything it is clicked on, asks this
+    /// rather than the pointer — the same reason `scale_now` exists. The two
+    /// agree except in the frames after a pointer appeared somewhere it had
+    /// not travelled to, and in those frames what you hit has to be what you
+    /// see.
+    fn lens(&self) -> Option<f64> {
+        self.lens.get().or_else(|| self.pointer.get())
+    }
+
+    /// Carry the lens one frame closer to the pointer.
+    ///
+    /// Called from the frame clock and nowhere else: reading the lens must
+    /// not move it, or the two or three places that ask per frame would each
+    /// advance it and the travel would depend on how often it was looked at.
+    fn step(&self, now: Instant) {
+        let Some(pointer) = self.pointer.get() else {
+            return;
+        };
+        let since = now.saturating_duration_since(self.lens_at.replace(now));
+        let lens = self.lens.get().unwrap_or(pointer);
+        self.lens.set(Some(crate::motion::aimed(lens, pointer, since)));
     }
 
     fn hover(&self, hovering: bool) {
@@ -309,6 +349,7 @@ impl Row {
         }
         let row = self.clone();
         self.area.add_tick_callback(move |area, _| {
+            row.step(Instant::now());
             area.queue_draw();
             if row.resting() {
                 row.ticking.set(false);
@@ -331,7 +372,10 @@ impl Row {
     pub fn at(&self, x: f64) -> Option<usize> {
         let rest = self.rest.get();
         let scale = self.scale_now();
-        let pointer = Some(x);
+        // Aimed where the lens is, asked about where the click was. The two
+        // are the same once the lens has caught up, and while it has not, the
+        // icons are where the lens put them and not where the pointer is.
+        let pointer = self.lens().or(Some(x));
         (0..self.entries.borrow().len()).find(|index| {
             let placed = magnify::place(rest.centre(*index), pointer, rest.icon, scale);
             (x - placed.centre).abs() <= (placed.size / 2.0).max(rest.slot / 2.0)
@@ -342,7 +386,7 @@ impl Row {
     pub fn rect_of(&self, index: usize) -> (i32, i32) {
         let rest = self.rest.get();
         let placed =
-            magnify::place(rest.centre(index), self.pointer.get(), rest.icon, self.scale_now());
+            magnify::place(rest.centre(index), self.lens(), rest.icon, self.scale_now());
         ((placed.centre - placed.size / 2.0) as i32, placed.size as i32)
     }
 
@@ -376,7 +420,7 @@ impl Row {
             return;
         }
         let bottom = area.allocated_height() as f64 - INDICATOR as f64;
-        let pointer = self.pointer.get();
+        let pointer = self.lens();
         let scale = self.scale_now();
         let (running_dot, active_dot) = *self.dots.borrow();
 
@@ -443,6 +487,142 @@ pub mod tests {
             windows: Vec::new(),
             active: false,
         }
+    }
+
+    const ICON: i32 = 48;
+    const SCALE: f64 = 1.6;
+
+    fn filled(count: usize) -> Row {
+        let row = Row::new();
+        let items: Vec<DockItem> = (0..count).map(|i| item(&format!("app{i}"))).collect();
+        row.fill(&items, Rest::new(ICON, 4, 4, SCALE));
+        row
+    }
+
+    /// Where every icon is drawn right now, left edge and width.
+    fn drawn(row: &Row, count: usize) -> Vec<(i32, i32)> {
+        (0..count).map(|index| row.rect_of(index)).collect()
+    }
+
+    fn edge(placed: magnify::Placement) -> f64 {
+        placed.centre - placed.size / 2.0
+    }
+
+    /// The worst a frame of ordinary pointer movement costs.
+    ///
+    /// Not a constant: how far an icon moves for a given step of the pointer
+    /// is a property of the lens's own shape, so it is measured off `place`
+    /// rather than guessed at. This is the yardstick a jump is held to — a
+    /// pointer that appeared somewhere must not move the row further in one
+    /// frame than a pointer that swept there as fast as a lens follows.
+    fn worst_frame_of_a_sweep(row: &Row, count: usize) -> f64 {
+        let rest = row.rest.get();
+        let step = crate::motion::AIM_SPEED * crate::motion::FRAME.as_secs_f64();
+        let across = rest.centre(count - 1) + rest.slot;
+        (0..across as i32)
+            .step_by(2)
+            .map(|at| {
+                let (from, to) = (at as f64, at as f64 + step);
+                (0..count)
+                    .map(|index| {
+                        let centre = rest.centre(index);
+                        let before = magnify::place(centre, Some(from), rest.icon, rest.scale);
+                        let after = magnify::place(centre, Some(to), rest.icon, rest.scale);
+                        // The left edge, which is what is drawn and what the
+                        // check below compares: an icon's edge moves with its
+                        // centre *and* with half its growth.
+                        (edge(after) - edge(before)).abs()
+                    })
+                    .fold(0.0f64, f64::max)
+            })
+            .fold(0.0f64, f64::max)
+    }
+
+    /// Measured before it was fixed, and the reason the fix is a ceiling and
+    /// not an ease.
+    ///
+    /// The lens is open over the middle of the row, the pointer leaves and
+    /// comes straight back at the far edge. The magnification reverses
+    /// correctly — it never was the part that jumped — but the *centre* was
+    /// the raw pointer, so the whole lens arrived somewhere else between two
+    /// frames: 61px of icon movement at once, against the 27px a brisk sweep
+    /// costs. Now it travels, and every frame of the travel is within what
+    /// moving the pointer there would have cost.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports() {
+        let count = 20;
+        let row = filled(count);
+        let rest = row.rest.get();
+        let allowed = worst_frame_of_a_sweep(&row, count).ceil();
+
+        row.aim(Some(rest.centre(10)));
+        // The lens, fully open over the middle.
+        row.hover_since.set(Instant::now() - crate::motion::ZOOM);
+        let mut before = drawn(&row, count);
+
+        // Away and back at the far edge, with no travel in between.
+        row.aim(None);
+        row.aim(Some(rest.centre(0)));
+        assert!(row.scale_now() > 1.0, "the lens shut, and nothing could jump");
+
+        let mut clock = Instant::now();
+        let mut arrived = None;
+        for frame in 1..=60 {
+            clock += crate::motion::FRAME;
+            row.step(clock);
+            let now = drawn(&row, count);
+            for (index, (was, is)) in before.iter().zip(&now).enumerate() {
+                let moved = (is.0 - was.0).abs() as f64;
+                assert!(
+                    moved <= allowed,
+                    "icon {index} moved {moved}px in frame {frame}, past the \
+                     {allowed}px a sweep at the lens's own speed would cost"
+                );
+            }
+            before = now;
+            if row.lens() == Some(rest.centre(0)) {
+                arrived = Some(frame);
+                break;
+            }
+        }
+
+        // The worst jump there is — one end of the row to the other — and it
+        // costs about what opening the lens costs. Held to `ZOOM` rather than
+        // to a number of frames, so the two cannot drift apart: this is the
+        // figure the rest of the lens already moves on.
+        let arrived = arrived.expect("the lens never reached the pointer");
+        let took = crate::motion::FRAME * arrived;
+        assert!(
+            took <= crate::motion::ZOOM + crate::motion::FRAME,
+            "catching up took {took:?}, longer than the lens takes to open"
+        );
+    }
+
+    /// The other half of it, and the regression the ceiling could have been.
+    ///
+    /// Travelling only makes sense while there is a lens on screen to travel.
+    /// A pointer arriving at a dock nobody has touched aims where it is, at
+    /// once: making *that* glide would turn every entry into a quarter-second
+    /// of the lens sliding in from wherever it was last.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_lens_that_is_shut_aims_at_once_rather_than_travelling() {
+        let row = filled(20);
+        let rest = row.rest.get();
+        row.aim(Some(rest.centre(19)));
+        row.aim(None);
+        // Long enough ago that the lens is shut, not merely closing.
+        row.hover_since.set(Instant::now() - crate::motion::ZOOM * 2);
+        assert_eq!(row.scale_now(), 1.0, "the lens has not shut");
+
+        row.aim(Some(rest.centre(0)));
+
+        assert_eq!(
+            row.lens(),
+            Some(rest.centre(0)),
+            "a shut lens took the scenic route to where the pointer already is"
+        );
     }
 
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
