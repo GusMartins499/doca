@@ -11,7 +11,6 @@ mod widget_tile;
 
 use std::cell::{Cell, RefCell};
 use std::time::Instant;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -84,7 +83,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-type Tiles = Rc<RefCell<HashMap<String, widget_tile::WidgetTile>>>;
+type Tiles = Rc<widget_tile::Shelf>;
 
 /// The bar's own movement: where it sits, and the slide between the two places.
 ///
@@ -209,7 +208,7 @@ async fn drive(
 ) -> Result<()> {
     let connection = zbus::Connection::session().await?;
     let proxy: Rc<DocaProxy<'static>> = Rc::new(DocaProxy::new(&connection).await?);
-    let tiles: Tiles = Rc::new(RefCell::new(HashMap::new()));
+    let tiles: Tiles = Rc::new(widget_tile::Shelf::new());
     let applied: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let hide = Hide::default();
     let label = tooltip::Tooltip::new();
@@ -304,12 +303,14 @@ async fn drive(
                 }
             }
             signal = futures_util::StreamExt::next(&mut widget_changed) => {
+                // A widget's new value touches its own tile and nothing
+                // else — never the row of icons, which is the tightest thing
+                // this loop has to do. A widget the bar is not showing has no
+                // tile and nothing to act on here: what puts it on the bar is
+                // the *list* changing, which arrives as another signal.
                 if let Some(signal) = signal {
                     if let Ok(args) = signal.args() {
-                        if let Some(tile) = tiles.borrow().get(&args.state.id) {
-                            tile.update(&args.state);
-                            continue;
-                        }
+                        tiles.update(&args.state);
                     }
                 }
                 continue;
@@ -526,12 +527,15 @@ async fn rebuild(
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
 
-    // Everything but the row is torn down and built again. The row stays put:
-    // unparenting a widget destroys its window, and the pointer leaving a
-    // window that was taken out from under it is a leave event like any other
-    // — which shut the lens every time a window somewhere took focus.
+    // Everything but the row and the shelf is torn down and built again. The
+    // row stays put: unparenting a widget destroys its window, and the pointer
+    // leaving a window that was taken out from under it is a leave event like
+    // any other — which shut the lens every time a window somewhere took
+    // focus. The shelf stays for the same reason and one more: its tiles are
+    // reconciled rather than remade, so sweeping them away here would undo
+    // that before it happened.
     for child in items.children() {
-        if child != row.perch.clone().upcast::<gtk::Widget>() {
+        if child != row.perch.clone().upcast::<gtk::Widget>() && !tiles.owns(&child) {
             items.remove(&child);
         }
     }
@@ -571,23 +575,22 @@ async fn rebuild(
     // The dock may have changed under a pointer that never moved.
     name_what_is_hovered(row, label);
 
-    tiles.borrow_mut().clear();
-    if !widgets.is_empty() {
-        items.add(&dock::divider());
-
-        for state in &widgets {
-            let tile = widget_tile::WidgetTile::new(state, proxy.clone());
-            items.add(&tile.root);
-            tiles.borrow_mut().insert(state.id.clone(), tile);
-        }
-    }
+    let asking = proxy.clone();
+    let invoke: widget_tile::Invoke = Rc::new(move |id: &str, action: &str| {
+        let (id, action) = (id.to_string(), action.to_string());
+        let proxy = asking.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = proxy.invoke_widget(&id, &action).await {
+                tracing::warn!("widget {id} rejected {action}: {e}");
+            }
+        });
+    });
+    tiles.show(items, &widgets, &invoke);
 
     items.show_all();
-    for state in &widgets {
-        if let Some(tile) = tiles.borrow().get(&state.id) {
-            tile.update(state);
-        }
-    }
+    // After `show_all`, which shows every child — including a progress bar a
+    // tile had hidden for having no progress to report.
+    tiles.refresh(&widgets);
 
     // The bar is as wide as its contents ask; the window is that plus the room
     // a magnified icon rises into, which the bar itself never occupies.
@@ -655,6 +658,14 @@ fn on_a_display() {
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
+    widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
+    widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
+    widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();
+    widget_tile::tests::a_reorder_moves_the_tiles_rather_than_remaking_them();
+    widget_tile::tests::the_divider_only_stands_where_there_is_something_to_divide();
+    widget_tile::tests::the_divider_that_comes_back_is_the_one_that_left();
+    widget_tile::tests::the_shelf_knows_what_is_its_own();
+    widget_tile::tests::a_state_for_a_widget_with_no_tile_is_not_claimed();
     an_undefined_colour_is_not_something_gtk_reports();
     a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();
     the_system_sheet_loads_against_a_real_gtk_theme();
