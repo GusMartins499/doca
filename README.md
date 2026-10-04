@@ -368,16 +368,16 @@ gdbus call --session --dest io.github.gusmartins499.Doca \
 
 ## Checking it against a real session
 
-`cargo test` covers everything that can be decided without a bus. Three things
+`cargo test` covers everything that can be decided without a bus. Four things
 cannot be, and have scripts of their own:
 
 ```bash
 cargo build --release && ./scripts/check-live.sh
 ```
 
-starts a daemon and the preferences window on a nested display with a session
-bus, a config and a dconf database of their own, and asserts three things no
-unit test can reach.
+starts a daemon, the bar and the preferences window on a nested display with a
+session bus, a config and a dconf database of their own, and asserts four
+things no unit test can reach.
 
 That a change made from anywhere else reaches the window. Writing is a method
 call and hearing is a signal, and the two break apart — every control can work
@@ -388,6 +388,16 @@ And that a widget setting reaches the widget that is already running: it drinks
 two glasses, moves the water goal to four, and expects `2/4` back. A widget
 rebuilt instead of told would answer `0/4`, and the value landing in the config
 file would prove nothing either way.
+
+And that a rebuild of the bar keeps the widget tiles it already had. The bar is
+rebuilt whenever a window opens, closes or takes focus, and on every change to
+the config as well — which means on every frame of a slider being dragged in
+the preferences window. Tiles torn down and built again at that rate are a
+visible flicker, and a bar that quietly went back to doing so looks exactly
+like one that did not: the counts are the only thing that tells them apart, so
+they are read out of the bar's own log. Changing the icon size should carry
+every tile over and make none; dropping one widget should take one tile and
+leave the other where it was.
 
 And that `scripts/bind-key.sh` and the Shortcuts tab write the same slot, label
 and command. Two implementations of one algorithm is the price of the script

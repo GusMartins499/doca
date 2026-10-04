@@ -43,7 +43,7 @@ for tool in Xvfb dbus-run-session gdbus xwininfo; do
         exit 1
     }
 done
-for binary in docad doca-prefs; do
+for binary in docad doca-shell doca-prefs; do
     [ -x "$ROOT/target/release/$binary" ] || {
         echo "missing $binary — run: cargo build --release" >&2
         exit 1
@@ -286,6 +286,55 @@ if [ "$KEYS_EXPECTED" != "0" ]; then
         || fail "the tab read $SAW keys, not $KEYS_EXPECTED"
 fi
 
+# The bar itself, for the one thing only it can answer: that a rebuild keeps
+# the widget tiles it already had. The bar is rebuilt whenever a window opens,
+# closes or takes focus — and now on every config change too, which is every
+# frame of a slider being dragged in the window above. Tiles remade at that
+# rate are a visible flicker, and a shelf that quietly went back to remaking
+# them looks exactly like one that did not. The counts are what tell them
+# apart, so they are read out of the bar's own log.
+call SetEnvironmentWidgets "Work" "['water', 'clock']" >/dev/null
+RUST_LOG=doca_shell=debug "$ROOT/target/release/doca-shell" > "$WORK/shell.log" 2>&1 &
+BAR=$!
+BAR_UP=0
+for _ in $(seq 1 60); do
+    grep -aq "the widget shelf" "$WORK/shell.log" && { BAR_UP=1; break; }
+    sleep 0.5
+done
+if [ "$BAR_UP" = "1" ]; then
+    ok "the bar came up and put its widget tiles on"
+
+    # A change of appearance rebuilds the bar without touching the widgets, so
+    # every tile should be carried over and none made.
+    call SetAppearance "{'icon_size': <int32 56>}" >/dev/null
+    sleep 2
+    SHELF=$(grep -a "the widget shelf" "$WORK/shell.log" | tail -1 |
+        sed 's/\x1b\[[0-9;]*m//g')
+    case "$SHELF" in
+        *made=0*gone=0*) ok "a rebuild carried the tiles over instead of remaking them" ;;
+        *) fail "the bar rebuilt its tiles: ${SHELF##*the widget shelf}" ;;
+    esac
+    case "$SHELF" in
+        *kept=2*) ok "both tiles were the ones already on the bar" ;;
+        *) fail "the wrong number of tiles was carried over: ${SHELF##*the widget shelf}" ;;
+    esac
+
+    # Dropping one widget must take one tile and leave the other alone — the
+    # case where remaking everything is easiest and least visible.
+    call SetEnvironmentWidgets "Work" "['clock']" >/dev/null
+    sleep 2
+    SHELF=$(grep -a "the widget shelf" "$WORK/shell.log" | tail -1 |
+        sed 's/\x1b\[[0-9;]*m//g')
+    case "$SHELF" in
+        *kept=1*made=0*gone=1*) ok "one widget left and took only its own tile" ;;
+        *) fail "dropping a widget disturbed the rest: ${SHELF##*the widget shelf}" ;;
+    esac
+else
+    fail "the bar never drew its widgets"
+    tail -5 "$WORK/shell.log"
+fi
+kill "$BAR" 2>/dev/null
+
 # The point of the whole script: somebody else writes, and the window follows.
 # A keybinding, the bar's own menu and a second window all look like this.
 gdbus call --session --dest "$BUS" --object-path "$OBJECT" \
@@ -300,7 +349,7 @@ grep -aq "the config moved" "$WORK/prefs.log" \
     && ok "the window heard it and re-read the config" \
     || fail "the window did not hear ConfigChanged — it is not following the bus"
 
-kill "$WINDOW" "$DAEMON" 2>/dev/null
+kill "$WINDOW" "$DAEMON" "$BAR" 2>/dev/null
 wait 2>/dev/null
 rm -rf "$WORK"
 [ "$FAILED" = "0" ] && echo "all live checks passed" || echo "live checks failed"
