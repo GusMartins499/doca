@@ -153,6 +153,28 @@ directories first, then names case-insensitively, capped at 60 entries. Hidden
 entries are left out. Each entry opens with `xdg-open`; file icons come from
 the content type, not the extension.
 
+The grid goes up on the click, not on the answer. Reading a folder is the one
+thing a click starts whose cost has no ceiling — a disk that is asleep, a
+mount that is not local — so the grid opens over its icon as a skeleton of
+faint cells, and the entries drop into it when they arrive.
+
+It is opened at the shape the folder had last time, and that memory is
+load-bearing rather than a nicety. A GTK menu takes its window's size when it
+pops up and never again: cells added to one already open are not shown but
+*scrolled* to, and the only way to resize it is to put it down and up again.
+So a folder opened before opens at its own shape and nothing moves at all; one
+whose shape has changed is put down and up once, which beats hiding two thirds
+of itself behind a scroll arrow. Every cell is the same size, which is what
+makes a shape knowable before the answer is.
+
+A grid is never taken down inside the quarter-second after it went up, and
+that figure is the click itself. A menu put up by a press and taken down and
+up again before the *release* of that same click is dismissed by that release:
+with a folder that reads instantly the whole dance fits inside one click, and
+the grid then opened one time in three. None of this is reachable from
+`cargo test`, which has no click to make and no grab to lose, so it is checked
+in `scripts/check-live.sh` instead — where it failed, twice, before it worked.
+
 ### Widgets
 
 | id | shows | poll | click |

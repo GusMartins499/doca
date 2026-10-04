@@ -70,7 +70,18 @@ if [ "${INSIDE:-0}" != "1" ]; then
     INSIDE=1 DISPLAY="$DISPLAY_NUM" exec dbus-run-session -- "$0" "$@"
 fi
 
-printf '[[environments]]\nname = "Work"\n' > "$XDG_CONFIG_HOME/doca/config.toml"
+# One folder and nothing else on the bar, so the one icon is dead centre of
+# the dock window and a click needs no arithmetic to find it.
+mkdir -p "$WORK/folder"
+for n in 1 2 3 4 5 6 7; do : > "$WORK/folder/file-$n.txt"; done
+cat > "$XDG_CONFIG_HOME/doca/config.toml" <<CONFIG
+[appearance]
+show_trash = false
+
+[[environments]]
+name = "Work"
+folders = ["$WORK/folder"]
+CONFIG
 
 FAILED=0
 ok()   { echo "  ok    $1"; }
@@ -266,6 +277,122 @@ else
         && ok "the command is the one the window would write" \
         || fail "the command drifted: $(gsettings get "$SLOT_SCHEMA:$WORK_SLOT" command)"
     KEYS_EXPECTED=2
+fi
+
+# The folder grid, which needs a window, a bus and a real click at once.
+#
+# A click is the only thing that finds what is wrong here, and twice now it
+# has: a grid put up inside the button-press handler is taken down again by
+# the release of that same click, and a grid taken down to be resized cannot
+# be put back up in the same turn — it is swallowed by the teardown of the one
+# just dismissed. Both are invisible to `cargo test`, which has no click to
+# make and no grab to lose, and both leave exactly the same trace: a folder
+# that opens nothing at all.
+if ! command -v xdotool >/dev/null; then
+    echo "  skip  xdotool is not installed, so nothing here can be clicked"
+else
+    # Nothing but the folder on the bar: the checks above left a widget
+    # running, and a tile beside the icon moves the middle of the bar off it.
+    call SetEnvironmentWidgets "Work" "[]" >/dev/null
+    "$ROOT/target/release/doca-shell" > "$WORK/shell.log" 2>&1 &
+    SHELL_PID=$!
+    # By title, not by size: the bar is the window called `Doca`, and GTK
+    # keeps several small ones of its own that a size test picks up instead.
+    # A menu is titled after the program, so the two never collide.
+    BAR=""
+    for _ in $(seq 1 60); do
+        BAR=$(xwininfo -root -children 2>/dev/null | grep '"Doca":' | head -1)
+        [ -n "$BAR" ] && break
+        sleep 0.25
+    done
+    # Read it again once it has settled: the window exists before it is the
+    # size it will be, and a click aimed at the first geometry it reports
+    # lands wherever the bar used to be.
+    sleep 1
+    BAR=$(xwininfo -root -children 2>/dev/null | grep '"Doca":' | head -1)
+
+    # The bar's own geometry, so the click lands on the icon rather than on a
+    # guess: `WIDTHxHEIGHT+X+Y`, and the one icon is centred in it.
+    GEOMETRY=$(echo "$BAR" | sed -n 's/.* \([0-9]*x[0-9]*+-\?[0-9]*+-\?[0-9]*\) .*/\1/p' | head -1)
+    if [ -z "$GEOMETRY" ]; then
+        fail "the bar never came up"
+        cat "$WORK/shell.log"
+    else
+        ok "the bar is on screen at $GEOMETRY"
+        BAR_W=${GEOMETRY%%x*}
+        REST=${GEOMETRY#*x}
+        BAR_H=${REST%%+*}
+        REST=${REST#*+}
+        BAR_X=${REST%%+*}
+        BAR_Y=${REST#*+}
+        AT_X=$(( BAR_X + BAR_W / 2 ))
+        AT_Y=$(( BAR_Y + BAR_H - 30 ))
+
+        # Any doca-shell window that is neither the bar nor one of the small
+        # ones GTK keeps off screen. The grid is the only thing that can be.
+        grid_is_up() {
+            xwininfo -root -children 2>/dev/null \
+                | grep '"doca-shell":' \
+                | grep -v '"Doca":' \
+                | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+/) {
+                             split($i, size, "x"); if (size[1] >= 200) { print; break } }}' \
+                | head -1
+        }
+
+        # The size of the grid, which is the whole of what these check: a
+        # skeleton of one row and a folder of seven files are not the same
+        # shape, and whether the second ever replaces the first is the
+        # question.
+        # The geometry token, not the window id: `0x1200084` is a perfectly
+        # good `[0-9]+x[0-9]+` and this read the id as a size until it was
+        # made to match the `+X+Y` that only a geometry has.
+        size_of() {
+            grid_is_up | grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' | head -1 | cut -d+ -f1
+        }
+        wait_for_grid() {
+            for _ in $(seq 1 20); do
+                [ -n "$(size_of)" ] && return
+                sleep 0.15
+            done
+        }
+
+        xdotool mousemove "$AT_X" "$AT_Y"
+        sleep 0.4
+        xdotool click 1
+        wait_for_grid
+        FIRST=$(size_of)
+        [ -n "$FIRST" ] && ok "a folder nobody had opened opens a grid at once ($FIRST)" \
+            || fail "the first click on a folder put nothing on screen"
+        # Seven files are two rows; the skeleton of a folder nobody has opened
+        # is one. The grid has to grow into what arrived rather than scroll.
+        GREW=""
+        for _ in $(seq 1 20); do
+            GREW=$(size_of)
+            [ -n "$GREW" ] && [ "$GREW" != "$FIRST" ] && break
+            sleep 0.15
+        done
+        [ -n "$GREW" ] && [ "$GREW" != "$FIRST" ] \
+            && ok "the folder that arrived made the grid its own size ($FIRST then $GREW)" \
+            || fail "the grid stayed $FIRST with seven files in it, which is a scroll arrow"
+
+        xdotool key Escape
+        sleep 0.5
+        # And again, now that the dock knows the shape the folder takes. This
+        # is the open that happens over and over, and the one that must not
+        # move at all: same window, same size, the cells swapped underneath.
+        xdotool click 1
+        wait_for_grid
+        AGAIN=$(size_of)
+        [ -n "$AGAIN" ] && ok "a folder opened before opens again ($AGAIN)" \
+            || fail "the second click on a folder put nothing on screen"
+        sleep 1
+        SETTLED_SIZE=$(size_of)
+        [ "$SETTLED_SIZE" = "$AGAIN" ] \
+            && ok "it opened at the shape it turned out to have, and did not move" \
+            || fail "the grid went from $AGAIN to $SETTLED_SIZE on a folder it had opened before"
+        xdotool key Escape
+    fi
+    kill "$SHELL_PID" 2>/dev/null
 fi
 
 RUST_LOG=doca_prefs=info "$ROOT/target/release/doca-prefs" > "$WORK/prefs.log" 2>&1 &

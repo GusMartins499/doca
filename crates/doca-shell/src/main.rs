@@ -241,7 +241,7 @@ async fn drive(
     });
 
     icons.serve(proxy.clone());
-    wire(&icons, &label, proxy.clone());
+    wire(&icons, &label, proxy.clone(), stack::Remembered::default());
 
     let chrome = Chrome {
         style: Style { css, applied },
@@ -352,7 +352,12 @@ fn name_what_is_hovered(icons: &row::Row, label: &tooltip::Tooltip) {
     );
 }
 
-fn wire(icons: &row::Row, label: &tooltip::Tooltip, proxy: Rc<DocaProxy<'static>>) {
+fn wire(
+    icons: &row::Row,
+    label: &tooltip::Tooltip,
+    proxy: Rc<DocaProxy<'static>>,
+    folders: stack::Remembered,
+) {
     let naming = icons.clone();
     let naming_label = label.clone();
     icons.area.connect_motion_notify_event(move |_, event| {
@@ -381,9 +386,35 @@ fn wire(icons: &row::Row, label: &tooltip::Tooltip, proxy: Rc<DocaProxy<'static>
 
         match event.button() {
             1 if stack::is_folder(&item.id) => {
+                // The grid goes up on the click, not on the answer: reading a
+                // folder is the one thing a click can start that has no
+                // bounded cost — a sleeping disk, a mount that is not local —
+                // and nothing on the drawing path may wait on it.
+                let expected = folders.of(&item.id);
+                let grid = stack::opening(expected);
+                // One closure opens the grid and, if what arrives does not fit
+                // what it was opened for, opens it again. It anchors on the
+                // icon rather than on the click: a grid that has to come back
+                // comes back a moment later, and an event that old no longer
+                // places a menu — it put the second one in the screen's top
+                // corner, and sometimes failed to put it up at all. The icon
+                // is still where it was, and a stack belongs over the thing it
+                // belongs to anyway.
+                let show = over(&clicked, index);
+                show(&grid);
+                let opened = Instant::now();
+                let folders = folders.clone();
                 glib::spawn_future_local(async move {
                     let entries = proxy.list_folder(&item.id).await.unwrap_or_default();
-                    stack::menu(&entries, proxy.clone()).popup_at_pointer(Some(&trigger));
+                    folders.note(&item.id, entries.len());
+                    stack::fill(
+                        &grid,
+                        expected,
+                        &entries,
+                        &opens_with(proxy.clone()),
+                        &show,
+                        opened,
+                    );
                 });
             }
             1 => {
@@ -407,6 +438,43 @@ fn wire(icons: &row::Row, label: &tooltip::Tooltip, proxy: Rc<DocaProxy<'static>
     });
 
     dock::accept_file_drops(icons);
+}
+
+/// Put a menu above the icon it belongs to.
+///
+/// The row is one widget, so there is no per-icon window to anchor on: the
+/// icon's place is a rectangle inside the row's, which is what `rect_of`
+/// answers and what the tooltip already points at.
+fn over(icons: &row::Row, index: usize) -> stack::Show {
+    let (left, width) = icons.rect_of(index);
+    let height = icons.area.allocated_height();
+    let window = icons.area.window();
+    Rc::new(move |menu: &gtk::Menu| {
+        let Some(window) = &window else {
+            menu.popup_at_pointer(None);
+            return;
+        };
+        menu.popup_at_rect(
+            window,
+            &gdk::Rectangle::new(left, 0, width, height),
+            gdk::Gravity::North,
+            gdk::Gravity::South,
+            None,
+        );
+    })
+}
+
+/// Opening a path is the daemon's job, so that is all the grid is handed.
+fn opens_with(proxy: Rc<DocaProxy<'static>>) -> stack::Open {
+    Rc::new(move |path: &str| {
+        let path = path.to_string();
+        let proxy = proxy.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = proxy.open_path(&path).await {
+                tracing::warn!("cannot open {path}: {e}");
+            }
+        });
+    })
 }
 
 /// The pieces of the bar that outlive any one rebuild.
@@ -664,6 +732,12 @@ fn on_a_display() {
     row::tests::an_app_that_opened_grows_into_the_room_rather_than_appearing_in_it();
     row::tests::a_row_that_was_resized_or_reloaded_is_not_a_row_six_apps_just_opened_on();
     row::tests::an_app_that_closed_and_opened_again_comes_back_from_where_it_had_got_to();
+    stack::tests::a_grid_opens_before_the_folder_has_been_read();
+    stack::tests::a_folder_opened_at_the_shape_it_turns_out_to_have_does_not_move();
+    stack::tests::a_folder_larger_than_the_grid_it_opened_is_still_shown_whole();
+    stack::tests::a_folder_with_nothing_in_it_says_so_rather_than_waiting_for_ever();
+    stack::tests::a_folder_opened_before_is_drawn_at_the_size_it_was();
+    stack::tests::a_grid_always_has_a_cell_to_show_however_little_is_expected();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
     widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();
