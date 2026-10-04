@@ -199,7 +199,8 @@ of its own and replaces the one the key made. A workspace only a catch-all
 covers asks for nothing, so a dock chosen by hand survives moving across it.
 
 The dock does not grab keys itself — on Linux the desktop owns the keyboard —
-so bind one:
+so bind one. The [Shortcuts tab](#preferences) does this without a terminal;
+the script is the same thing for automation, and writes the same slots:
 
 ```bash
 ./scripts/bind-key.sh                    # <Super>e cycles environment
@@ -285,8 +286,40 @@ the new length at its next reset. Changing which widgets a dock shows works
 the same way — the ones that stay are carried over, not rebuilt, so adding a
 widget to one dock does not reset the stopwatch in another.
 
-**Shortcuts** is named but not yet built — it arrives with its own slice of
-#21, and says what it will hold rather than being hidden until then.
+The **Shortcuts** tab is the only one that does not write the dock's config.
+The dock does not grab keys — on Linux the desktop owns the keyboard — so what
+this writes is GNOME's own list of custom keybindings, the same list
+`scripts/bind-key.sh` writes and the same one Settings → Keyboard → Custom
+Shortcuts shows. The tab says so on screen, because a key that turns up in the
+desktop's settings is surprising if nothing said it would.
+
+One row for the cycle, one per dock. Click a key to set it, Backspace to clear
+it, Esc to leave it as it was. A shortcut needs Ctrl, Alt or Super held with
+it: a letter on its own would answer every time it was typed, and `<Shift>e` is
+just E — Shift counts towards the name of a shortcut, never towards making one.
+A lock that happens to be on, Num Lock above all, is kept out of the name, or
+the key would stop working the moment it was switched off.
+
+A key another application already holds is bound anyway and said out loud,
+naming what else has it: refusing would be the dock deciding who owns a key it
+does not own either. A key one of the *other rows* holds is refused, because
+this window owns both sides of that collision and clearing one is a click away.
+
+Two docks whose names come out the same once punctuation is stripped — `My
+Work` and `My-Work` — would share one keybinding slot, so both rows say so and
+offer no key until one is renamed. The same goes for a dock named only in
+punctuation, which leaves nothing to make a slot name out of.
+
+The script is not replaced by any of this: it is what automation and a terminal
+reach for, and the two write the *same* slot, label and command, so binding a
+key in one place moves what the other bound rather than sitting beside it.
+`scripts/check-live.sh` holds them to that, against a real dconf.
+
+On a desktop that keeps no such list — KDE, sway, a machine without
+gnome-settings-daemon — the tab says that in a line instead of offering capture
+buttons that would take a key press and drop it. The actions are still on the
+bus; [the table below](#changing-the-configuration-while-it-runs) is what to
+bind them to by hand.
 
 With no daemon running the window says so in a line, instead of drawing
 controls that would all look like they had worked and changed nothing.
@@ -335,7 +368,7 @@ gdbus call --session --dest io.github.gusmartins499.Doca \
 
 ## Checking it against a real session
 
-`cargo test` covers everything that can be decided without a bus. Two things
+`cargo test` covers everything that can be decided without a bus. Three things
 cannot be, and have scripts of their own:
 
 ```bash
@@ -343,7 +376,8 @@ cargo build --release && ./scripts/check-live.sh
 ```
 
 starts a daemon and the preferences window on a nested display with a session
-bus and a config of their own, and asserts two things no unit test can reach.
+bus, a config and a dconf database of their own, and asserts three things no
+unit test can reach.
 
 That a change made from anywhere else reaches the window. Writing is a method
 call and hearing is a signal, and the two break apart — every control can work
@@ -354,6 +388,25 @@ And that a widget setting reaches the widget that is already running: it drinks
 two glasses, moves the water goal to four, and expects `2/4` back. A widget
 rebuilt instead of told would answer `0/4`, and the value landing in the config
 file would prove nothing either way.
+
+And that `scripts/bind-key.sh` and the Shortcuts tab write the same slot, label
+and command. Two implementations of one algorithm is the price of the script
+staying useful for automation, and the price is only safe while they agree — a
+slot named differently would not replace the other's binding, it would sit
+beside it, and one key would fire the action twice. It binds with the script and
+then reads the count back out of the window's own log. It also plants another
+application's keybinding first, and expects to find it afterwards: the list is
+shared by every app on the desktop, and the whole reason the script exists is
+that writing the array outright drops everyone else's keys.
+
+The keybinding part writes dconf, so `XDG_CONFIG_HOME` is exported **before**
+`dbus-run-session`, not after. dconf writes do not go to the file the writing
+process points at — they go over the bus to `dconf-service`, which inherits its
+environment from the bus daemon. Exported too late, the session *reads* the
+temporary database and *writes* the real one, and the script quietly replaces
+the keybindings of whoever ran it. A sentinel write proves the isolation before
+anything shared is touched, and the keybinding checks are skipped rather than
+guessed at if it fails.
 
 ```bash
 DISPLAY=:9 cargo test -p doca-shell -- --ignored

@@ -16,6 +16,11 @@
 # to check would hide the entire question — which is the question, because a
 # setting that needs a restart is a setting the user thinks did not work.
 #
+# And that scripts/bind-key.sh and the window's Shortcuts tab write the same
+# slot, label and command. They are two implementations of one algorithm, and
+# only safe while they agree: a slot named differently would sit beside the
+# other's binding rather than replace it, and one key would fire twice.
+#
 # The readiness signal has to be the subscription and not the window. The
 # window is drawn well before it subscribes, so a script that waits for the
 # window and writes immediately races it — and reports a working window as
@@ -45,6 +50,18 @@ for binary in docad doca-prefs; do
     }
 done
 
+# Set up and exported *before* dbus-run-session, and that order is the whole
+# point. dconf writes do not go to the file the writing process points at:
+# they go over the session bus to dconf-service, which inherits its
+# environment from the bus daemon. Exporting XDG_CONFIG_HOME after the bus has
+# started gives a session that *reads* this temporary database and *writes*
+# the real one — which is how a run of this script once replaced its author's
+# own keyboard shortcuts. The bus has to be born already pointing here.
+WORK="${WORK:-$(mktemp -d)}"
+export WORK
+export XDG_CONFIG_HOME="$WORK/config"
+mkdir -p "$XDG_CONFIG_HOME/doca" "$XDG_CONFIG_HOME/dconf"
+
 if [ "${INSIDE:-0}" != "1" ]; then
     Xvfb "$DISPLAY_NUM" -screen 0 1280x800x24 >/dev/null 2>&1 &
     SERVER=$!
@@ -53,9 +70,6 @@ if [ "${INSIDE:-0}" != "1" ]; then
     INSIDE=1 DISPLAY="$DISPLAY_NUM" exec dbus-run-session -- "$0" "$@"
 fi
 
-WORK="$(mktemp -d)"
-export XDG_CONFIG_HOME="$WORK/config"
-mkdir -p "$XDG_CONFIG_HOME/doca"
 printf '[[environments]]\nname = "Work"\n' > "$XDG_CONFIG_HOME/doca/config.toml"
 
 FAILED=0
@@ -158,6 +172,84 @@ case "$(call SetWidgetSetting "water" "litres" "<uint32 2>")" in
     *) fail "the refusal was not showable: $(call SetWidgetSetting "water" "litres" "<uint32 2>")" ;;
 esac
 
+# What the Shortcuts tab reads, and the one thing no unit test can reach: the
+# window and scripts/bind-key.sh write the *same* slot. Two implementations of
+# one algorithm is the price of the script staying useful, and the price is
+# only safe while they agree — a slot named differently would not replace the
+# script's binding, it would sit beside it, and one key would fire twice.
+#
+# dconf is written here, not on your desktop: XDG_CONFIG_HOME was exported
+# before the bus was started, so dconf-service has this session's own
+# database. That is load-bearing rather than tidy, so it is not assumed —
+# `isolated` below proves it before anything shared is touched.
+SLOT_SCHEMA=org.gnome.settings-daemon.plugins.media-keys.custom-keybinding
+SLOT_ROOT=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
+
+# Whether what this session writes is what this session reads.
+#
+# The failure being guarded is silent and asymmetric: writes landing in the
+# real dconf while reads come back from the empty one. A sentinel on a slot of
+# our own catches it, and catches it *before* the shared list of keybindings
+# is written, which is the part that cannot be guessed back afterwards.
+isolated() {
+    local probe="$SLOT_ROOT/doca-selftest/"
+    gsettings set "$SLOT_SCHEMA:$probe" name "isolation probe" >/dev/null 2>&1
+    local back
+    back=$(gsettings get "$SLOT_SCHEMA:$probe" name 2>/dev/null)
+    dconf reset -f "$probe" >/dev/null 2>&1
+    [ "$back" = "'isolation probe'" ]
+}
+
+# The slot schema is relocatable — one copy per keybinding path — so it is
+# listed by list-relocatable-schemas and not by list-schemas.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.media-keys \
+    || ! gsettings list-relocatable-schemas 2>/dev/null | grep -qx "$SLOT_SCHEMA"; then
+    echo "  skip  GNOME's keybinding schemas are not installed here"
+    KEYS_EXPECTED=0
+elif ! isolated; then
+    fail "dconf here is not this session's own — refusing to write keybindings"
+    KEYS_EXPECTED=0
+else
+    # A keybinding of somebody else's, put there first: what the script and the
+    # window must both leave alone.
+    THEIRS="$SLOT_ROOT/someone-else/"
+    gsettings set "$SLOT_SCHEMA:$THEIRS" name "Open terminal" >/dev/null
+    gsettings set "$SLOT_SCHEMA:$THEIRS" binding '<Super>t' >/dev/null
+    gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings \
+        "['$THEIRS']" >/dev/null
+
+    "$ROOT/scripts/bind-key.sh" '<Super>e' >/dev/null
+    "$ROOT/scripts/bind-key.sh" '<Super>1' Work >/dev/null
+
+    LIST=$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)
+    case "$LIST" in
+        *"$THEIRS"*) ok "the keybinding list kept somebody else's slot" ;;
+        *) fail "binding dropped another application's key: $LIST" ;;
+    esac
+
+    # The three strings keys.rs pins in its own tests, asserted here against
+    # what the script actually wrote. Whoever changes one side fails this line.
+    CYCLE="$SLOT_ROOT/doca-cycle/"
+    WORK_SLOT="$SLOT_ROOT/doca-work/"
+    case "$LIST" in
+        *"$CYCLE"*"$WORK_SLOT"*|*"$WORK_SLOT"*"$CYCLE"*)
+            ok "the script writes the slots the window writes" ;;
+        *) fail "the slot names have drifted apart: $LIST" ;;
+    esac
+    [ "$(gsettings get "$SLOT_SCHEMA:$CYCLE" name)" = "'Doca: cycle environment'" ] \
+        && ok "the binding is labelled the way the window labels it" \
+        || fail "the label drifted: $(gsettings get "$SLOT_SCHEMA:$CYCLE" name)"
+    # The dock's name is quoted inside the command, because GNOME hands it to
+    # a shell and a dock called `My Work` has to stay one argument. Matched
+    # with fgrep rather than a shell pattern so the quotes are compared, not
+    # re-interpreted on the way in.
+    WANT_COMMAND="$INTERFACE.SetEnvironment \"Work\""
+    gsettings get "$SLOT_SCHEMA:$WORK_SLOT" command | grep -qF -- "$WANT_COMMAND" \
+        && ok "the command is the one the window would write" \
+        || fail "the command drifted: $(gsettings get "$SLOT_SCHEMA:$WORK_SLOT" command)"
+    KEYS_EXPECTED=2
+fi
+
 RUST_LOG=doca_prefs=info "$ROOT/target/release/doca-prefs" > "$WORK/prefs.log" 2>&1 &
 WINDOW=$!
 # GtkApplication blocks its own registration until the session's
@@ -176,6 +268,23 @@ for i in $(seq 1 90); do
 done
 [ "$UP" != "0" ] && ok "the window opened and is listening (after ${UP}s on a cold bus)" \
     || { fail "the window never opened, or never subscribed"; cat "$WORK/prefs.log"; }
+
+# The window's end of the same question: the keys the script wrote are the
+# keys the Shortcuts tab came up holding.
+if [ "$KEYS_EXPECTED" != "0" ]; then
+    grep -aq "the desktop keeps custom keybindings" "$WORK/prefs.log" \
+        && ok "the window found the desktop's keybindings" \
+        || fail "the window decided this desktop has no custom keybindings"
+    # The count out of the last such line. tracing writes the fields after the
+    # message, so the number is dug out rather than matched as part of a
+    # sentence — and the colour codes are stripped first, because `ESC[0m` is
+    # a digit as far as a pattern is concerned and this read 0 until it was.
+    SAW=$(grep -a "showing the keys the desktop holds" "$WORK/prefs.log" |
+        tail -1 | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*keys=\([0-9]\+\).*/\1/')
+    [ "$SAW" = "$KEYS_EXPECTED" ] \
+        && ok "the window read back both keys the script bound" \
+        || fail "the tab read $SAW keys, not $KEYS_EXPECTED"
+fi
 
 # The point of the whole script: somebody else writes, and the window follows.
 # A keybinding, the bar's own menu and a second window all look like this.

@@ -11,7 +11,9 @@
 mod appearance;
 mod chrome;
 mod docks;
+mod keys;
 mod link;
+mod shortcuts;
 mod widgets;
 
 use std::rc::Rc;
@@ -19,6 +21,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use tracing_subscriber::EnvFilter;
 
+use crate::keys::{Desktop, Gnome};
 use crate::link::Link;
 
 const APP_ID: &str = "io.github.gusmartins499.Doca.Prefs";
@@ -132,19 +135,41 @@ async fn furnish(window: &gtk::ApplicationWindow, link: Link) {
     }));
     notebook.append_page(&gadgets.root, Some(&gtk::Label::new(Some("Widgets"))));
 
-    // The last tab of #21 arrives with its own slice: Shortcuts (F5). It is
-    // named here rather than hidden so the window says what it will hold.
-    notebook.append_page(
-        &soon("The keys that switch docks, through GNOME's own keybindings."),
-        Some(&gtk::Label::new(Some("Shortcuts"))),
-    );
+    // The desktop, not the daemon: this is the one tab that writes GNOME's
+    // settings rather than the dock's. `None` is a desktop that keeps no such
+    // list, and the tab says so rather than drawing buttons that would take a
+    // key press and drop it.
+    let desktop = Gnome::found().map(Rc::new);
+    if desktop.is_none() {
+        tracing::info!("no GNOME custom keybindings on this desktop");
+    }
+    let hotkeys = Rc::new(shortcuts::Tab::new(desktop.is_some()));
+    if let Some(desktop) = desktop.clone() {
+        let saying = hotkeys.clone();
+        let following = link.clone();
+        hotkeys.wire(Rc::new(move |ask| {
+            carry_out(&*desktop, &saying, ask);
+            // Written to the desktop, so no `ConfigChanged` is coming to
+            // redraw this tab. It asks the desktop back for what it now
+            // holds, which is also how a refusal leaves the old key on screen.
+            let saying = saying.clone();
+            let following = following.clone();
+            let desktop = desktop.clone();
+            glib::spawn_future_local(async move {
+                if let Some(docks) = following.environments().await {
+                    show_keys(&*desktop, &saying, &docks);
+                }
+            });
+        }));
+    }
+    notebook.append_page(&hotkeys.root, Some(&gtk::Label::new(Some("Shortcuts"))));
 
     window.add(&notebook);
     if let Some(apps) = link.applications().await {
         tracing::info!(applications = apps.len(), "offering the installed apps");
         docks.offer(apps);
     }
-    refresh(&link, &look, &docks, &gadgets).await;
+    refresh(&link, &look, &docks, &gadgets, desktop.as_deref(), &hotkeys).await;
     window.show_all();
 
     // Someone else may be writing: a key bound to SetAppearance, the dock's
@@ -160,8 +185,68 @@ async fn furnish(window: &gtk::ApplicationWindow, link: Link) {
     tracing::info!("following the config");
     while futures_util::StreamExt::next(&mut changed).await.is_some() {
         tracing::info!("the config moved; following it");
-        refresh(&link, &look, &docks, &gadgets).await;
+        refresh(&link, &look, &docks, &gadgets, desktop.as_deref(), &hotkeys).await;
     }
+}
+
+/// Carry out one keybinding change, and say what it cost.
+///
+/// A key another application holds is bound anyway and said; a key one of our
+/// own actions holds is refused and said. The asymmetry is deliberate: this
+/// window owns both sides of the second collision and clearing one is a click
+/// away, where unbinding a stranger's key would be the dock deciding who owns
+/// a key it does not own either.
+fn carry_out(desktop: &impl Desktop, tab: &shortcuts::Tab, ask: shortcuts::Ask) {
+    match ask {
+        shortcuts::Ask::Bind { action, key } => {
+            match keys::clash(desktop, &key, &action, &ours(desktop)) {
+                Some(mine @ keys::Clash::Ours(_)) => {
+                    tab.complain(&shortcuts::said(&mine, &key));
+                }
+                Some(theirs) => {
+                    keys::bind(desktop, &action, &key);
+                    tab.warn(&shortcuts::said(&theirs, &key));
+                }
+                None => keys::bind(desktop, &action, &key),
+            }
+        }
+        shortcuts::Ask::Clear(action) => keys::unbind(desktop, &action),
+    }
+}
+
+/// The Doca actions the desktop currently has a key for.
+///
+/// Read from the desktop rather than from the dock's list of environments, so
+/// that a slot left behind by a dock that has since been renamed is still
+/// recognised as ours when a key collides with it.
+fn ours(desktop: &impl Desktop) -> Vec<keys::Action> {
+    keys::all(desktop)
+        .into_iter()
+        .filter_map(|(slot, held)| {
+            let named = held.name.strip_prefix("Doca: ")?;
+            let action = if named == "cycle environment" {
+                keys::Action::Cycle
+            } else {
+                keys::Action::Switch(named.to_string())
+            };
+            (keys::slot(&action) == slot).then_some(action)
+        })
+        .collect()
+}
+
+/// Put the keys the desktop holds on the Shortcuts tab.
+fn show_keys(desktop: &impl Desktop, tab: &shortcuts::Tab, docks: &[doca_ipc::EnvironmentInfo]) {
+    let mut actions = vec![keys::Action::Cycle];
+    actions.extend(
+        docks
+            .iter()
+            .map(|dock| keys::Action::Switch(dock.name.clone())),
+    );
+    let bound = keys::bound(desktop, &actions);
+    // Said with a count because it is the only way, from outside, to tell a
+    // window that read the desktop's keys from a window that drew empty rows.
+    tracing::info!(keys = bound.len(), "showing the keys the desktop holds");
+    tab.show(docks, &bound);
 }
 
 /// Put what the daemon says on the controls, in every tab that has any.
@@ -170,6 +255,8 @@ async fn refresh(
     look: &appearance::Tab,
     docks: &docks::Tab,
     gadgets: &widgets::Tab,
+    desktop: Option<&Gnome>,
+    hotkeys: &shortcuts::Tab,
 ) {
     if let Some(appearance) = link.appearance().await {
         look.show(&appearance);
@@ -179,20 +266,16 @@ async fn refresh(
         // tab to say which docks show the widget being looked at.
         docks.show(&environments);
         gadgets.show_docks(&environments);
+        // A dock added, removed or renamed changes which rows the Shortcuts
+        // tab has — and a rename leaves the old dock's slot behind, which is
+        // why the keys are read again rather than carried over.
+        if let Some(desktop) = desktop {
+            show_keys(desktop, hotkeys, &environments);
+        }
     }
     if let Some(settings) = link.widget_settings().await {
         gadgets.show(&settings);
     }
-}
-
-fn soon(holds: &str) -> gtk::Widget {
-    let note = gtk::Label::new(Some(holds));
-    note.set_widget_name("trouble");
-    note.set_line_wrap(true);
-    note.set_max_width_chars(44);
-    note.set_valign(gtk::Align::Center);
-    note.style_context().add_class("dim-label");
-    note.upcast()
 }
 
 fn trouble(what: &str, then: &str) -> gtk::Widget {
@@ -253,4 +336,22 @@ fn on_a_display() {
     widgets::on_a_display::a_note_that_was_only_looked_at_is_not_written_back();
     widgets::on_a_display::saving_the_note_sends_every_line_of_it();
     widgets::on_a_display::a_refresh_leaves_the_cursor_where_it_was_in_an_unchanged_note();
+
+    shortcuts::on_a_display::showing_what_the_daemon_said_asks_for_nothing();
+    shortcuts::on_a_display::there_is_a_row_for_the_cycle_and_one_for_each_dock();
+    shortcuts::on_a_display::a_key_already_bound_is_what_the_button_reads();
+    shortcuts::on_a_display::a_captured_key_names_the_row_it_was_pressed_on();
+    shortcuts::on_a_display::a_key_pressed_without_clicking_first_binds_nothing();
+    shortcuts::on_a_display::a_modifier_on_its_own_keeps_the_button_listening();
+    shortcuts::on_a_display::escape_leaves_the_key_that_was_there();
+    shortcuts::on_a_display::backspace_asks_for_the_key_to_go();
+    shortcuts::on_a_display::the_clear_button_asks_for_the_same_thing();
+    shortcuts::on_a_display::a_key_with_no_modifier_is_refused_and_said();
+    shortcuts::on_a_display::shift_alone_is_not_enough_of_a_modifier();
+    shortcuts::on_a_display::shift_with_a_real_modifier_is_fine();
+    shortcuts::on_a_display::a_lock_that_happens_to_be_on_is_not_part_of_the_shortcut();
+    shortcuts::on_a_display::a_dock_that_cannot_own_a_slot_cannot_be_captured();
+    shortcuts::on_a_display::a_key_one_of_our_own_actions_holds_is_named_as_ours();
+    shortcuts::on_a_display::a_key_another_application_holds_is_bound_but_never_in_silence();
+    shortcuts::on_a_display::a_desktop_without_gnome_s_shortcuts_says_so_instead();
 }
