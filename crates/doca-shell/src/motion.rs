@@ -14,6 +14,18 @@ pub const LAUNCH_PULSES: f64 = 2.0;
 /// How long the lens takes to open, and to close again. Plank's figure.
 pub const ZOOM: Duration = Duration::from_millis(200);
 
+/// The fastest the lens travels along the bar when it has to catch up.
+///
+/// Measured rather than picked. With 48px icons, a pointer swept across the
+/// bar at 2000 px/s already moves an icon 18px between two frames, and at
+/// 3000 px/s, 27px — so no speed a hand produces is held back by this. A
+/// pointer that did not travel at all is the case it is for: one that left
+/// the bar at one end and came back at the other, which aims the lens
+/// somewhere new between two frames and moves an icon 61px at once. Capped,
+/// that jump is spread over about six frames, none of them larger than a
+/// brisk sweep already is.
+pub const AIM_SPEED: f64 = 3000.0;
+
 pub fn ease_out(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
@@ -36,6 +48,25 @@ pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
         ease_out(t)
     } else {
         1.0 - ease_in(t)
+    }
+}
+
+/// Where the lens is aimed `step` later, closing on the pointer.
+///
+/// A flat speed, and the one thing in this file that does not ease. An ease
+/// would have to start slowly, and the lens is already in the wrong place
+/// when this begins; and easing towards a *moving* target — which a pointer
+/// is — restarts its curve every frame and never arrives. What this needs is
+/// not a curve but a ceiling: under it the lens is exactly where the pointer
+/// is and nothing is interpolated at all, and only over it does the lens
+/// trail, for as long as it takes to catch up.
+pub fn aimed(lens: f64, pointer: f64, step: Duration) -> f64 {
+    let reach = AIM_SPEED * step.as_secs_f64();
+    let gap = pointer - lens;
+    if gap.abs() <= reach {
+        pointer
+    } else {
+        lens + reach.copysign(gap)
     }
 }
 
@@ -278,6 +309,66 @@ mod tests {
         let late = ease_out(1.0) - ease_out(0.9);
 
         assert!(early > late, "the slide should decelerate, not accelerate");
+    }
+
+    /// The whole point: a pointer moving at any speed a hand manages is
+    /// followed exactly, with nothing interpolated and nothing lagging.
+    #[test]
+    fn a_pointer_that_moved_is_followed_exactly() {
+        // A fast sweep, in the step it covers between two frames.
+        let step = 2000.0 * FRAME.as_secs_f64();
+
+        assert_eq!(aimed(400.0, 400.0 + step, FRAME), 400.0 + step);
+        assert_eq!(aimed(400.0, 400.0 - step, FRAME), 400.0 - step);
+    }
+
+    #[test]
+    fn a_pointer_that_jumped_is_followed_no_faster_than_the_ceiling() {
+        let ceiling = AIM_SPEED * FRAME.as_secs_f64();
+
+        let after = aimed(0.0, 1200.0, FRAME);
+
+        assert!(
+            (after - ceiling).abs() < 1e-9,
+            "the lens covered {after:.1}px in a frame, past the {ceiling:.1}px ceiling"
+        );
+    }
+
+    #[test]
+    fn a_lens_catching_up_always_arrives() {
+        let mut lens = 0.0;
+        for frame in 1..=600 {
+            lens = aimed(lens, 1200.0, FRAME);
+            if lens == 1200.0 {
+                assert!(frame < 30, "catching up took {frame} frames");
+                return;
+            }
+        }
+        panic!("the lens never reached the pointer, stopping at {lens}");
+    }
+
+    #[test]
+    fn a_lens_catching_up_never_overshoots_or_turns_back() {
+        let mut lens = 0.0;
+        let mut previous = lens;
+        for _ in 0..60 {
+            lens = aimed(lens, 900.0, FRAME);
+            assert!(lens >= previous, "the lens went backwards");
+            assert!(lens <= 900.0, "the lens overshot to {lens}");
+            previous = lens;
+        }
+    }
+
+    /// Read off the clock, not counted in frames, so a 120Hz screen takes the
+    /// same time to catch up as a 60Hz one — in twice as many, smaller steps.
+    #[test]
+    fn catching_up_takes_the_same_time_however_often_it_is_asked() {
+        let half = FRAME / 2;
+
+        let once = aimed(0.0, 1200.0, FRAME);
+        let twice = aimed(aimed(0.0, 1200.0, half), 1200.0, half);
+
+        assert!((once - twice).abs() < 1e-9, "{once} against {twice}");
     }
 
     #[test]

@@ -658,6 +658,8 @@ fn on_a_display() {
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
+    row::tests::a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports();
+    row::tests::a_lens_that_is_shut_aims_at_once_rather_than_travelling();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
     widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();

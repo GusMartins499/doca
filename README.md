@@ -449,6 +449,18 @@ of nothing else, so growing one cannot shift the rest by accumulation. Both
 the shape of that and its constants come from
 [Plank](https://github.com/ricotz/plank)'s `PositionManager`.
 
+What the lens is aimed at is not quite the pointer. A pointer that *moves* is
+followed exactly — nothing is interpolated and nothing lags. A pointer that
+*appears* somewhere it did not travel to is not: leaving the bar at one end
+and coming straight back at the other aims the lens somewhere new between two
+frames, which moved an icon 61px at once, where even a brisk sweep costs 27px.
+So the lens has a ceiling on how fast it travels, set above any speed a hand
+produces, and a jump is spread over the frames it takes — at worst, across the
+whole row, about as long as the lens takes to open. The figures are measured
+off the lens's own shape rather than guessed at, and the checks in
+`crates/doca-shell/src/row.rs` hold a jump to what a sweep at that ceiling
+would have cost.
+
 `scripts/dev-session.sh` is a barer version of the sandbox, for a debug build
 with an empty config:
 
