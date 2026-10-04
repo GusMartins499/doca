@@ -13,12 +13,16 @@
 //! from is the one actually in force.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 
 use gtk::prelude::*;
 
 /// A `GtkSettings` name the dock may override, and the two values behind it.
 struct Slot {
     property: &'static str,
+    /// What an installed theme of this kind looks like on disk: the directory
+    /// it lives under, and the file or folder inside it that proves it is one.
+    installed: Installed,
     /// What the desktop asked for, with no override of ours on top.
     system: RefCell<Option<String>>,
     /// What we last wrote, so a change from outside can be told from our own.
@@ -34,6 +38,59 @@ pub const GTK_THEME: &str = "gtk-theme-name";
 pub const ICON_THEME: &str = "gtk-icon-theme-name";
 pub const CURSOR_THEME: &str = "gtk-cursor-theme-name";
 
+/// How to tell whether a theme of one kind is installed.
+///
+/// Each kind is a directory named after the theme, holding one thing that says
+/// what it is: a GTK3 theme has `gtk-3.0/gtk.css`, an icon theme an
+/// `index.theme`, a cursor theme a `cursors` folder.
+#[derive(Clone, Copy)]
+pub struct Installed {
+    /// `themes` or `icons` — the directory kind under each search root.
+    pub under: &'static str,
+    pub proof: &'static str,
+}
+
+const GTK_INSTALLED: Installed = Installed {
+    under: "themes",
+    proof: "gtk-3.0/gtk.css",
+};
+const ICON_INSTALLED: Installed = Installed {
+    under: "icons",
+    proof: "index.theme",
+};
+const CURSOR_INSTALLED: Installed = Installed {
+    under: "icons",
+    proof: "cursors",
+};
+
+/// Everywhere a theme of this kind may be installed, most personal first.
+///
+/// `~/.themes` and `~/.icons` are the old per-user places and are still what
+/// GNOME Tweaks writes into; the XDG data directories are the rest.
+pub fn roots(installed: Installed) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = glib::home_dir().to_str().map(PathBuf::from) {
+        roots.push(home.join(format!(".{}", installed.under)));
+    }
+    roots.push(glib::user_data_dir().join(installed.under));
+    for shared in glib::system_data_dirs() {
+        roots.push(shared.join(installed.under));
+    }
+    roots
+}
+
+/// Whether a theme by this name is installed in any of these places.
+///
+/// Taken apart from the lookup so it can be checked against directories a test
+/// makes, rather than against whatever happens to be installed on the machine
+/// running it.
+pub fn found(roots: &[PathBuf], name: &str, installed: Installed) -> bool {
+    !name.is_empty()
+        && roots
+            .iter()
+            .any(|root| root.join(name).join(installed.proof).exists())
+}
+
 impl Themes {
     /// Remember what the desktop wanted, before anyone overrides it.
     ///
@@ -42,8 +99,14 @@ impl Themes {
     /// the override has to put something back.
     pub fn capture() -> Option<Self> {
         let settings = gtk::Settings::default()?;
-        let slots = [GTK_THEME, ICON_THEME, CURSOR_THEME].map(|property| Slot {
+        let slots = [
+            (GTK_THEME, GTK_INSTALLED),
+            (ICON_THEME, ICON_INSTALLED),
+            (CURSOR_THEME, CURSOR_INSTALLED),
+        ]
+        .map(|(property, installed)| Slot {
             property,
+            installed,
             system: RefCell::new(read(&settings, property)),
             ours: RefCell::new(None),
         });
@@ -73,9 +136,19 @@ impl Themes {
             if read(&self.settings, slot.property) == wanted {
                 continue;
             }
-            // A name no theme answers to is not worth refusing: GTK falls
-            // back on its own, and a warning tells the user why the dock did
-            // not change rather than leaving them to guess.
+            // A name no theme answers to is not worth refusing — GTK falls
+            // back to something readable on its own. It is worth *saying*:
+            // the dock simply not changing looks identical to the setting not
+            // working, and the name is usually a typo the log can point at.
+            if !override_name.is_empty()
+                && !found(&roots(slot.installed), override_name, slot.installed)
+            {
+                tracing::warn!(
+                    property = slot.property,
+                    theme = override_name,
+                    "no theme by that name is installed; the dock keeps the one it has"
+                );
+            }
             tracing::info!(
                 property = slot.property,
                 theme = wanted.as_deref().unwrap_or("(the system's)"),
@@ -162,6 +235,63 @@ pub fn redo_for(property: &str, theme: &str) -> Redo {
 mod tests {
     use super::*;
     use crate::theme;
+
+    /// Built against directories the check makes, not against whatever is
+    /// installed on the machine running it — which is the only way this can
+    /// mean the same thing on a developer's desktop and in a container.
+    #[test]
+    fn a_theme_is_found_by_the_thing_that_proves_it_is_one() {
+        let root = std::env::temp_dir().join(format!("doca-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Sweet-Dark-v40/gtk-3.0")).unwrap();
+        std::fs::write(root.join("Sweet-Dark-v40/gtk-3.0/gtk.css"), "").unwrap();
+        // A directory with the right name and nothing in it is not a theme.
+        std::fs::create_dir_all(root.join("Half-There")).unwrap();
+        let roots = [root.clone()];
+
+        assert!(found(&roots, "Sweet-Dark-v40", GTK_INSTALLED));
+        assert!(!found(&roots, "Half-There", GTK_INSTALLED));
+        assert!(!found(&roots, "Sweet-Drak-v40", GTK_INSTALLED), "a typo was accepted");
+        // An empty name is not a missing theme, it is no override at all.
+        assert!(!found(&roots, "", GTK_INSTALLED));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each kind is proved by a different thing, and a cursor theme is not an
+    /// icon theme even though both live under `icons`.
+    #[test]
+    fn each_kind_of_theme_is_proved_by_its_own_contents() {
+        let root = std::env::temp_dir().join(format!("doca-icons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Flatery-Dark")).unwrap();
+        std::fs::write(root.join("Flatery-Dark/index.theme"), "").unwrap();
+        std::fs::create_dir_all(root.join("McMojave-cursors/cursors")).unwrap();
+        let roots = [root.clone()];
+
+        assert!(found(&roots, "Flatery-Dark", ICON_INSTALLED));
+        assert!(!found(&roots, "Flatery-Dark", CURSOR_INSTALLED), "no cursors in it");
+        assert!(found(&roots, "McMojave-cursors", CURSOR_INSTALLED));
+        assert!(!found(&roots, "McMojave-cursors", ICON_INSTALLED), "no index.theme");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The search has to include the places GNOME Tweaks actually writes to,
+    /// or every theme a person installed by hand would be called missing.
+    #[test]
+    fn the_search_covers_the_per_user_directories_as_well_as_the_shared_ones() {
+        let places = roots(ICON_INSTALLED);
+
+        assert!(
+            places.iter().any(|root| root.ends_with(".icons")),
+            "~/.icons is where Tweaks puts them: {places:?}"
+        );
+        assert!(
+            places.iter().any(|root| root.starts_with("/usr/share")),
+            "the system's own are missing: {places:?}"
+        );
+    }
 
     #[test]
     fn a_new_gtk_theme_restyles_a_dock_that_borrows_its_colours() {

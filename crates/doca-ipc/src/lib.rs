@@ -255,6 +255,13 @@ pub trait Doca {
     fn set_environment_widgets(&self, name: &str, widgets: Vec<String>) -> zbus::Result<()>;
     fn set_environment_workspaces(&self, name: &str, workspaces: Vec<i32>) -> zbus::Result<()>;
     fn reorder_pinned(&self, name: &str, order: Vec<String>) -> zbus::Result<()>;
+
+    /// Put the docks in a new order, which is the order the cycle walks.
+    ///
+    /// Only an order: a name nobody knows is refused, and a dock left out
+    /// keeps its place at the end — so a window holding a list drawn before a
+    /// rename reorders what it knows instead of deleting what it does not.
+    fn reorder_environments(&self, order: Vec<String>) -> zbus::Result<()>;
     fn add_environment(&self, name: &str) -> zbus::Result<String>;
     fn remove_environment(&self, name: &str) -> zbus::Result<()>;
     fn rename_environment(&self, from: &str, to: &str) -> zbus::Result<String>;

@@ -538,6 +538,42 @@ impl Config {
         Ok(())
     }
 
+    /// Put the docks themselves in a new order — and only in a new order.
+    ///
+    /// The order of this list *is* the cycle: `next_environment_after` walks
+    /// it and wraps round, so this is the only thing that decides which dock a
+    /// key takes you to next. It was also the one piece of the config a window
+    /// could not reach, which left the cycle order editable by hand and
+    /// nothing else.
+    ///
+    /// The same contract as [`Self::reorder_pinned`], for the same reason: a
+    /// reorder that could also add or drop a dock would be a sloppier
+    /// `add_environment`/`remove_environment`, and a window sending a list it
+    /// had drawn before a rename would quietly delete a dock. Names given are
+    /// taken in the order given, anything left out keeps its place at the end,
+    /// and anything invented is refused.
+    pub fn reorder_environments(&mut self, order: Vec<String>) -> Result<()> {
+        if let Some(unknown) = order
+            .iter()
+            .find(|name| self.environment_named(name).is_none())
+        {
+            anyhow::bail!("no dock called {unknown}");
+        }
+
+        let mut reordered: Vec<Environment> = Vec::with_capacity(self.environments.len());
+        for name in order {
+            if reordered.iter().any(|dock| dock.name == name) {
+                continue;
+            }
+            if let Some(at) = self.environments.iter().position(|dock| dock.name == name) {
+                reordered.push(self.environments.remove(at));
+            }
+        }
+        reordered.append(&mut self.environments);
+        self.environments = reordered;
+        Ok(())
+    }
+
     /// Which workspaces a dock claims. An empty list makes it the catch-all.
     pub fn set_environment_workspaces(&mut self, name: &str, workspaces: Vec<i32>) -> Result<()> {
         let environment = self.named_mut(name)?;
@@ -1178,6 +1214,106 @@ mod tests {
             config.environment_named("Work").unwrap().pinned,
             vec!["firefox", "code", "discord"],
             "a stale list from a window must not unpin what it had not heard about"
+        );
+    }
+
+    fn three_docks() -> Config {
+        config(
+            "[[environments]]\nname = \"Work\"\n\n\
+             [[environments]]\nname = \"Home\"\n\n\
+             [[environments]]\nname = \"Games\"\n",
+        )
+    }
+
+    fn order(config: &Config) -> Vec<String> {
+        config
+            .environments
+            .iter()
+            .map(|dock| dock.name.clone())
+            .collect()
+    }
+
+    /// The order of the list is the order of the cycle, so this is the one
+    /// thing that decides where a key takes you next.
+    #[test]
+    fn docks_take_the_order_they_were_given() {
+        let mut config = three_docks();
+
+        config
+            .reorder_environments(["Games", "Work", "Home"].map(str::to_string).to_vec())
+            .unwrap();
+
+        assert_eq!(order(&config), ["Games", "Work", "Home"]);
+    }
+
+    #[test]
+    fn reordering_docks_keeps_everything_each_one_held() {
+        let mut config = config(
+            "[[environments]]\nname = \"Work\"\npinned = [\"code\"]\nworkspaces = [0, 1]\n\n\
+             [[environments]]\nname = \"Home\"\nwidgets = [\"clock\"]\n",
+        );
+
+        config
+            .reorder_environments(vec!["Home".to_string(), "Work".to_string()])
+            .unwrap();
+
+        let work = config.environment_named("Work").unwrap();
+        assert_eq!(work.pinned, vec!["code"]);
+        assert_eq!(work.workspaces, vec![0, 1]);
+        assert_eq!(config.environment_named("Home").unwrap().widgets, vec!["clock"]);
+    }
+
+    #[test]
+    fn a_reorder_cannot_invent_a_dock() {
+        let mut config = three_docks();
+
+        let refused = config.reorder_environments(vec!["Studio".to_string()]);
+
+        assert!(refused.is_err());
+        assert_eq!(order(&config), ["Work", "Home", "Games"], "a refusal moved something");
+    }
+
+    /// The reason the set is fixed here: a window that drew its list before a
+    /// rename would otherwise delete the dock it had not heard about.
+    #[test]
+    fn a_reorder_that_forgets_a_dock_keeps_it_rather_than_dropping_it() {
+        let mut config = three_docks();
+
+        config
+            .reorder_environments(vec!["Games".to_string()])
+            .unwrap();
+
+        assert_eq!(order(&config), ["Games", "Work", "Home"]);
+    }
+
+    #[test]
+    fn a_dock_named_twice_is_placed_once() {
+        let mut config = three_docks();
+
+        config
+            .reorder_environments(["Home", "Home", "Work"].map(str::to_string).to_vec())
+            .unwrap();
+
+        assert_eq!(order(&config), ["Home", "Work", "Games"]);
+    }
+
+    /// The cycle reads this list, so the two have to agree after a reorder.
+    #[test]
+    fn the_cycle_follows_the_order_it_was_put_in() {
+        let mut config = three_docks();
+
+        config
+            .reorder_environments(["Games", "Work", "Home"].map(str::to_string).to_vec())
+            .unwrap();
+
+        assert_eq!(
+            config.next_environment_after("Games").map(|dock| dock.name.as_str()),
+            Some("Work")
+        );
+        assert_eq!(
+            config.next_environment_after("Home").map(|dock| dock.name.as_str()),
+            Some("Games"),
+            "the cycle wraps round the new order, not the old one"
         );
     }
 

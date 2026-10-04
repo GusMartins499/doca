@@ -31,6 +31,8 @@ pub enum Action {
     Pin { name: String, id: String },
     Unpin { name: String, id: String },
     Reorder { name: String, order: Vec<String> },
+    /// The docks themselves, in the order the cycle should walk them.
+    ReorderDocks(Vec<String>),
     Widgets { name: String, widgets: Vec<String> },
 }
 
@@ -172,6 +174,8 @@ pub struct Tab {
     trouble: gtk::Label,
     add: gtk::Button,
     remove: gtk::Button,
+    dock_up: gtk::Button,
+    dock_down: gtk::Button,
     add_app: gtk::Button,
     unpin: gtk::Button,
     up: gtk::Button,
@@ -197,6 +201,23 @@ impl Tab {
         buttons.pack_start(&add, true, true, 0);
         buttons.pack_start(&remove, true, true, 0);
         left.pack_start(&buttons, false, false, 0);
+
+        let order = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let dock_up = gtk::Button::with_label("Up");
+        let dock_down = gtk::Button::with_label("Down");
+        order.pack_start(&dock_up, true, true, 0);
+        order.pack_start(&dock_down, true, true, 0);
+        left.pack_start(&order, false, false, 0);
+        // The one thing about this list that is not obvious from looking at
+        // it, and the reason the buttons are here at all: until now the cycle
+        // order was the one piece of the config only a text editor could
+        // reach.
+        left.pack_start(
+            &hint("This order is the order a key cycles through them."),
+            false,
+            false,
+            0,
+        );
         root.pack_start(&left, false, false, 0);
 
         let right = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -266,6 +287,8 @@ impl Tab {
             trouble,
             add,
             remove,
+            dock_up,
+            dock_down,
             add_app,
             unpin,
             up,
@@ -387,6 +410,28 @@ impl Tab {
                 });
             }
         });
+
+        for (button, delta) in [(&self.dock_up, -1isize), (&self.dock_down, 1isize)] {
+            let state = self.state.clone();
+            let sending = act.clone();
+            let docks = self.docks.clone();
+            button.connect_clicked(move |_| {
+                let Some(row) = docks.selected_row() else { return };
+                let at = row.index() as usize;
+                let order: Vec<String> = state
+                    .known
+                    .borrow()
+                    .iter()
+                    .map(|dock| dock.name.clone())
+                    .collect();
+                // No re-selecting the row that lands: the refresh that follows
+                // picks the selection back up by name, so the dock the user
+                // was looking at stays the dock they are looking at.
+                if let Some(order) = moved(&order, at, delta) {
+                    sending(Action::ReorderDocks(order));
+                }
+            });
+        }
 
         for (button, delta) in [(&self.up, -1isize), (&self.down, 1isize)] {
             let state = self.state.clone();
@@ -777,6 +822,40 @@ pub mod on_a_display {
                 id: "firefox".to_string(),
             }]
         );
+    }
+
+    /// The cycle order, which until this slice only a text editor could set.
+    pub fn moving_a_dock_sends_the_whole_new_order() {
+        let (tab, asked) = watched();
+        tab.show(&[dock("Work", &[], &[], &[]), dock("Personal", &[], &[], &[])]);
+        let row = tab.docks.row_at_index(1).expect("a row per dock");
+        tab.docks.select_row(Some(&row));
+        asked.borrow_mut().clear();
+
+        tab.dock_up.emit_clicked();
+
+        assert_eq!(
+            asked.borrow().as_slice(),
+            [Action::ReorderDocks(vec![
+                "Personal".to_string(),
+                "Work".to_string(),
+            ])],
+            "a reorder has to carry every dock, or the daemon would read it as a drop"
+        );
+    }
+
+    /// A button at the edge does nothing rather than sending an order that
+    /// reorders nothing — the same rule the pins follow.
+    pub fn a_dock_at_the_top_cannot_be_moved_off_the_list() {
+        let (tab, asked) = watched();
+        tab.show(&two());
+        let row = tab.docks.row_at_index(0).expect("a row per dock");
+        tab.docks.select_row(Some(&row));
+        asked.borrow_mut().clear();
+
+        tab.dock_up.emit_clicked();
+
+        assert!(asked.borrow().is_empty(), "{:?}", asked.borrow());
     }
 
     pub fn a_pin_at_the_top_cannot_be_moved_off_the_list() {
