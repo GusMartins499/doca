@@ -140,12 +140,32 @@ impl Rest {
         magnify::base_centre(index, self.slot, self.spacing, self.margin)
     }
 
+    /// The run the icons take at rest: the first icon's left edge to the last
+    /// one's right, and nothing else.
+    ///
+    /// This is the place the row holds in the bar, so it is what the bar is
+    /// drawn around.
+    pub fn run_width(&self, count: usize) -> i32 {
+        if count == 0 {
+            return 0;
+        }
+        (count as f64 * (self.slot + self.spacing) - self.spacing).ceil() as i32
+    }
+
+    /// The surface the row is drawn on: the run, plus the room at either end
+    /// that an icon pushed outwards by the lens is drawn in.
+    ///
+    /// Wider than the run, and on purpose. That room is air the bar does not
+    /// reach over — Plank keeps it in the window and paints its background
+    /// around the items alone (`PositionManager.vala`, where `DockWidth` is
+    /// the monitor and `DockBackgroundWidth` is the items). Painting the bar
+    /// around it instead is what made the dock as wide as the screen with the
+    /// icons adrift in the middle of it.
     pub fn width(&self, count: usize) -> i32 {
         if count == 0 {
             return 0;
         }
-        (self.margin * 2.0 + count as f64 * (self.slot + self.spacing) - self.spacing).ceil()
-            as i32
+        self.run_width(count) + (self.margin * 2.0).ceil() as i32
     }
 
     /// How tall the row is when nothing is magnified — the height the bar has.
@@ -215,10 +235,14 @@ impl Row {
             }
             let perch = row.perch.allocation();
             let rest = row.rest.get();
+            // The perch holds the run of icons and nothing more, so the room
+            // the lens needs hangs off both of its ends — out of the bar and
+            // into the window, which is wider than the bar by exactly that.
+            let margin = rest.margin as i32;
             Some(gdk::Rectangle::new(
-                perch.x(),
+                perch.x() - margin,
                 perch.y() - rest.overhead(),
-                perch.width(),
+                perch.width() + margin * 2,
                 rest.height(),
             ))
         });
@@ -360,9 +384,10 @@ impl Row {
         // keeps that from looking like a jump is that the run of icons is
         // centred on the room rather than packed into the start of it — see
         // `magnify::centres`.
-        let width = rest.width(items.len());
-        self.perch.set_size_request(width, rest.resting_height());
-        self.area.set_size_request(width, rest.height());
+        self.perch
+            .set_size_request(rest.run_width(items.len()), rest.resting_height());
+        self.area
+            .set_size_request(rest.width(items.len()), rest.height());
         self.area.queue_draw();
         self.animate();
     }
@@ -568,6 +593,14 @@ impl Row {
         self.rest.get().overhead()
     }
 
+    /// The room a magnified icon spreads into, at either end of the row.
+    ///
+    /// The bar does not cover it, so the window has to: this is how much
+    /// wider than the bar the window is made.
+    pub fn margin(&self) -> i32 {
+        self.rest.get().margin as i32
+    }
+
     /// What the pointer is on right now, if it is on the row at all.
     ///
     /// The last position is kept after the pointer leaves, so the lens can
@@ -690,6 +723,66 @@ pub mod tests {
 
     const ICON: i32 = 48;
     const SCALE: f64 = 1.6;
+
+    #[test]
+    fn the_run_the_bar_is_drawn_around_leaves_out_the_room_the_lens_needs() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+
+        let run = rest.run_width(10);
+        let surface = rest.width(10);
+
+        assert!(
+            run < surface,
+            "the bar would be painted over the room the lens spreads into,              which is how the dock came to span the whole screen"
+        );
+        assert_eq!(surface - run, rest.margin as i32 * 2);
+    }
+
+    #[test]
+    fn a_dock_with_no_lens_asks_for_no_room_beyond_its_icons() {
+        let rest = Rest::new(ICON, 4, 4, 1.0);
+
+        assert_eq!(rest.run_width(10), rest.width(10));
+    }
+
+    #[test]
+    fn the_run_grows_by_exactly_one_slot_per_icon() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+
+        let one_more = rest.run_width(11) - rest.run_width(10);
+
+        assert_eq!(one_more, (rest.slot + rest.spacing) as i32);
+    }
+
+    #[test]
+    fn an_empty_row_takes_no_width_at_all_not_even_the_lens_margin() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+
+        assert_eq!(rest.run_width(0), 0);
+        assert_eq!(rest.width(0), 0);
+    }
+
+    #[test]
+    fn the_margin_is_wide_enough_for_the_furthest_the_lens_throws_an_icon() {
+        let rest = Rest::new(ICON, 4, 4, SCALE);
+        let centres: Vec<f64> = (0..10).map(|i| rest.centre(i)).collect();
+        let surface = rest.width(10) as f64;
+
+        // The lens is opened on each end in turn: the icon it pushes outwards
+        // has to stay on the surface, or it is drawn cut off.
+        for pointer in [centres[0], centres[9]] {
+            for centre in &centres {
+                let placed = magnify::place(*centre, Some(pointer), rest.icon, SCALE);
+                let left = placed.centre - placed.size / 2.0;
+
+                assert!(left >= 0.0, "an icon is pushed off the left of the surface");
+                assert!(
+                    left + placed.size <= surface,
+                    "an icon is pushed off the right of the surface"
+                );
+            }
+        }
+    }
 
     fn filled(count: usize) -> Row {
         let row = Row::new();
@@ -866,7 +959,7 @@ pub mod tests {
         // The room, though, is given up at once: the bar is sized for the
         // four that stay, and the fifth is drawn in the margin the row keeps
         // at either end for the lens.
-        assert_eq!(row.perch.size_request().0, rest.width(4));
+        assert_eq!(row.perch.size_request().0, rest.run_width(4));
 
         // On its way out it is a picture and not a target.
         let (left, width) = row.rect_of(2);

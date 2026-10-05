@@ -7,7 +7,7 @@ const SHARED: &str = "
     window { background: transparent; }
     /* The padding here must stay dock::ITEM_PADDING: the icon size is worked
        out from that number, and a wider padding silently overflows the bar. */
-    #item { border-radius: 12px; padding: 4px; }
+    #item { border-radius: 10px; padding: 2px; }
     #widget { border-radius: 12px; padding: 6px 8px; }
     #widget-progress { min-height: 3px; }
     #widget-progress progress { min-height: 3px; }

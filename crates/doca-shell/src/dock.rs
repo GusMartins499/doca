@@ -6,8 +6,16 @@ use doca_ipc::{DockItem, DocaProxy, WindowInfo};
 pub const ICON_SIZE: i32 = 48;
 /// The largest `icon_size` the config can ask for, matching the daemon's clamp.
 pub const MAX_ICON_SIZE: i32 = 96;
-pub const ITEM_SPACING: i32 = 4;
-pub const ITEM_PADDING: i32 = 4;
+/// The gap between two icons, and the frame drawn around each.
+///
+/// Together they are the moulding every icon carries: `ITEM_SPACING +
+/// ITEM_PADDING * 2` per slot, which is what a row of thirty icons pays
+/// thirty times over. Plank's Dracula theme spends six pixels there
+/// (`ItemPadding=1.5`, tenths of the icon size, at 40px icons); twelve put
+/// an extra 170px on a full dock and was most of why the bar reached both
+/// edges of the screen.
+pub const ITEM_SPACING: i32 = 2;
+pub const ITEM_PADDING: i32 = 2;
 pub const BAR_PADDING: i32 = 10;
 
 pub const MIN_BAR_HEIGHT: i32 = ICON_SIZE + ITEM_PADDING * 2 + BAR_PADDING * 2;
@@ -404,11 +412,24 @@ pub mod tests {
     }
 
     #[test]
-    fn twenty_eight_pinned_apps_shrink_the_icons_instead_of_overflowing() {
-        let size = icon_size_for(28, 4, SCREEN.0, ICON_SIZE, NO_LENS);
+    fn twenty_eight_pinned_apps_and_four_widgets_now_fit_at_full_size() {
+        // What the tighter moulding bought. At `ITEM_SPACING` and
+        // `ITEM_PADDING` of four, a dock this full had to drop its icons
+        // below the size the config asked for just to fit the screen; six
+        // pixels of frame per slot instead of twelve gives that back.
+        //
+        // A dock crowded enough still shrinks rather than overflowing —
+        // `a_preferred_size_never_overrides_the_need_to_fit` holds that.
+        assert_eq!(icon_size_for(28, 4, SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
+    }
 
-        assert!(size < ICON_SIZE);
-        assert!(size >= MIN_ICON_SIZE);
+    #[test]
+    fn the_moulding_each_icon_carries_is_no_heavier_than_planks() {
+        // Plank's Dracula theme spends `ItemPadding=1.5` — tenths of the
+        // icon size, so six pixels at its 40px icons. Thirty icons pay for
+        // this thirty times, and it was most of the width that made the bar
+        // reach both edges of the screen.
+        assert!(ITEM_SPACING + ITEM_PADDING * 2 <= 6);
     }
 
     #[test]

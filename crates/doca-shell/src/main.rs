@@ -67,6 +67,9 @@ fn main() -> Result<()> {
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     bar.set_widget_name("bar");
     bar.set_valign(gtk::Align::End);
+    // The window is wider than the bar by the room the lens needs at either
+    // end, so the bar is placed in it rather than filling it.
+    bar.set_halign(gtk::Align::Center);
     bar.pack_start(&items, true, true, 0);
     let stage = gtk::Overlay::new();
     stage.add(&bar);
@@ -655,15 +658,33 @@ async fn rebuild(
     });
     tiles.show(items, &widgets, &invoke);
 
+    // The row is drawn on a surface wider than the place it holds, and the
+    // surplus hangs off both ends. Off the left end and, with no tiles, off
+    // the right, it hangs into the window, where there is nothing to cover.
+    // The tiles are packed after the row, so when there are any the room on
+    // that side has to be held inside the bar instead — otherwise the
+    // drawing lies over the first tile and swallows the clicks meant for it.
+    row.perch.set_margin_end(if widgets.is_empty() {
+        0
+    } else {
+        row.margin()
+    });
+
     items.show_all();
     // After `show_all`, which shows every child — including a progress bar a
     // tile had hidden for having no progress to report.
     tiles.refresh(&widgets);
 
     // The bar is as wide as its contents ask; the window is that plus the room
-    // a magnified icon rises into, which the bar itself never occupies.
+    // a magnified icon rises into and spreads into, which the bar never
+    // occupies. Keeping that room out of the bar is what makes the background
+    // hug the icons instead of reaching to both edges of the screen.
+    let margin = row.margin();
     let natural = dock::natural_size(bar);
-    let (width, bar_height) = dock::clamp_to_screen(natural, (screen.width(), screen.height()));
+    let (width, bar_height) = dock::clamp_to_screen(
+        natural,
+        (screen.width() - margin * 2, screen.height()),
+    );
     let height = bar_height + row.overhead();
     if (width, bar_height) != natural {
         tracing::warn!(
@@ -675,10 +696,11 @@ async fn rebuild(
         );
     }
     bar.set_size_request(width, -1);
-    window.set_size_request(width, height);
-    window.resize(width, height);
+    let window_width = width + margin * 2;
+    window.set_size_request(window_width, height);
+    window.resize(window_width, height);
 
-    let x = screen.x() + (screen.width() - width) / 2;
+    let x = screen.x() + (screen.width() - window_width) / 2;
     let y = screen.y() + screen.height() - height;
     hide.place(window, x, y, height, auto_hide);
 
@@ -691,12 +713,14 @@ async fn rebuild(
         return;
     };
     // Only the bar takes the screen edge. The room above it is air a magnified
-    // icon passes through, and reserving that would push every window down by
-    // the height of a magnification nobody is looking at.
+    // icon passes through, and the room either side of it is air one spreads
+    // into; reserving either would hold screen back for a magnification
+    // nobody is looking at. So the strut is the bar, not the window it is in.
+    let bar_x = x + margin;
     let reserved = BottomStrut {
         height: strut::reserved_height(bar_height, auto_hide),
-        start_x: x.max(0) as u32,
-        end_x: (x + width).max(0) as u32,
+        start_x: bar_x.max(0) as u32,
+        end_x: (bar_x + width).max(0) as u32,
     };
     let xid = x11_window.xid() as u32;
     match strut::apply(xid, &reserved) {
