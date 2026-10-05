@@ -33,4 +33,3 @@ pinned = [
   "anki",
   "spotify_spotify",
 ]
-widgets = ["clock", "cpu", "battery", "music"]
