@@ -95,6 +95,11 @@ impl WidgetTile {
 
         let tile = gtk::EventBox::new();
         tile.set_widget_name("widget");
+        // So that "the keyboard goes back to the bar when the panel closes"
+        // is literally true rather than a hope: a widget that cannot take
+        // focus cannot be given it back, and `grab_focus` on one is a call
+        // that quietly does nothing.
+        tile.set_can_focus(true);
         tile.add(&area);
 
         let id = state.id.clone();
@@ -830,6 +835,23 @@ pub mod tests {
         }
 
         assert!(!asked.get(), "drawing a tile went to the daemon");
+    }
+
+    /// The panel hands the keyboard back to the tile that opened it, which
+    /// needs the tile to be able to hold it.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_tile_can_be_given_the_keyboard_back() {
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+
+        for (_, tile) in shelf.tiles.borrow().iter() {
+            assert!(
+                tile.root.can_focus(),
+                "a tile cannot take focus, so handing it back after a panel \
+                 closes does nothing"
+            );
+        }
     }
 
     /// A body from a build that knew a variant this one does not still leaves

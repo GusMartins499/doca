@@ -904,6 +904,7 @@ fn on_a_display() {
     widget_tile::tests::a_tile_coming_or_going_does_not_resize_its_neighbours();
     widget_tile::tests::drawing_a_tile_asks_the_daemon_for_nothing();
     widget_tile::tests::a_widget_this_bar_cannot_read_still_gets_a_tile();
+    widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
     panel::tests::a_panel_opens_before_the_daemon_has_answered();
     panel::tests::a_panel_opened_at_the_shape_it_turns_out_to_have_does_not_move();
     panel::tests::a_panel_larger_than_it_opened_for_is_still_shown_whole();
