@@ -115,6 +115,60 @@ impl Entry {
     }
 }
 
+/// Something the row runs each frame, once the icons have been placed.
+type Follower = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+
+/// One icon as it is drawn this instant.
+///
+/// Where the lens put it, the size it came out, and how far through arriving
+/// or leaving it is. Everything the drawing needs — and everything the bar
+/// needs, since the bar is painted around the icons as they are drawn. One
+/// answer to where an icon is, rather than two that have to agree.
+#[derive(Clone, Copy)]
+struct Drawn {
+    placed: Placement,
+    presence: f64,
+}
+
+impl Drawn {
+    /// Where an icon goes: the lens's answer, swollen by whatever bounce is
+    /// in progress.
+    ///
+    /// `bounce` is a multiple of the size and `presence` how far through
+    /// arriving the icon is — both 1.0 for an icon that is simply sitting
+    /// there, which is every icon almost all of the time.
+    fn of(
+        centre: f64,
+        pointer: Option<f64>,
+        base: f64,
+        scale: f64,
+        presence: f64,
+        bounce: f64,
+    ) -> Self {
+        let mut placed = magnify::place(centre, pointer, base, scale);
+        placed.size *= bounce;
+        Self { placed, presence }
+    }
+
+    /// The size the icon is painted at: the lens's answer, settled onto a
+    /// step so the scaled picture is one worth keeping.
+    fn size(&self, base: f64) -> i32 {
+        magnify::settled(self.placed.size.round() as i32, base as i32)
+    }
+
+    /// How much of its own size an arriving or leaving icon is drawn at, if
+    /// it is one. `None` is an icon that is simply there.
+    fn growth(&self) -> Option<f64> {
+        (self.presence < 1.0).then(|| crate::motion::entry_scale(self.presence))
+    }
+
+    /// The left and right the icon covers on the row's surface.
+    fn edges(&self, base: f64) -> (f64, f64) {
+        let half = self.size(base) as f64 * self.growth().unwrap_or(1.0) / 2.0;
+        (self.placed.centre - half, self.placed.centre + half)
+    }
+}
+
 /// Where the row sits when the pointer is elsewhere.
 #[derive(Clone, Copy, Default)]
 pub struct Rest {
@@ -143,8 +197,11 @@ impl Rest {
     /// The run the icons take at rest: the first icon's left edge to the last
     /// one's right, and nothing else.
     ///
-    /// This is the place the row holds in the bar, so it is what the bar is
-    /// drawn around.
+    /// This is the place the row holds in the bar — the width the layout is
+    /// given, and so the width of the bar at rest. It is not what the bar is
+    /// *painted* around: that is wherever the icons are drawn this frame,
+    /// which is this run while the pointer is away and wider than it while
+    /// the lens is open. See `ground::around`.
     pub fn run_width(&self, count: usize) -> i32 {
         if count == 0 {
             return 0;
@@ -155,12 +212,13 @@ impl Rest {
     /// The surface the row is drawn on: the run, plus the room at either end
     /// that an icon pushed outwards by the lens is drawn in.
     ///
-    /// Wider than the run, and on purpose. That room is air the bar does not
-    /// reach over — Plank keeps it in the window and paints its background
-    /// around the items alone (`PositionManager.vala`, where `DockWidth` is
-    /// the monitor and `DockBackgroundWidth` is the items). Painting the bar
-    /// around it instead is what made the dock as wide as the screen with the
-    /// icons adrift in the middle of it.
+    /// Wider than the run, and on purpose — this is the room, and the only
+    /// room, the lens has to push an end icon into. It stays: the bar is
+    /// *painted* into it when the lens asks (`ground::around`), but nothing
+    /// is *laid out* in it, because sizing the bar to it is what made the
+    /// dock as wide as the screen with the icons adrift in the middle of it.
+    /// Plank splits the two the same way — `DockWidth` is the whole monitor
+    /// and `DockBackgroundWidth` the part that gets painted.
     pub fn width(&self, count: usize) -> i32 {
         if count == 0 {
             return 0;
@@ -217,6 +275,14 @@ pub struct Row {
     hovering: Rc<Cell<bool>>,
     hover_since: Rc<Cell<Instant>>,
     ticking: Rc<Cell<bool>>,
+    /// Something to run each frame, besides redrawing the icons.
+    ///
+    /// The bar's background is painted around what the row draws, and it is
+    /// painted on the window rather than on the row's own surface — so when
+    /// the lens moves an icon at an end of the row, the window has to be told
+    /// that the place its background goes has moved. This is how it is told:
+    /// one call a frame, off the clock the icons are already on.
+    following: Follower,
     dots: Rc<RefCell<(gdk::RGBA, gdk::RGBA)>>,
     proxy: Rc<RefCell<Option<Rc<DocaProxy<'static>>>>>,
 }
@@ -274,6 +340,7 @@ impl Row {
             hovering: Rc::new(Cell::new(false)),
             hover_since: Rc::new(Cell::new(Instant::now() - crate::motion::ZOOM)),
             ticking: Rc::new(Cell::new(false)),
+            following: Rc::new(RefCell::new(None)),
             proxy: Rc::new(RefCell::new(None)),
             dots: Rc::new(RefCell::new((
                 gdk::RGBA::new(1.0, 1.0, 1.0, 0.45),
@@ -485,13 +552,30 @@ impl Row {
         self.lens.set(Some(crate::motion::aimed(lens, pointer, since)));
     }
 
-    /// Let go of the icons whose leaving is over.
+    /// Let go of the icons whose leaving is over, and of the bounces that
+    /// have finished.
     ///
-    /// Until this runs they are still in the row, holding the fraction of a
-    /// slot their shrinking left them — which is the whole of what "and only
-    /// then releases the space" means.
+    /// Until this runs a departing icon is still in the row, holding the
+    /// fraction of a slot its shrinking left it — which is the whole of what
+    /// "and only then releases the space" means.
+    ///
+    /// Finished bounces are let go here, on the clock, rather than wherever
+    /// they happened to be noticed: the row is asked where its icons are
+    /// twice a frame now — once to draw them and once to paint the bar around
+    /// them — and an answer that clears state as a side effect is an answer
+    /// that depends on who asked first.
     fn sweep(&self) {
-        self.entries.borrow_mut().retain(|entry| !entry.life.get().gone());
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|entry| !entry.life.get().gone());
+        for entry in entries.iter() {
+            if entry
+                .launched
+                .get()
+                .is_some_and(|started| !crate::motion::is_launching_since(started))
+            {
+                entry.launched.set(None);
+            }
+        }
     }
 
     fn hover(&self, hovering: bool) {
@@ -533,6 +617,9 @@ impl Row {
             row.step(Instant::now());
             row.sweep();
             area.queue_draw();
+            if let Some(follow) = row.following.borrow().as_ref() {
+                follow();
+            }
             if row.resting() {
                 row.ticking.set(false);
                 return glib::ControlFlow::Break;
@@ -595,8 +682,15 @@ impl Row {
 
     /// The room a magnified icon spreads into, at either end of the row.
     ///
-    /// The bar does not cover it, so the window has to: this is how much
-    /// wider than the bar the window is made.
+    /// This is how much wider than the bar the window is made, and it is
+    /// still needed for exactly that: the window is the surface everything is
+    /// drawn on, the icons at the ends are drawn out here, and the bar's
+    /// background is painted out here with them. What changed is only who
+    /// covers it — the bar reaches into it now instead of leaving it as air
+    /// (`ground::around`), so an icon drawn here has its background under it.
+    /// The bar's *layout* still stops at the run, and the strut still
+    /// reserves the bar and not this: a magnification nobody is looking at
+    /// must not hold screen back.
     pub fn margin(&self) -> i32 {
         self.rest.get().margin as i32
     }
@@ -620,82 +714,122 @@ impl Row {
         Some((index, item))
     }
 
+    /// Every icon as it is drawn this instant, in the row's own coordinates.
+    ///
+    /// Read-only, and asked twice a frame: once to draw the icons and once to
+    /// paint the bar around them. The bar cannot be painted around where the
+    /// icons rest — the lens pushes the end ones out past that — so it is
+    /// painted around this, and there is one answer rather than two.
+    fn drawn(&self) -> Vec<Drawn> {
+        let rest = self.rest.get();
+        let pointer = self.lens();
+        let scale = self.scale_now();
+        let centres = self.centres();
+        self.entries
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                // A bounce is drawn, so the bar is painted around it too: the
+                // alternative is an icon that swells out of its own
+                // background on every click.
+                let bounce = entry
+                    .launched
+                    .get()
+                    .map(|started| started.elapsed())
+                    .filter(|elapsed| crate::motion::is_launching(*elapsed))
+                    .map(crate::motion::launch_scale)
+                    .unwrap_or(1.0);
+                Drawn::of(
+                    centres[index],
+                    pointer,
+                    rest.icon,
+                    scale,
+                    entry.life.get().presence(),
+                    bounce,
+                )
+            })
+            .collect()
+    }
+
+    /// The outermost edges the icons reach this instant, in the row's own
+    /// coordinates — what the bar has to be painted around.
+    ///
+    /// `None` is a row with nothing on it: no footprint of its own, and a bar
+    /// that stays exactly where the layout put it.
+    pub fn drawn_edges(&self) -> Option<(f64, f64)> {
+        let rest = self.rest.get();
+        if rest.icon <= 0.0 {
+            return None;
+        }
+        self.drawn()
+            .iter()
+            .map(|icon| icon.edges(rest.icon))
+            .reduce(|(left, right), (l, r)| (left.min(l), right.max(r)))
+    }
+
+    /// What to run each frame once the icons have been placed.
+    pub fn followed_by(&self, follow: impl Fn() + 'static) {
+        *self.following.borrow_mut() = Some(Box::new(follow));
+    }
+
     fn draw(&self, area: &gtk::DrawingArea, cr: &cairo::Context) {
         let rest = self.rest.get();
         if rest.icon <= 0.0 {
             return;
         }
         let bottom = area.allocated_height() as f64 - INDICATOR as f64;
-        let pointer = self.lens();
-        let scale = self.scale_now();
         let (running_dot, active_dot) = *self.dots.borrow();
 
-        let centres = self.centres();
+        let drawn = self.drawn();
         let entries = self.entries.borrow();
-        let placed: Vec<(Placement, bool, bool, f64)> = {
-            entries
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    let mut placed = magnify::place(centres[index], pointer, rest.icon, scale);
-                    if let Some(started) = entry.launched.get() {
-                        let elapsed = started.elapsed();
-                        if crate::motion::is_launching(elapsed) {
-                            placed.size *= crate::motion::launch_scale(elapsed);
-                        } else {
-                            entry.launched.set(None);
-                        }
-                    }
-                    (
-                        placed,
-                        !entry.item.windows.is_empty(),
-                        entry.item.active,
-                        entry.life.get().presence(),
-                    )
-                })
-                .collect()
-        };
-
-        for (index, (placed, running, active, presence)) in placed.iter().enumerate() {
-            let size = magnify::settled(placed.size.round() as i32, rest.icon as i32);
-            let Some(pixbuf) = entries.get(index).and_then(|entry| entry.at(size)) else {
+        for (index, icon) in drawn.iter().enumerate() {
+            let size = icon.size(rest.icon);
+            let Some(entry) = entries.get(index) else {
                 continue;
             };
-            let x = placed.centre - size as f64 / 2.0;
+            let Some(pixbuf) = entry.at(size) else {
+                continue;
+            };
+            let centre = icon.placed.centre;
+            let x = centre - size as f64 / 2.0;
             let y = bottom - size as f64;
             // An icon that is arriving or leaving is scaled about the spot it
             // stands on, rather than drawn at a size of its own: every size
             // an icon takes is a surface to keep, and a sixth of a second of
             // them is a cache entry a frame for a picture nobody will ask for
             // again. It grows out of the bar and fades in with it.
-            let growing = *presence < 1.0;
-            if growing {
-                let growth = crate::motion::entry_scale(*presence);
+            let growing = icon.growth();
+            if let Some(growth) = growing {
                 let _ = cr.save();
-                cr.translate(placed.centre, bottom);
+                cr.translate(centre, bottom);
                 cr.scale(growth, growth);
-                cr.translate(-placed.centre, -bottom);
+                cr.translate(-centre, -bottom);
             }
             cr.set_source_pixbuf(&pixbuf, x.round(), y.round());
-            let _ = if growing {
-                cr.paint_with_alpha(*presence)
+            let _ = if growing.is_some() {
+                cr.paint_with_alpha(icon.presence)
             } else {
                 cr.paint()
             };
-            if growing {
+            if growing.is_some() {
                 let _ = cr.restore();
             }
 
-            if *running {
-                let dot = if *active { active_dot } else { running_dot };
+            if !entry.item.windows.is_empty() {
+                let dot = if entry.item.active {
+                    active_dot
+                } else {
+                    running_dot
+                };
                 cr.set_source_rgba(
                     dot.red(),
                     dot.green(),
                     dot.blue(),
-                    dot.alpha() * presence,
+                    dot.alpha() * icon.presence,
                 );
                 cr.rectangle(
-                    (placed.centre - DOT_WIDTH / 2.0).round(),
+                    (centre - DOT_WIDTH / 2.0).round(),
                     bottom + 3.0,
                     DOT_WIDTH,
                     DOT_HEIGHT,
@@ -724,17 +858,17 @@ pub mod tests {
     const ICON: i32 = 48;
     const SCALE: f64 = 1.6;
 
+    /// The bar is *given* the run and *painted* wherever the icons are, so
+    /// the surface has to be the wider of the two. Sizing the bar to the
+    /// surface instead is how the dock came to span the whole screen.
     #[test]
-    fn the_run_the_bar_is_drawn_around_leaves_out_the_room_the_lens_needs() {
+    fn the_row_is_drawn_on_more_room_than_the_bar_is_laid_out_with() {
         let rest = Rest::new(ICON, 4, 4, SCALE);
 
         let run = rest.run_width(10);
         let surface = rest.width(10);
 
-        assert!(
-            run < surface,
-            "the bar would be painted over the room the lens spreads into,              which is how the dock came to span the whole screen"
-        );
+        assert!(run < surface, "the lens has nowhere to push an end icon");
         assert_eq!(surface - run, rest.margin as i32 * 2);
     }
 
@@ -755,7 +889,7 @@ pub mod tests {
     }
 
     #[test]
-    fn an_empty_row_takes_no_width_at_all_not_even_the_lens_margin() {
+    fn an_empty_row_takes_no_width_at_all_not_even_the_lens_room() {
         let rest = Rest::new(ICON, 4, 4, SCALE);
 
         assert_eq!(rest.run_width(0), 0);
@@ -780,6 +914,196 @@ pub mod tests {
                     left + placed.size <= surface,
                     "an icon is pushed off the right of the surface"
                 );
+            }
+        }
+    }
+
+    /// The row as the dock really builds it, rather than with round numbers:
+    /// `ground::REACH` is the bar's padding plus the frame inside a slot, and
+    /// the agreement the whole design rests on only holds if the slot is the
+    /// one that padding was worked out from.
+    fn real(scale: f64) -> Rest {
+        Rest::new(
+            ICON,
+            crate::dock::ITEM_SPACING,
+            crate::dock::ITEM_PADDING,
+            scale,
+        )
+    }
+
+    /// Where the bar sits in the window with the row at rest.
+    ///
+    /// The layout gives the perch the run and the bar pads it on both sides,
+    /// so this is the run plus `dock::BAR_PADDING` twice. The x is arbitrary
+    /// and deliberately not zero: the background is worked out in the window's
+    /// coordinates, and a bar at the origin hides a missing offset.
+    fn resting_bar(rest: &Rest, count: usize) -> gdk::Rectangle {
+        gdk::Rectangle::new(
+            137,
+            0,
+            rest.run_width(count) + crate::dock::BAR_PADDING * 2,
+            rest.resting_height(),
+        )
+    }
+
+    /// Every icon's resting centre, in the same coordinates as the bar.
+    fn centres_in(rest: &Rest, count: usize, bar: gdk::Rectangle) -> Vec<f64> {
+        let shift = (bar.x() + crate::dock::BAR_PADDING) as f64 - rest.margin;
+        (0..count).map(|index| rest.centre(index) + shift).collect()
+    }
+
+    fn row_of(centres: &[f64], pointer: Option<f64>, rest: &Rest) -> Vec<Drawn> {
+        centres
+            .iter()
+            .map(|centre| Drawn::of(*centre, pointer, rest.icon, rest.scale, 1.0, 1.0))
+            .collect()
+    }
+
+    fn reach_of(drawn: &[Drawn], rest: &Rest) -> Option<(f64, f64)> {
+        drawn
+            .iter()
+            .map(|icon| icon.edges(rest.icon))
+            .reduce(|(left, right), (l, r)| (left.min(l), right.max(r)))
+    }
+
+    /// The hinge of the whole thing: at rest the icons ask for exactly the bar
+    /// the layout gave them, so the background painted around the drawing and
+    /// the background painted around the layout are the same background. Get
+    /// this wrong by a pixel and the bar twitches every time the lens closes.
+    #[test]
+    fn a_row_at_rest_reaches_exactly_the_two_edges_of_the_bar_it_was_given() {
+        for count in 1..=30usize {
+            let rest = real(magnify::DEFAULT_SCALE);
+            let bar = resting_bar(&rest, count);
+            let centres = centres_in(&rest, count, bar);
+
+            let reach = reach_of(&row_of(&centres, None, &rest), &rest).expect("icons");
+
+            assert_eq!(
+                reach,
+                (
+                    (bar.x() + crate::ground::REACH) as f64,
+                    (bar.x() + bar.width() - crate::ground::REACH) as f64
+                ),
+                "a row of {count} at rest does not line up with its own bar"
+            );
+            assert_eq!(crate::ground::around(bar, Some(reach)), bar);
+        }
+    }
+
+    /// What this item was opened about, as a property.
+    ///
+    /// The pointer is swept pixel by pixel across the bar, for every row
+    /// length and every magnification the config will hand over, and no icon
+    /// is ever drawn outside the background the bar paints. With the
+    /// background painted around the resting run instead, this failed by about
+    /// 19px a side at 48px icons and 1.6 — and by 108px at 2.5.
+    #[test]
+    fn no_icon_is_ever_drawn_outside_the_background_the_bar_paints() {
+        for count in 1..=30usize {
+            for tenths in 10..=25u32 {
+                let rest = real(tenths as f64 / 10.0);
+                let bar = resting_bar(&rest, count);
+                let centres = centres_in(&rest, count, bar);
+
+                for pointer in bar.x()..=(bar.x() + bar.width()) {
+                    let drawn = row_of(&centres, Some(pointer as f64), &rest);
+                    let painted = crate::ground::around(bar, reach_of(&drawn, &rest));
+                    let (start, end) = (
+                        painted.x() as f64,
+                        (painted.x() + painted.width()) as f64,
+                    );
+
+                    for (index, icon) in drawn.iter().enumerate() {
+                        let (left, right) = icon.edges(rest.icon);
+                        assert!(
+                            left >= start && right <= end,
+                            "icon {index} of {count} at x{:.1} reaches {left:.1}..{right:.1}, \
+                             outside a background of {start}..{end} at magnification {}",
+                            pointer,
+                            rest.scale
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where the fix went, stated as what it did *not* touch.
+    ///
+    /// The lens is Plank's formula and nothing limits it: no clamp at the
+    /// ends, no fold, no end zone. An icon is where `place` puts it at both
+    /// ends of the row exactly as much as in the middle, so a row that was
+    /// right before this item is identical to it, value for value. What
+    /// changed is the background that gets painted around the answer.
+    #[test]
+    fn the_lens_is_not_clamped_or_folded_anywhere_along_the_row() {
+        for count in [1usize, 2, 7, 28] {
+            let rest = real(magnify::DEFAULT_SCALE);
+            let bar = resting_bar(&rest, count);
+            let centres = centres_in(&rest, count, bar);
+
+            for pointer in bar.x()..=(bar.x() + bar.width()) {
+                for (index, icon) in row_of(&centres, Some(pointer as f64), &rest)
+                    .iter()
+                    .enumerate()
+                {
+                    let plank = magnify::place(
+                        centres[index],
+                        Some(pointer as f64),
+                        rest.icon,
+                        rest.scale,
+                    );
+
+                    assert_eq!(
+                        icon.placed, plank,
+                        "icon {index} of {count} was moved off the lens's own answer"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A background that follows the drawing must not move further than the
+    /// drawing does, or the bar steps while the icons glide.
+    ///
+    /// Held to the drawing rather than to a figure: how far an icon travels
+    /// for a pixel of pointer is the lens's own business, and at 2.5 a pixel
+    /// of pointer is already worth more than a pixel of icon. The pixel of
+    /// slack is the rounding — the background is painted on whole pixels.
+    #[test]
+    fn the_background_never_steps_further_than_the_icons_it_follows() {
+        for count in [1usize, 2, 7, 28] {
+            for tenths in 11..=25u32 {
+                let rest = real(tenths as f64 / 10.0);
+                let bar = resting_bar(&rest, count);
+                let centres = centres_in(&rest, count, bar);
+                let painted = |pointer: f64| {
+                    let drawn = row_of(&centres, Some(pointer), &rest);
+                    let reach = reach_of(&drawn, &rest).expect("icons");
+                    (crate::ground::around(bar, Some(reach)), reach)
+                };
+
+                let mut before = painted(bar.x() as f64);
+                for pointer in (bar.x() + 1)..=(bar.x() + bar.width()) {
+                    let after = painted(pointer as f64);
+                    let icons = (after.1 .0 - before.1 .0)
+                        .abs()
+                        .max((after.1 .1 - before.1 .1).abs());
+                    let start = (after.0.x() - before.0.x()).abs() as f64;
+                    let end = ((after.0.x() + after.0.width())
+                        - (before.0.x() + before.0.width()))
+                    .abs() as f64;
+
+                    assert!(
+                        start.max(end) <= icons + 1.0,
+                        "the background jumped {:.1}px at x{pointer} while the icons \
+                         moved {icons:.1}px, on a row of {count} at magnification {}",
+                        start.max(end),
+                        rest.scale
+                    );
+                    before = after;
+                }
             }
         }
     }
