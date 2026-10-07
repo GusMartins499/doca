@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use doca_ipc::WidgetState;
+use doca_ipc::{Body, Simple, WidgetState};
 
 use super::clock::{civil_from_days, days_from_civil};
 use super::Widget;
@@ -84,6 +84,10 @@ impl TimeProgress {
 }
 
 impl Widget for TimeProgress {
+    fn actions(&self) -> &'static [&'static str] {
+        &["toggle", "next", "reset"]
+    }
+
     fn id(&self) -> &str {
         "time-progress"
     }
@@ -100,13 +104,15 @@ impl Widget for TimeProgress {
             + self.offset;
         let fraction = fraction(self.span, now.div_euclid(86_400), now.rem_euclid(86_400));
 
-        WidgetState {
-            id: "time-progress".to_string(),
-            label: format!("{}%", (fraction * 100.0).round() as i64),
-            detail: self.span.name().to_string(),
-            progress: fraction,
-            active: false,
-        }
+        WidgetState::new(
+            "time-progress",
+            Body::Simple(Simple {
+                label: format!("{}%", (fraction * 100.0).round() as i64),
+                detail: self.span.name().to_string(),
+                progress: fraction,
+                active: false,
+            }),
+        )
     }
 
     fn invoke(&mut self, action: &str) {

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use doca_ipc::WidgetState;
+use doca_ipc::{Body, Simple, WidgetState};
 
 use super::Widget;
 
@@ -135,21 +135,27 @@ impl Pomodoro {
     pub fn state(&self) -> WidgetState {
         let seconds = self.remaining.as_secs();
         let elapsed = self.phase.duration().as_secs() - seconds;
-        WidgetState {
-            id: "pomodoro".to_string(),
-            label: format!("{:02}:{:02}", seconds / 60, seconds % 60),
-            detail: if self.running {
-                self.phase.name().to_string()
-            } else {
-                format!("{} · paused", self.phase.name())
-            },
-            progress: elapsed as f64 / self.phase.duration().as_secs() as f64,
-            active: self.running && self.phase == Phase::Focus,
-        }
+        WidgetState::new(
+            "pomodoro",
+            Body::Simple(Simple {
+                label: format!("{:02}:{:02}", seconds / 60, seconds % 60),
+                detail: if self.running {
+                    self.phase.name().to_string()
+                } else {
+                    format!("{} · paused", self.phase.name())
+                },
+                progress: elapsed as f64 / self.phase.duration().as_secs() as f64,
+                active: self.running && self.phase == Phase::Focus,
+            }),
+        )
     }
 }
 
 impl Widget for Pomodoro {
+    fn actions(&self) -> &'static [&'static str] {
+        &["start", "pause", "toggle", "reset", "skip"]
+    }
+
     fn id(&self) -> &str {
         "pomodoro"
     }
@@ -178,6 +184,7 @@ impl Widget for Pomodoro {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     fn run(pomodoro: &mut Pomodoro, seconds: u64) {
         for _ in 0..seconds {
@@ -192,7 +199,7 @@ mod tests {
         assert_eq!(pomodoro.phase(), Phase::Focus);
         assert_eq!(pomodoro.remaining(), FOCUS);
         assert!(!pomodoro.is_running());
-        assert_eq!(pomodoro.state().label, "25:00");
+        assert_eq!(pomodoro.state().label(), "25:00");
     }
 
     #[test]
@@ -211,7 +218,7 @@ mod tests {
 
         run(&mut pomodoro, 60);
 
-        assert_eq!(pomodoro.state().label, "24:00");
+        assert_eq!(pomodoro.state().label(), "24:00");
     }
 
     #[test]
@@ -282,24 +289,24 @@ mod tests {
     #[test]
     fn only_a_running_focus_block_makes_the_tile_active() {
         let mut pomodoro = Pomodoro::new();
-        assert!(!pomodoro.state().active);
+        assert!(!pomodoro.state().active());
 
         pomodoro.start();
-        assert!(pomodoro.state().active);
+        assert!(pomodoro.state().active());
 
         pomodoro.skip();
-        assert!(!pomodoro.state().active);
+        assert!(!pomodoro.state().active());
     }
 
     #[test]
     fn progress_runs_from_the_start_of_a_phase_to_its_end() {
         let mut pomodoro = Pomodoro::new();
-        assert_eq!(pomodoro.state().progress, 0.0);
+        assert_eq!(pomodoro.state().progress(), 0.0);
 
         pomodoro.start();
         run(&mut pomodoro, FOCUS.as_secs() / 2);
 
-        assert!((pomodoro.state().progress - 0.5).abs() < 0.01);
+        assert!((pomodoro.state().progress() - 0.5).abs() < 0.01);
     }
 
     #[test]

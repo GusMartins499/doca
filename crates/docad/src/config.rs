@@ -1,6 +1,4 @@
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -204,22 +202,6 @@ pub struct Config {
     pinned: Vec<String>,
 }
 
-/// A name no other writer is using, next to the file it will become.
-///
-/// Same directory, because `rename` is only atomic within one filesystem.
-fn temporary_name(path: &Path) -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let stem = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "config.toml".to_string());
-    format!(
-        ".{stem}.{}.{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 pub fn config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -337,43 +319,11 @@ impl Config {
 
     /// Write the config out whole, or leave the old one untouched.
     ///
-    /// The file is the only record of what the dock looks like, and a session
-    /// that dies mid-write would otherwise leave half a TOML behind — which
-    /// `load` cannot parse, so the next start silently falls back to defaults
-    /// and the user's dock is gone. Writing beside the real file and renaming
-    /// over it makes the swap atomic: a reader sees the old file or the new
-    /// one, never a torn one.
+    /// The file is the only record of what the dock looks like, so the write
+    /// goes through [`crate::atomic::write`] — which is also what the state
+    /// file uses, and says there why.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("{} has no directory to write into", path.display()))?;
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-
-        let body = toml::to_string_pretty(self)?;
-        let scratch = parent.join(temporary_name(path));
-
-        // The rename is the commit, so everything that can fail has to fail
-        // first: the bytes are written and flushed to the disk before the old
-        // file is replaced.
-        let written = (|| -> std::io::Result<()> {
-            let mut file = std::fs::File::create(&scratch)?;
-            file.write_all(body.as_bytes())?;
-            file.sync_all()
-        })();
-
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&scratch);
-            return Err(anyhow::Error::new(e)
-                .context(format!("cannot write beside {}", path.display())));
-        }
-
-        if let Err(e) = std::fs::rename(&scratch, path) {
-            let _ = std::fs::remove_file(&scratch);
-            return Err(anyhow::Error::new(e)
-                .context(format!("cannot replace {}", path.display())));
-        }
-        Ok(())
+        crate::atomic::write(path, &toml::to_string_pretty(self)?)
     }
 
     pub fn environment_for(&self, workspace: i32) -> &Environment {
@@ -1053,6 +1003,8 @@ mod tests {
     /// A directory of this test's own, so nothing has to touch the real
     /// `XDG_CONFIG_HOME` — tests share a process, and an env var one of them
     /// sets is an env var all the others see.
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     struct Scratch(PathBuf);
 
     impl Scratch {

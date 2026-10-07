@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use super::Widget;
 
@@ -77,22 +77,28 @@ impl Stopwatch {
     }
 
     pub fn state(&self) -> WidgetState {
-        WidgetState {
-            id: "stopwatch".to_string(),
-            label: format_elapsed(self.elapsed),
-            detail: match (self.running, self.laps.len()) {
-                (true, 0) => "running".to_string(),
-                (true, laps) => format!("lap {laps}"),
-                (false, 0) => "stopped".to_string(),
-                (false, laps) => format!("{laps} laps"),
-            },
-            progress: NO_PROGRESS,
-            active: self.running,
-        }
+        WidgetState::new(
+            "stopwatch",
+            Body::Simple(Simple {
+                label: format_elapsed(self.elapsed),
+                detail: match (self.running, self.laps.len()) {
+                    (true, 0) => "running".to_string(),
+                    (true, laps) => format!("lap {laps}"),
+                    (false, 0) => "stopped".to_string(),
+                    (false, laps) => format!("{laps} laps"),
+                },
+                progress: NO_PROGRESS,
+                active: self.running,
+            }),
+        )
     }
 }
 
 impl Widget for Stopwatch {
+    fn actions(&self) -> &'static [&'static str] {
+        &["toggle", "reset", "lap"]
+    }
+
     fn id(&self) -> &str {
         "stopwatch"
     }
@@ -119,6 +125,7 @@ impl Widget for Stopwatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     fn run(watch: &mut Stopwatch, seconds: u64) {
         for _ in 0..seconds {
@@ -130,7 +137,7 @@ mod tests {
     fn a_fresh_stopwatch_sits_at_zero_and_stopped() {
         let watch = Stopwatch::new();
 
-        assert_eq!(watch.state().label, "00:00");
+        assert_eq!(watch.state().label(), "00:00");
         assert!(!watch.is_running());
     }
 
