@@ -177,20 +177,43 @@ in `scripts/check-live.sh` instead — where it failed, twice, before it worked.
 
 ### Widgets
 
-| id | shows | poll | click |
-|---|---|---|---|
-| `clock` | time and date | 1s | — |
-| `battery` | charge and time to full or empty | 30s | — |
-| `cpu` | busy share since the last sample | 2s | — |
-| `network` | up and down rates | 2s | — |
-| `music` | MPRIS title and artist | 2s | play/pause, right click resets |
-| `pomodoro` | focus and break blocks | 1s | start/pause, right click resets |
-| `stopwatch` | counting up, with laps | 1s | start/pause, right click resets |
-| `timer` | counting down to a ring | 1s | start/pause, right click resets |
-| `time-progress` | how much of a span has gone | 30s | next span, right click back to today |
-| `countdown` | days to a date | 60s | — |
-| `water` | glasses against a goal | 60s | one more, right click resets |
-| `note` | a line you leave yourself | — | — |
+A widget is not an icon that opens an app: it is a tile that draws its own
+state in the bar. Each one says what shape that state takes and how much room
+it wants, and the bar has a drawer for each shape rather than one column of
+labels for all of them.
+
+| id | shows | tile | poll | panel offers |
+|---|---|---|---|---|
+| `clock` | time and date | wide | 1s | — |
+| `battery` | charge and time to full or empty | wide | 30s | — |
+| `cpu` | busy share since the last sample | wide | 2s | — |
+| `network` | up and down rates | wide | 2s | — |
+| `music` | MPRIS title and artist | wide | 2s | play/pause, previous, next |
+| `pomodoro` | focus and break blocks | wide | 1s | start/pause, skip, reset |
+| `stopwatch` | counting up, with laps | wide | 1s | start/stop, lap, reset |
+| `timer` | counting down to a ring | wide | 1s | start/pause, add a minute, reset |
+| `time-progress` | how much of a span has gone | wide | 30s | next span, back to today |
+| `countdown` | days to a date | wide | 60s | — |
+| `water` | glasses counted, in a ring of the goal | square | 60s | one more, take one back, start over |
+| `note` | a line you leave yourself | wide | — | — |
+
+A **square** tile is about one icon wide and a **wide** one about two and a
+half, so a tile follows the `icon_size` the config asks for instead of being
+88 pixels whatever the icons are doing. The size is the widget's own
+declaration, which is why a tile joining or leaving the bar never resizes the
+ones beside it. It is paid for on a very full dock: four wide tiles take 144
+pixels more than the fixed-width ones did, which with twenty-eight apps
+already pinned comes out of the icon size.
+
+Clicking a tile opens a **panel** over it — what the widget is showing, and a
+row for each thing it can be told to do. The panel goes up in the frame the
+click landed in, as a skeleton, and fills when the daemon answers: a widget's
+contents are a question whose cost has no ceiling, and the bar puts none on
+it. `Esc` or a click outside closes it, the arrow keys walk the controls, and
+the keyboard goes back to the bar afterwards. It is a GTK menu, because the
+bar is a `_NET_WM_WINDOW_TYPE_DOCK` window and on X11 a menu's grab is the
+only thing that reliably carries the keyboard over one of those — the same
+reason the folder grid is one.
 
 Widgets that need settings take them from a `[widgets.*]` block:
 
@@ -212,6 +235,27 @@ goal = 8
 A poll is not an update: the scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read
 every second and announced once a minute.
+
+#### What the day accumulated
+
+A setting is what you chose; a count is what the day did. The two live apart:
+
+```
+$XDG_CONFIG_HOME/doca/config.toml    the goal of eight glasses
+$XDG_STATE_HOME/doca/state.toml      the six already drunk
+```
+
+So the glasses survive a restart, and nothing a counter does rewrites the file
+you edit by hand. The state file is written whole or not at all, and one that
+is missing, empty or half-written is a day that starts from zero and says so
+in the log rather than a daemon that will not start.
+
+The turn of the day is noticed in one place — `State::forget_the_day` in
+`crates/docad/src/state.rs` — and the result is handed to every widget. No
+widget asks what day it is, so yesterday's water cannot count towards today's
+goal and the next counter added cannot forget a rule it never had to know.
+Nothing in here appears in the preferences window: what is there is choice,
+not accumulation.
 
 ## Switching environments
 

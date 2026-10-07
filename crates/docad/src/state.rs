@@ -383,6 +383,41 @@ mod tests {
         );
     }
 
+    /// The line between the two files, as a thing a test can fail on.
+    ///
+    /// The preferences window draws a control for every pair in
+    /// `doca_ipc::widget_key::ALL` and for nothing else, so a counter can
+    /// only appear in that window by first becoming a *setting*. This is what
+    /// would notice: the names the state file writes and the names the config
+    /// file writes have to stay strangers.
+    #[test]
+    fn nothing_the_day_accumulated_is_also_something_the_user_sets() {
+        let counted = leaves(&toml::to_string(&water(TODAY, 3)).unwrap());
+        let chosen =
+            leaves(&toml::to_string(&crate::config::WidgetSettings::default()).unwrap());
+
+        assert!(counted.contains(&"glasses".to_string()), "{counted:?}");
+        assert!(chosen.contains(&"goal".to_string()), "{chosen:?}");
+        for name in &counted {
+            assert!(
+                !chosen.contains(name),
+                "{name} is both something the day counted and something the \
+                 user sets, so it would show up as a control in the \
+                 preferences window"
+            );
+        }
+    }
+
+    /// The `key = value` names in a TOML document, table headers aside — the
+    /// two files share a `[water]` table and nothing inside it.
+    fn leaves(document: &str) -> Vec<String> {
+        document
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, _)| name.trim().to_string())
+            .collect()
+    }
+
     #[test]
     fn the_state_file_sits_beside_the_other_state_and_not_beside_the_config() {
         let path = state_path();

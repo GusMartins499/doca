@@ -60,7 +60,10 @@ done
 WORK="${WORK:-$(mktemp -d)}"
 export WORK
 export XDG_CONFIG_HOME="$WORK/config"
-mkdir -p "$XDG_CONFIG_HOME/doca" "$XDG_CONFIG_HOME/dconf"
+# The counters go here, and for the same reason the config does: a run of
+# this script must not touch the state of the desktop it runs on.
+export XDG_STATE_HOME="$WORK/state"
+mkdir -p "$XDG_CONFIG_HOME/doca" "$XDG_CONFIG_HOME/dconf" "$XDG_STATE_HOME"
 
 if [ "${INSIDE:-0}" != "1" ]; then
     Xvfb "$DISPLAY_NUM" -screen 0 1280x800x24 >/dev/null 2>&1 &
@@ -160,20 +163,59 @@ case "$RUNNING" in
     *) fail "the hub did not pick up the new widget list: $RUNNING" ;;
 esac
 
+# Water sends its count and its goal as numbers now, not as the words
+# "2/8" — the bar draws a ring out of them, and only the bar decides what
+# that says. So the assertions are on the payload the variant carries.
+water_is() {
+    case "$(call ListWidgets)" in
+        *"uint32 $1, uint32 $2"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 call InvokeWidget "water" "drink" >/dev/null
 call InvokeWidget "water" "drink" >/dev/null
-case "$(call ListWidgets)" in
-    *"'2/8'"*) ok "two glasses were counted" ;;
-    *) fail "the water widget did not count: $(call ListWidgets)" ;;
-esac
+water_is 2 8 \
+    && ok "two glasses were counted" \
+    || fail "the water widget did not count: $(call ListWidgets)"
 
 # The whole of F4 in one assertion: a setting written now, to a widget that
 # has been running for a while, keeping what it was counting.
 call SetWidgetSetting "water" "goal" "<uint32 4>" >/dev/null
+water_is 2 4 \
+    && ok "a new goal reached the running widget and kept today's count" \
+    || fail "the running widget did not take the new goal: $(call ListWidgets)"
+
+# Each widget says what shape its state takes, so a reader can have a drawer
+# per shape instead of one column of labels for all of them. Checked on the
+# wire because the union is spelled by hand — a name beside a variant — and a
+# payload written one way and read another is a bar with no tiles on it.
 case "$(call ListWidgets)" in
-    *"'2/4'"*) ok "a new goal reached the running widget and kept today's count" ;;
-    *) fail "the running widget did not take the new goal: $(call ListWidgets)" ;;
+    *"('water', 'water', <(uint32"*) ok "a widget state names the shape it carries" ;;
+    *) fail "the typed state did not come back as a name and a payload: $(call ListWidgets)" ;;
 esac
+case "$(call ListWidgets)" in
+    # Two lines, a progress figure and a flag: the tile the nine widgets
+    # without a variant of their own still draw.
+    *"'note', 'simple', <("*", -1.0, false)>"*)
+        ok "a widget with no variant of its own still sends one" ;;
+    *) fail "the note did not come back as a simple body: $(call ListWidgets)" ;;
+esac
+
+# An action nobody has is refused in words rather than shrugged off, which is
+# what makes a panel's controls safe to build from the list the contract
+# publishes.
+call InvokeWidget "water" "drink" >/dev/null
+if grep -aq "takes no action" "$WORK/docad.log"; then
+    fail "a real action was reported as unknown"
+else
+    ok "an action the widget declares is an action it takes"
+fi
+call InvokeWidget "water" "teleport" >/dev/null
+grep -aq "water takes no action teleport" "$WORK/docad.log" \
+    && ok "an action nobody has is named in the log" \
+    || fail "an unknown action was taken in silence"
+call InvokeWidget "water" "undo" >/dev/null
 
 call SetWidgetSetting "note" "text" "<'milk\nand bread'>" >/dev/null
 case "$(call ListWidgets)" in
@@ -192,8 +234,37 @@ call SetEnvironmentWidgets "Work" "['water']" >/dev/null
 DROPPED=$(call ListWidgets)
 case "$DROPPED" in
     *"'note'"*) fail "a widget no dock asks for is still running: $DROPPED" ;;
-    *"'2/4'"*) ok "dropping a widget left the others counting where they were" ;;
+    *"uint32 2, uint32 4"*) ok "dropping a widget left the others counting where they were" ;;
     *) fail "the surviving widget was rebuilt: $DROPPED" ;;
+esac
+
+# What the day accumulated, which no unit test can check the way this can:
+# the daemon is stopped and started, over the same state file, and the
+# glasses are still counted. A setting living in the config file and a count
+# living in the state file is the whole of why that works.
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/doca/state.toml"
+[ -f "$STATE" ] \
+    && ok "the day's counters were written to $STATE" \
+    || fail "nothing was written to $STATE"
+grep -q "glasses" "$STATE" 2>/dev/null \
+    && ok "the glasses are in the state file" \
+    || fail "the state file holds no count: $(cat "$STATE" 2>&1)"
+grep -q "glasses" "$XDG_CONFIG_HOME/doca/config.toml" \
+    && fail "a counter was written into the config file the user edits" \
+    || ok "the config file was left to the choices"
+
+kill "$DAEMON" 2>/dev/null
+wait "$DAEMON" 2>/dev/null
+"$ROOT/target/release/docad" > "$WORK/docad-again.log" 2>&1 &
+DAEMON=$!
+for _ in $(seq 1 60); do
+    gdbus introspect --session --dest "$BUS" --object-path "$OBJECT" >/dev/null 2>&1 && break
+    sleep 0.25
+done
+RESTARTED=$(call ListWidgets)
+case "$RESTARTED" in
+    *"uint32 2, uint32 4"*) ok "the glasses survived a restart of the daemon" ;;
+    *) fail "the day started over when the daemon did: $RESTARTED" ;;
 esac
 
 case "$(call SetWidgetSetting "water" "litres" "<uint32 2>")" in
@@ -474,6 +545,82 @@ if [ "$BAR_UP" = "1" ]; then
         *kept=1*made=0*gone=1*) ok "one widget left and took only its own tile" ;;
         *) fail "dropping a widget disturbed the rest: ${SHELF##*the widget shelf}" ;;
     esac
+
+    # The panel, which needs a window, a bus and a real click at once — the
+    # same three things the folder grid needs, and for the same reason: a
+    # menu put up over a DOCK window either gets its grab or it does not, and
+    # nothing short of a click can tell which.
+    if ! command -v xdotool >/dev/null; then
+        echo "  skip  xdotool is not installed, so no tile can be clicked"
+    else
+        call SetEnvironmentWidgets "Work" "['water', 'clock']" >/dev/null
+        sleep 2
+        GEOMETRY=$(xwininfo -root -children 2>/dev/null | grep '"Doca":' |
+            grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' | head -1)
+        BAR_WIDTH=$(grep -a "strut applied" "$WORK/shell.log" | tail -1 |
+            sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*width=\([0-9]*\).*/\1/')
+        if [ -z "$GEOMETRY" ] || [ -z "$BAR_WIDTH" ]; then
+            fail "the bar is not on screen to click a tile on"
+        else
+            WIN_W=${GEOMETRY%%x*}
+            REST=${GEOMETRY#*x}
+            WIN_H=${REST%%+*}
+            REST=${REST#*+}
+            WIN_X=${REST%%+*}
+            WIN_Y=${REST#*+}
+
+            # The window is wider than the bar by the room a magnified icon
+            # spreads into, at both ends — so the bar's own right edge is that
+            # much inside the window's. The bar's width is the one the strut
+            # was set to, which is the only place it is written down.
+            MARGIN=$(( (WIN_W - BAR_WIDTH) / 2 ))
+            # The clock is the last thing on the bar and a wide tile: two and
+            # a half of the configured 48px icons, inside the bar's own ten
+            # pixels of padding and the tile's two. Its middle is that far in
+            # from the bar's right edge.
+            AT_X=$(( WIN_X + MARGIN + BAR_WIDTH - 10 - 2 - 60 ))
+            # And the bar sits at the bottom of the window, so the tiles are a
+            # tile's half-height above the bottom edge plus that padding.
+            AT_Y=$(( WIN_Y + WIN_H - 10 - 24 ))
+
+            # Any doca-shell window that is neither the bar nor one of the
+            # small ones GTK keeps off screen. The panel is the only thing
+            # that can be.
+            panel_size() {
+                xwininfo -root -children 2>/dev/null \
+                    | grep '"doca-shell":' \
+                    | grep -v '"Doca":' \
+                    | grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' \
+                    | awk -F'x' '$1 >= 100 { print; exit }' \
+                    | cut -d+ -f1
+            }
+
+            xdotool mousemove "$AT_X" "$AT_Y"
+            sleep 0.4
+            xdotool click 1
+            PANEL=""
+            for _ in $(seq 1 20); do
+                PANEL=$(panel_size)
+                [ -n "$PANEL" ] && break
+                sleep 0.15
+            done
+            [ -n "$PANEL" ] && ok "a click on a tile opened its panel ($PANEL)" \
+                || fail "a click on a tile put nothing on screen"
+
+            # And it closes on Esc, which is the half a GtkPopover over a
+            # DOCK window does not reliably get.
+            xdotool key Escape
+            CLOSED=1
+            for _ in $(seq 1 20); do
+                [ -z "$(panel_size)" ] && break
+                CLOSED=0
+                sleep 0.15
+            done
+            [ -z "$(panel_size)" ] && ok "Esc closed the panel" \
+                || fail "the panel ignored Esc, so it never had the keyboard"
+            [ "$CLOSED" = "1" ] || true
+        fi
+    fi
 else
     fail "the bar never drew its widgets"
     tail -5 "$WORK/shell.log"
