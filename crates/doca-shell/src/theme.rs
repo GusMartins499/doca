@@ -5,6 +5,13 @@ pub const SYSTEM: &str = "system";
 
 const SHARED: &str = "
     window { background: transparent; }
+    /* The bar holds the room the icons sit in; what is *painted* around them
+       is #ground, laid over the window from the row's own drawing rather than
+       from this widget's allocation — see `ground.rs`. So the bar keeps the
+       padding, which is layout, and gives up the background, which is not.
+       The padding here must stay dock::BAR_PADDING: the bar's height and the
+       icon sizing are both worked out from that number. */
+    #bar { background: transparent; border: none; padding: 10px; }
     /* The padding here must stay dock::ITEM_PADDING: the icon size is worked
        out from that number, and a wider padding silently overflows the bar. */
     #item { border-radius: 10px; padding: 2px; }
@@ -18,11 +25,10 @@ const SHARED: &str = "
 ";
 
 const NATIVE: &str = "
-    #bar {
+    #ground {
         background: rgba(28,28,30,0.82);
         border-radius: 18px;
         border: 1px solid rgba(255,255,255,0.08);
-        padding: 10px;
     }
     #item:hover { background: rgba(255,255,255,0.10); }
     #widget:hover { background: rgba(255,255,255,0.10); }
@@ -40,11 +46,10 @@ const NATIVE: &str = "
 ";
 
 const MIDNIGHT: &str = "
-    #bar {
+    #ground {
         background: #0d0f14;
         border-radius: 10px;
         border: 1px solid #1f2430;
-        padding: 10px;
     }
     #item:hover { background: #1a1f2b; }
     #widget:hover { background: #1a1f2b; }
@@ -62,11 +67,10 @@ const MIDNIGHT: &str = "
 ";
 
 const PAPER: &str = "
-    #bar {
+    #ground {
         background: rgba(250,248,243,0.95);
         border-radius: 14px;
         border: 1px solid rgba(0,0,0,0.10);
-        padding: 10px;
     }
     #item:hover { background: rgba(0,0,0,0.06); }
     #widget:hover { background: rgba(0,0,0,0.06); }
@@ -91,18 +95,17 @@ const PAPER: &str = "
 ///
 /// `alpha()` is not decoration: the dock is a translucent window
 /// (`set_app_paintable(true)`), and `@theme_bg_color` on its own is opaque —
-/// a solid `#bar` would turn the dock into a grey slab with square corners
-/// showing through the rounding.
+/// a solid `#ground` would turn the dock into a grey slab with square
+/// corners showing through the rounding.
 ///
 /// A theme that defines none of these makes `load_from_data` fail *whole*,
 /// which would leave the bar unstyled rather than merely wrong-coloured.
 /// `Style::apply` falls back to `native` when that happens.
 const SYSTEM_CSS: &str = "
-    #bar {
+    #ground {
         background: alpha(@theme_bg_color, 0.82);
         border-radius: 18px;
         border: 1px solid alpha(@borders, 0.8);
-        padding: 10px;
     }
     #item:hover { background: alpha(@theme_fg_color, 0.10); }
     #widget:hover { background: alpha(@theme_fg_color, 0.10); }
@@ -293,6 +296,7 @@ mod tests {
     fn every_theme_styles_every_part_the_bar_draws() {
         let parts = [
             "#bar",
+            "#ground",
             "#item:hover",
             "#separator",
             "#indicator",
@@ -380,7 +384,7 @@ mod tests {
     #[test]
     fn the_bar_of_a_translucent_dock_is_never_painted_opaque() {
         // `@theme_bg_color` on its own is opaque, and the dock's window is
-        // paintable: a solid #bar shows its square corners through the
+        // paintable: a solid #ground shows its square corners through the
         // rounding. Every background in the system sheet goes through alpha().
         for line in css(SYSTEM).lines() {
             let line = line.trim();

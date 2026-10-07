@@ -1,5 +1,6 @@
 mod appearance;
 mod dock;
+mod ground;
 mod magnify;
 mod motion;
 mod row;
@@ -217,6 +218,10 @@ async fn drive(
     let label = tooltip::Tooltip::new();
     let icons = row::Row::new();
     icons.stage_on(&stage);
+    // The background goes on before the bar it belongs to, and follows the
+    // icons rather than the layout — see `ground.rs`.
+    let ground = Rc::new(ground::Ground::new());
+    ground.under(&stage, &bar, &icons);
     window.show_all();
     tracing::info!("connected to docad");
 
@@ -660,10 +665,13 @@ async fn rebuild(
 
     // The row is drawn on a surface wider than the place it holds, and the
     // surplus hangs off both ends. Off the left end and, with no tiles, off
-    // the right, it hangs into the window, where there is nothing to cover.
-    // The tiles are packed after the row, so when there are any the room on
-    // that side has to be held inside the bar instead — otherwise the
-    // drawing lies over the first tile and swallows the clicks meant for it.
+    // the right, it hangs into the window, where there is no widget to get in
+    // its way — the bar's background follows it out there rather than being
+    // covered by anything. The tiles are packed after the row, so when there
+    // are any the room on that side has to be held inside the bar instead:
+    // otherwise the drawing lies over the first tile and swallows the clicks
+    // meant for it. Which end the row's background measures from changes with
+    // it, and `ground::around` takes both from the bar.
     row.perch.set_margin_end(if widgets.is_empty() {
         0
     } else {
@@ -676,9 +684,11 @@ async fn rebuild(
     tiles.refresh(&widgets);
 
     // The bar is as wide as its contents ask; the window is that plus the room
-    // a magnified icon rises into and spreads into, which the bar never
-    // occupies. Keeping that room out of the bar is what makes the background
-    // hug the icons instead of reaching to both edges of the screen.
+    // a magnified icon rises into and spreads into, which the bar is never
+    // *laid out* over. Keeping that room out of the layout is what makes the
+    // background hug the icons instead of reaching to both edges of the
+    // screen; painting into it when the lens reaches out there is a separate
+    // matter and `ground.rs`'s.
     let margin = row.margin();
     let natural = dock::natural_size(bar);
     let (width, bar_height) = dock::clamp_to_screen(
@@ -748,6 +758,7 @@ fn on_a_display() {
     gtk::init().expect("no X display");
 
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
+    ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
     row::tests::a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports();
