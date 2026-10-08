@@ -107,6 +107,16 @@ struct Hide {
     /// When the bar was last told where to go.
     since: Rc<Cell<Instant>>,
     ticking: Rc<Cell<bool>>,
+    /// How many things that belong to the dock are open on top of it.
+    ///
+    /// A menu, a folder grid, a widget panel: while any of them is up the
+    /// dock is still being used, whatever the pointer is doing. Counted
+    /// rather than flagged because two can be open at once — a context menu
+    /// over a grid — and the first to close must not speak for the second.
+    holds: Rc<Cell<usize>>,
+    /// A hide that was asked for while something was open, kept for when the
+    /// last of them closes.
+    held_back: Rc<Cell<bool>>,
     /// A move the pointer has asked for and not yet held long enough to get.
     ///
     /// One at a time, and cancelled by the opposite asking: a pointer that
@@ -126,6 +136,8 @@ impl Default for Hide {
             // Far enough back that the bar is already wherever it was sent.
             since: Rc::new(Cell::new(Instant::now() - motion::SLIDE)),
             ticking: Rc::new(Cell::new(false)),
+            holds: Rc::new(Cell::new(0)),
+            held_back: Rc::new(Cell::new(false)),
             intent: Rc::new(RefCell::new(None)),
         }
     }
@@ -141,6 +153,7 @@ impl Hide {
             // A move the pointer asked for a moment ago must not land on a
             // bar that has since been told to stay put.
             self.forget_intent();
+            self.held_back.set(false);
             self.shown.set(true);
             self.settle();
             window.move_(x, shown_y);
@@ -193,6 +206,13 @@ impl Hide {
         if !self.enabled.get() || self.shown.get() == to_shown {
             return;
         }
+        if !to_shown && self.holds.get() > 0 {
+            // Not refused, deferred: the pointer did leave, and when the last
+            // thing in the way closes the bar should still go.
+            self.held_back.set(true);
+            return;
+        }
+
         let hide = self.clone();
         let window = window.clone();
         let waiting = glib::timeout_add_local_once(motion::intent_delay(to_shown), move || {
@@ -200,6 +220,35 @@ impl Hide {
             hide.slide(&window, to_shown);
         });
         self.intent.replace(Some(waiting));
+    }
+
+    /// Keep the bar where it is for as long as this menu is up.
+    ///
+    /// Hiding under an open folder grid leaves the grid floating over
+    /// nothing, and closing it then drops the pointer onto a desktop nobody
+    /// aimed at. The menu is the dock still being used, so the dock stays.
+    fn holds_for(&self, window: &gtk::Window, menu: &gtk::Menu) {
+        let holding = self.clone();
+        menu.connect_map(move |_| holding.hold());
+        let releasing = self.clone();
+        let window = window.clone();
+        menu.connect_unmap(move |_| releasing.release(&window));
+    }
+
+    fn hold(&self) {
+        self.holds.set(self.holds.get() + 1);
+        // Whatever the pointer had asked for, it asked before this opened.
+        self.forget_intent();
+    }
+
+    /// One thing fewer in the way. The hide that was waiting on it, if any,
+    /// starts over from here rather than landing the moment the menu goes —
+    /// the pointer is usually still on the dock, having just used it.
+    fn release(&self, window: &gtk::Window) {
+        self.holds.set(self.holds.get().saturating_sub(1));
+        if self.holds.get() == 0 && self.held_back.replace(false) {
+            self.intend(window, false);
+        }
     }
 
     /// Drop a move that was asked for and not yet made.
@@ -291,7 +340,14 @@ async fn drive(
     });
 
     icons.serve(proxy.clone());
-    wire(&icons, &label, proxy.clone(), stack::Remembered::default());
+    wire(
+        &icons,
+        &label,
+        proxy.clone(),
+        stack::Remembered::default(),
+        window.clone(),
+        hide.clone(),
+    );
 
     let chrome = Chrome {
         style: Style { css, applied },
@@ -408,6 +464,8 @@ fn wire(
     label: &tooltip::Tooltip,
     proxy: Rc<DocaProxy<'static>>,
     folders: stack::Remembered,
+    window: gtk::Window,
+    hide: Hide,
 ) {
     let naming = icons.clone();
     let naming_label = label.clone();
@@ -443,6 +501,7 @@ fn wire(
                 // and nothing on the drawing path may wait on it.
                 let expected = folders.of(&item.id);
                 let grid = stack::opening(expected);
+                hide.holds_for(&window, &grid);
                 // One closure opens the grid and, if what arrives does not fit
                 // what it was opened for, opens it again. It anchors on the
                 // icon rather than on the click: a grid that has to come back
@@ -477,10 +536,12 @@ fn wire(
                 });
             }
             3 => {
+                let (holding, under) = (hide.clone(), window.clone());
                 glib::spawn_future_local(async move {
                     let windows = proxy.item_windows(&item.id).await.unwrap_or_default();
-                    dock::context_menu(&item, &windows, proxy.clone())
-                        .popup_at_pointer(Some(&trigger));
+                    let menu = dock::context_menu(&item, &windows, proxy.clone());
+                    holding.holds_for(&under, &menu);
+                    menu.popup_at_pointer(Some(&trigger));
                 });
             }
             _ => {}
@@ -635,6 +696,7 @@ fn expanding(
     Rc::new(move |id: &str, over: &gtk::Widget| {
         let expected = panels.of(id);
         let menu = panel::opening(expected);
+        hide.holds_for(&window, &menu);
 
         // Over the tile that asked, and the same way every time it is
         // reopened — including the reopen `panel::fill` does when the panel
@@ -949,6 +1011,8 @@ fn on_a_display() {
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
     hide_tests::a_pointer_that_stays_is_an_arrival();
     hide_tests::a_hand_that_overshoots_and_comes_back_keeps_the_bar();
+    hide_tests::an_open_menu_keeps_the_bar_where_it_is();
+    hide_tests::the_first_menu_to_close_does_not_release_the_second();
     hide_tests::switching_auto_hide_off_drops_a_move_nobody_wants_any_more();
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     fit::tests::the_model_never_promises_room_the_bar_does_not_have();
@@ -1142,6 +1206,87 @@ pub mod hide_tests {
             hide.shown.get(),
             "a moment outside the bar was enough to lose it"
         );
+        window.close();
+    }
+
+    /// A menu that belongs to the dock keeps the dock, however long the
+    /// pointer has been off it.
+    ///
+    /// Right-clicking an icon moves the pointer onto the menu, which is off
+    /// the bar: without this the bar slides away under the menu the click
+    /// just opened, and closing the menu drops the pointer onto a desktop
+    /// nobody aimed at.
+    pub fn an_open_menu_keeps_the_bar_where_it_is() {
+        let (window, hide) = hidden_bar();
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+        assert!(hide.shown.get());
+
+        let menu = gtk::Menu::new();
+        menu.add(&gtk::MenuItem::with_label("something"));
+        menu.show_all();
+        hide.holds_for(&window, &menu);
+        // Against the window, not the pointer: `popup_at_pointer` reads the
+        // pointer out of an event and a test has none to give it, so the menu
+        // never maps and nothing is ever held.
+        menu.popup_at_widget(
+            &window,
+            gdk::Gravity::NorthWest,
+            gdk::Gravity::SouthWest,
+            None,
+        );
+        waiting(std::time::Duration::from_millis(80));
+        assert!(menu.is_visible(), "the menu under test never opened");
+
+        hide.intend(&window, false);
+        waiting(motion::HIDE_AFTER * 2);
+
+        assert!(
+            hide.shown.get(),
+            "the bar hid itself under a menu that was still open"
+        );
+
+        menu.popdown();
+        waiting(motion::HIDE_AFTER * 2);
+        assert!(
+            !hide.shown.get(),
+            "the bar never went once the menu that was holding it closed"
+        );
+        window.close();
+    }
+
+    /// Two at once — a context menu over a folder grid — and the first to
+    /// close must not speak for the second.
+    pub fn the_first_menu_to_close_does_not_release_the_second() {
+        let (window, hide) = hidden_bar();
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+
+        let (first, second) = (gtk::Menu::new(), gtk::Menu::new());
+        for menu in [&first, &second] {
+            menu.add(&gtk::MenuItem::with_label("something"));
+            menu.show_all();
+            hide.holds_for(&window, menu);
+            menu.popup_at_widget(
+                &window,
+                gdk::Gravity::NorthWest,
+                gdk::Gravity::SouthWest,
+                None,
+            );
+        }
+        waiting(std::time::Duration::from_millis(80));
+        hide.intend(&window, false);
+
+        first.popdown();
+        waiting(motion::HIDE_AFTER * 2);
+
+        assert!(
+            hide.shown.get(),
+            "one menu closing let the bar go while another was still open"
+        );
+        second.popdown();
+        waiting(motion::HIDE_AFTER * 2);
+        assert!(!hide.shown.get(), "the bar stayed after everything closed");
         window.close();
     }
 
