@@ -55,6 +55,85 @@ pub fn natural_size(bar: &gtk::Box) -> (i32, i32) {
     (width, height)
 }
 
+/// The way to the apps the bar had no room for.
+///
+/// The last rung of the ladder in `fit`, and the only one that takes
+/// something off the row — so it has to put it somewhere reachable. A dock
+/// that simply stops at the edge of the screen loses the apps nobody chose to
+/// lose, which is the behaviour this replaced.
+///
+/// It sits in a slot the width of an icon, because `fit::fits` reserved one
+/// for it when it worked out how many icons there was room for: the count it
+/// measures is always the icons plus this.
+pub fn overflow_control(more: usize, icon_size: i32) -> gtk::EventBox {
+    let label = gtk::Label::new(Some("\u{00bb}"));
+    label.set_widget_name("overflow");
+
+    let control = gtk::EventBox::new();
+    control.set_widget_name("item");
+    control.add(&label);
+    control.set_size_request(icon_size + ITEM_PADDING * 2, -1);
+    control.set_tooltip_text(Some(&format!(
+        "{more} more {}",
+        if more == 1 { "app" } else { "apps" }
+    )));
+    control
+}
+
+/// Those apps, in the grid the folder stacks already use.
+///
+/// The same shape and the same arithmetic — `stack::columns_for` and
+/// `stack::grid_position` — because it is the same question: a handful of
+/// things that have to be picked from, over a bar, without a window. What
+/// differs is only what a cell holds and what choosing one does.
+///
+/// What choosing one does arrives as a closure rather than as the bus proxy,
+/// for the reason the folder grid and the widget tiles take one: a grid that
+/// cannot be built without a daemon on the other end cannot be checked
+/// without one either.
+pub fn overflow_grid(
+    items: &[DockItem],
+    icon_size: i32,
+    activate: &crate::stack::Open,
+) -> gtk::Menu {
+    let menu = gtk::Menu::new();
+    menu.set_reserve_toggle_size(false);
+
+    let columns = crate::stack::columns_for(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let picture = gtk::Image::new();
+        if let Some(pixbuf) = load_pixbuf(&item.icon, icon_size) {
+            picture.set_from_pixbuf(Some(&pixbuf));
+        }
+        column.add(&picture);
+
+        let name = gtk::Label::new(Some(&elide(&item.name, 14)));
+        name.set_max_width_chars(14);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        column.add(&name);
+
+        let cell = gtk::MenuItem::new();
+        cell.add(&column);
+        cell.set_tooltip_text(Some(&item.name));
+
+        let id = item.id.clone();
+        let activate = activate.clone();
+        cell.connect_activate(move |_| activate(&id));
+
+        let (left, top) = crate::stack::grid_position(index, columns);
+        menu.attach(
+            &cell,
+            left as u32,
+            left as u32 + 1,
+            top as u32,
+            top as u32 + 1,
+        );
+    }
+    menu.show_all();
+    menu
+}
+
 pub fn scaled_from_file(path: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
     gdk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, size, size, true).ok()
 }
@@ -315,6 +394,59 @@ pub mod tests {
     }
 
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    fn app(id: &str) -> DockItem {
+        DockItem {
+            id: id.into(),
+            name: format!("The {id}"),
+            icon: "application-x-executable".into(),
+            pinned: true,
+            windows: Vec::new(),
+            active: false,
+        }
+    }
+
+    /// Every app that came off the row is in the grid, and choosing one asks
+    /// for that one.
+    ///
+    /// The whole point of the last rung: what does not fit is put somewhere
+    /// reachable rather than cut off the end. A grid that quietly held six of
+    /// the eight would be the same loss with more steps.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn every_app_that_did_not_fit_is_in_the_grid() {
+        let over: Vec<DockItem> = (0..8).map(|at| app(&format!("app{at}"))).collect();
+        let chosen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let noting = chosen.clone();
+        let activate: crate::stack::Open =
+            Rc::new(move |id: &str| noting.borrow_mut().push(id.to_string()));
+
+        let grid = overflow_grid(&over, ICON_SIZE, &activate);
+
+        let cells = grid.children();
+        assert_eq!(cells.len(), over.len(), "the grid lost an app on the way");
+
+        for cell in &cells {
+            if let Some(item) = cell.downcast_ref::<gtk::MenuItem>() {
+                item.emit_activate();
+            }
+        }
+        assert_eq!(
+            *chosen.borrow(),
+            over.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            "choosing a cell asked for the wrong app"
+        );
+    }
+
+    /// And the control says how many there are, because a bare chevron is a
+    /// thing you have to click to find out about.
+    ///
+    /// Run by `crate::on_a_display`: it builds a widget, and a widget needs a
+    /// GTK that has been started.
+    pub fn the_control_says_how_many_it_is_hiding() {
+        assert!(overflow_control(1, 48).tooltip_text().unwrap().contains("1 more app"));
+        assert!(overflow_control(8, 48).tooltip_text().unwrap().contains("8 more apps"));
+    }
+
     pub fn measuring_a_bar_twice_gives_the_same_answer_both_times() {
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, ITEM_SPACING);
         for _ in 0..8 {
