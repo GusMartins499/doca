@@ -107,6 +107,12 @@ struct Hide {
     /// When the bar was last told where to go.
     since: Rc<Cell<Instant>>,
     ticking: Rc<Cell<bool>>,
+    /// A move the pointer has asked for and not yet held long enough to get.
+    ///
+    /// One at a time, and cancelled by the opposite asking: a pointer that
+    /// crosses the edge and leaves again has asked for both, and should get
+    /// neither.
+    intent: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl Default for Hide {
@@ -120,6 +126,7 @@ impl Default for Hide {
             // Far enough back that the bar is already wherever it was sent.
             since: Rc::new(Cell::new(Instant::now() - motion::SLIDE)),
             ticking: Rc::new(Cell::new(false)),
+            intent: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -131,6 +138,9 @@ impl Hide {
         self.height.set(height);
         let was_enabled = self.enabled.replace(enabled);
         if !enabled {
+            // A move the pointer asked for a moment ago must not land on a
+            // bar that has since been told to stay put.
+            self.forget_intent();
             self.shown.set(true);
             self.settle();
             window.move_(x, shown_y);
@@ -167,6 +177,36 @@ impl Hide {
     /// Declare the slide over, wherever it was going.
     fn settle(&self) {
         self.since.set(Instant::now() - motion::SLIDE);
+    }
+
+    /// Ask for the bar, or ask for it to go, and wait to be sure.
+    ///
+    /// The pointer crossing the screen edge is not the same event as the user
+    /// wanting the dock: the edge is also the way to the bottom of a window
+    /// and to nothing at all. So an arrival is held for `motion::REVEAL_AFTER`
+    /// before it counts, a departure for the longer `motion::HIDE_AFTER`, and
+    /// either one cancels the other outright — a pointer that passes through
+    /// asks for both and gets neither, which is the whole of what "intent"
+    /// means here.
+    fn intend(&self, window: &gtk::Window, to_shown: bool) {
+        self.forget_intent();
+        if !self.enabled.get() || self.shown.get() == to_shown {
+            return;
+        }
+        let hide = self.clone();
+        let window = window.clone();
+        let waiting = glib::timeout_add_local_once(motion::intent_delay(to_shown), move || {
+            hide.intent.replace(None);
+            hide.slide(&window, to_shown);
+        });
+        self.intent.replace(Some(waiting));
+    }
+
+    /// Drop a move that was asked for and not yet made.
+    fn forget_intent(&self) {
+        if let Some(waiting) = self.intent.replace(None) {
+            waiting.remove();
+        }
     }
 
     /// Send the bar up or down, from wherever it happens to be.
@@ -240,13 +280,13 @@ async fn drive(
             return glib::Propagation::Proceed;
         }
         leaving.aim(None);
-        hiding.slide(window, false);
+        hiding.intend(window, false);
         hiding_label.hide();
         glib::Propagation::Proceed
     });
     let showing = hide.clone();
     window.connect_enter_notify_event(move |window, _| {
-        showing.slide(window, true);
+        showing.intend(window, true);
         glib::Propagation::Proceed
     });
 
@@ -906,6 +946,10 @@ async fn rebuild(
 fn on_a_display() {
     gtk::init().expect("no X display");
 
+    hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
+    hide_tests::a_pointer_that_stays_is_an_arrival();
+    hide_tests::a_hand_that_overshoots_and_comes_back_keeps_the_bar();
+    hide_tests::switching_auto_hide_off_drops_a_move_nobody_wants_any_more();
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     fit::tests::the_model_never_promises_room_the_bar_does_not_have();
     ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();
@@ -1012,4 +1056,110 @@ fn the_system_sheet_loads_against_a_real_gtk_theme() {
         missing.is_empty(),
         "this GTK theme defines none of {missing:?}, so system would fall back here"
     );
+}
+
+/// The auto-hide's own checks, which need a window and the main loop.
+#[cfg(test)]
+pub mod hide_tests {
+    use super::*;
+
+    /// Let glib get on with whatever is due, for about this long.
+    fn waiting(span: std::time::Duration) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn hidden_bar() -> (gtk::Window, Hide) {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(400, 60);
+        let hide = Hide::default();
+        // Switched on, which leaves the bar sliding away, and then let it
+        // arrive so the test starts from a bar that is really hidden.
+        hide.place(&window, 0, 500, 60, true);
+        hide.settle();
+        assert!(!hide.shown.get(), "the bar did not go away when asked");
+        (window, hide)
+    }
+
+    /// The whole of the item: a pointer that crosses the edge and keeps going
+    /// has asked for the bar and asked for it to go, and must get neither.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_pointer_only_passing_through_does_not_summon_the_bar() {
+        let (window, hide) = hidden_bar();
+
+        hide.intend(&window, true);
+        // The loop runs here, which is the point: asked for and cancelled in
+        // the same breath would pass with no wait at all. Half of the wait is
+        // long enough for a reveal that was never going to wait to land.
+        waiting(motion::REVEAL_AFTER / 2);
+        hide.intend(&window, false);
+        waiting(motion::REVEAL_AFTER * 2);
+
+        assert!(
+            !hide.shown.get(),
+            "the bar came out for a pointer that had already left"
+        );
+        window.close();
+    }
+
+    /// And the other way, which is the one that would make a dock useless:
+    /// held, the arrival does count.
+    pub fn a_pointer_that_stays_is_an_arrival() {
+        let (window, hide) = hidden_bar();
+
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+
+        assert!(hide.shown.get(), "the bar never came out for a pointer that waited");
+        window.close();
+    }
+
+    /// Leaving is held for longer than arriving, so a hand that overshoots on
+    /// the way to an icon and comes straight back keeps the bar.
+    pub fn a_hand_that_overshoots_and_comes_back_keeps_the_bar() {
+        let (window, hide) = hidden_bar();
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+        assert!(hide.shown.get());
+
+        hide.intend(&window, false);
+        waiting(motion::REVEAL_AFTER);
+        assert!(
+            hide.shown.get(),
+            "the bar left on the first frame the pointer was outside it"
+        );
+
+        hide.intend(&window, true);
+        waiting(motion::HIDE_AFTER);
+
+        assert!(
+            hide.shown.get(),
+            "a moment outside the bar was enough to lose it"
+        );
+        window.close();
+    }
+
+    /// Turning auto-hide off while the pointer's departure is still being
+    /// waited on must not leave that departure to land later.
+    pub fn switching_auto_hide_off_drops_a_move_nobody_wants_any_more() {
+        let (window, hide) = hidden_bar();
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+        hide.intend(&window, false);
+
+        hide.place(&window, 0, 500, 60, false);
+        waiting(motion::HIDE_AFTER * 2);
+
+        assert!(
+            hide.shown.get(),
+            "the bar hid itself after auto-hide was switched off"
+        );
+        window.close();
+    }
 }
