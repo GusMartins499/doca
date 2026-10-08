@@ -486,6 +486,56 @@ pub mod tests {
         }
     }
 
+    /// Cancelling the panel closes it and lets go of the grab — which is
+    /// what Escape and a click outside both do.
+    ///
+    /// Both come free with a `GtkMenu` and neither was ever checked, which is
+    /// the worst way for a thing to be true: free behaviour is exactly what
+    /// goes missing in a change of surface, and nothing here would have said
+    /// so. The click outside is not simulated — there is no pointer to click
+    /// with — so what is asserted is the mechanism underneath it: a menu that
+    /// holds the pointer and keyboard grab is a menu that dismisses on a
+    /// press anywhere else, and a panel that stopped holding it would fail
+    /// here rather than in somebody's hand.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_panel_closes_on_escape_and_holds_the_grab_that_dismisses_it() {
+        let rows = rows_for(&water(3, 8));
+        let panel = opening(rows.len());
+        let window = a_window();
+        let (show, _) = against(&window);
+        show(&panel);
+        settle();
+        assert!(panel.is_visible(), "the panel never opened");
+
+        assert_eq!(
+            gtk::grab_get_current().map(|held| held.type_()),
+            Some(panel.type_()),
+            "the panel is up without the grab, so a click outside would not close it"
+        );
+
+        // `cancel` is the keybinding signal `GtkMenuShell` binds Escape to,
+        // so firing it is firing what Escape fires. The key itself is not
+        // synthesised: a menu under a grab takes keys through the grab rather
+        // than through its own window, and `gtk_test_widget_send_key` posts
+        // into the window — the event arrives nowhere and the test passes or
+        // fails on the harness instead of on the panel. That Escape really
+        // reaches this signal over a window of type DOCK was measured with a
+        // real X key press before this surface was chosen.
+        panel.cancel();
+        settle();
+
+        assert!(!panel.is_visible(), "Escape left the panel on screen");
+        assert!(
+            gtk::grab_get_current().is_none(),
+            "the panel closed but kept the grab, which freezes the bar under it"
+        );
+
+        window.close();
+        settle();
+    }
+
+
     /// The whole of the item: the panel is up before the daemon has answered.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
