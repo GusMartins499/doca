@@ -7,6 +7,31 @@ pub const SLIDE: Duration = Duration::from_millis(160);
 #[cfg(test)]
 pub const FRAME: Duration = Duration::from_millis(16);
 pub const PEEK: i32 = 2;
+
+/// How long the pointer has to stay at the edge before the bar comes up.
+///
+/// The screen edge is also the way to the bottom of a window, to a scrollbar,
+/// to nothing at all. A dock that jumps out at every crossing is one you learn
+/// to steer around, so the crossing has to be *held* to count as an arrival.
+pub const REVEAL_AFTER: Duration = Duration::from_millis(120);
+
+/// And how long the pointer has to be gone before the bar goes away.
+///
+/// Longer than the reveal, on purpose and not by symmetry. Leaving by accident
+/// — a hand that overshoots on the way to an icon, or crosses a gap between
+/// two of them — must not cost you the bar; arriving by accident must not
+/// summon it. The two mistakes are not the same size, so neither are the two
+/// waits.
+pub const HIDE_AFTER: Duration = Duration::from_millis(400);
+
+/// How long the bar waits before believing where the pointer went.
+pub fn intent_delay(to_shown: bool) -> Duration {
+    if to_shown {
+        REVEAL_AFTER
+    } else {
+        HIDE_AFTER
+    }
+}
 pub const LAUNCH: Duration = Duration::from_millis(700);
 pub const LAUNCH_SWELL: f64 = 0.28;
 pub const LAUNCH_PULSES: f64 = 2.0;
@@ -177,6 +202,19 @@ mod tests {
 
     const SHOWN: i32 = 900;
     const HEIGHT: i32 = 84;
+
+    /// The two waits are not the same, and which is longer is the whole of
+    /// the policy: arriving by accident must not summon the bar, and leaving
+    /// by accident must not cost it. The second mistake is the expensive one.
+    #[test]
+    fn leaving_is_believed_more_slowly_than_arriving() {
+        assert!(intent_delay(false) > intent_delay(true));
+        assert!(!intent_delay(true).is_zero(), "an arrival is believed at once");
+        assert!(
+            intent_delay(true) < SLIDE * 2,
+            "the bar takes longer to decide than it takes to move, which reads as lag"
+        );
+    }
 
     #[test]
     fn a_hidden_bar_leaves_a_sliver_on_screen_to_be_pointed_at() {
