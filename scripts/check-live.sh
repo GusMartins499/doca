@@ -219,6 +219,15 @@ water_is 1000 1500 250 \
     && ok "a smaller bottle keeps what was already drunk" \
     || fail "the bottle setting did not land: $(call ListWidgets)"
 
+# The week the panel draws comes over the wire with the count, seven places
+# whatever the history has in it — a machine that was shut on Tuesday still
+# has a Tuesday in its week, and it is a zero rather than a missing bar.
+case "$(call ListWidgets)" in
+    *"[uint32 0, 0, 0, 0, 0, 0, 1000]"*)
+        ok "the week arrives with seven places and today in the last one" ;;
+    *) fail "the week did not come back: $(call ListWidgets)" ;;
+esac
+
 # Each widget says what shape its state takes, so a reader can have a drawer
 # per shape instead of one column of labels for all of them. Checked on the
 # wire because the union is spelled by hand — a name beside a variant — and a

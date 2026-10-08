@@ -149,6 +149,12 @@ pub struct Water {
     /// what it will add, and a panel that had to ask the daemon for that
     /// would be a D-Bus call on the way to drawing a label.
     pub bottle: u32,
+    /// Millilitres on each of the last seven days, oldest first, today last.
+    ///
+    /// Seven numbers and not seven dates: the bar draws them in order against
+    /// the goal, and a date it would only use to put them in the order they
+    /// already arrive in is a field free to disagree with that order.
+    pub week: Vec<u32>,
 }
 
 /// How much room a tile asks for on the bar: about one icon, or about two
@@ -702,7 +708,7 @@ mod tests {
             (body_kind::SIMPLE, simple()),
             (
                 body_kind::WATER,
-                Body::Water(Water { drunk: 3, goal: 8, bottle: 500 }),
+                Body::Water(Water { drunk: 3, goal: 8, bottle: 500, week: vec![0; 7] }),
             ),
         ]
     }
@@ -767,7 +773,7 @@ mod tests {
     /// And a payload that is not the shape its name claims.
     #[test]
     fn a_payload_that_does_not_match_its_name_is_refused() {
-        let water = WidgetState::new("water", Body::Water(Water { drunk: 1, goal: 8, bottle: 500 }));
+        let water = WidgetState::new("water", Body::Water(Water { drunk: 1, goal: 8, bottle: 500, week: vec![0; 7] }));
         let lying = WidgetState {
             id: water.id.clone(),
             kind: body_kind::SIMPLE.to_string(),

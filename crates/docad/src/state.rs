@@ -45,13 +45,61 @@ pub struct State {
     pub day: i64,
     #[serde(default)]
     pub water: WaterState,
+    /// The days that have ended, oldest first.
+    ///
+    /// **Not day-scoped**, which is why `forget_the_day` leaves it alone: it
+    /// is the one thing a new day adds to rather than clears.
+    #[serde(default)]
+    pub closed: Vec<Closed>,
 }
+
+/// A day that ended, and what it came to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Closed {
+    /// Days since the epoch where the user is, the same clock as [`State::day`].
+    pub day: i64,
+    pub ml: u32,
+    /// What that day was being measured against, kept *with* it.
+    ///
+    /// A goal raised in March must not redraw February: a bar is a share of
+    /// what was aimed at on the day, and asking the config what the goal is
+    /// now would rewrite every day in the history whenever somebody changed
+    /// their mind.
+    ///
+    /// Named for what it is rather than `goal`, and that is not decoration:
+    /// `goal` is what the user *sets*, and a leaf of that name in this file
+    /// would be a setting living where the accumulation lives — which
+    /// `nothing_the_day_accumulated_is_also_something_the_user_sets` refuses,
+    /// and was right to.
+    pub aimed_at: u32,
+}
+
+/// How many ended days are kept.
+///
+/// The panel wants a week, so why a month: because the history is **sparse**.
+/// A day the dock never ran leaves no entry at all, so a cap of seven entries
+/// would answer "the last seven days it ran", which on a laptop that spent a
+/// week shut is not a week. The cap has to be on entries while the question
+/// is about calendar days, and a month of them makes a seven-day window
+/// always answerable. Thirty-one rows of three numbers is under a kilobyte,
+/// and bounded, which is the other half of the point.
+pub const KEPT_DAYS: usize = 31;
+
+/// How many days the week shown in the panel covers, today included.
+pub const WEEK: usize = 7;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaterState {
     /// Millilitres drunk today.
     #[serde(default)]
     pub ml: u32,
+    /// What today is being measured against, for the day to be closed with.
+    ///
+    /// Beside the count rather than only in the config, so that the day can be
+    /// closed into the history without asking what the goal is *now*. Named
+    /// `aimed_at` for the reason [`Closed::aimed_at`] gives.
+    #[serde(default)]
+    pub aimed_at: u32,
 }
 
 impl State {
@@ -66,8 +114,45 @@ impl State {
     ///
     /// Anything that is *not* day-scoped — a total kept for ever, a streak —
     /// goes in a field this leaves alone, and the comment above it says so.
-    fn forget_the_day(&mut self) {
+    fn forget_the_day(&mut self, ended: i64) {
+        // The day goes into the history on its way out, which is where the
+        // week in the panel comes from. A day that never had anything in it
+        // is not a day worth a row.
+        if ended > 0 && self.water.ml > 0 {
+            self.closed.push(Closed {
+                day: ended,
+                ml: self.water.ml,
+                aimed_at: self.water.aimed_at,
+            });
+            self.closed.sort_by_key(|closed| closed.day);
+            self.closed.dedup_by_key(|closed| closed.day);
+            let over = self.closed.len().saturating_sub(KEPT_DAYS);
+            self.closed.drain(..over);
+        }
         self.water = WaterState::default();
+    }
+
+    /// What was drunk on each of the last [`WEEK`] days, oldest first, today
+    /// last.
+    ///
+    /// Days the dock never saw come back as zero rather than being left out:
+    /// a week of bars has seven places whether or not the machine was on, and
+    /// a gap drawn as a gap is the truth. Today is read from the running
+    /// count, not from the history, because today has not ended.
+    pub fn week_to(&self, today: i64) -> Vec<u32> {
+        let first = today - (WEEK as i64 - 1);
+        (first..=today)
+            .map(|day| {
+                if day == today {
+                    return self.water.ml;
+                }
+                self.closed
+                    .iter()
+                    .find(|closed| closed.day == day)
+                    .map(|closed| closed.ml)
+                    .unwrap_or(0)
+            })
+            .collect()
     }
 
     /// Carry this state onto `today`, dropping whatever belonged to the day
@@ -86,8 +171,9 @@ impl State {
         let mut as_if_nothing_was_dropped = self.clone();
         as_if_nothing_was_dropped.day = today;
 
+        let ended = self.day;
         self.day = today;
-        self.forget_the_day();
+        self.forget_the_day(ended);
         *self != as_if_nothing_was_dropped
     }
 }
@@ -249,10 +335,21 @@ mod tests {
 
     const TODAY: i64 = 20_735;
 
-    fn water(day: i64, glasses: u32) -> State {
+    fn water(day: i64, ml: u32) -> State {
         State {
             day,
-            water: WaterState { ml: glasses },
+            water: WaterState { ml, aimed_at: 0 },
+            closed: Vec::new(),
+        }
+    }
+
+    /// A day that knows what it is aiming at, which is what makes it worth
+    /// filing when it ends.
+    fn aiming(day: i64, ml: u32, at: u32) -> State {
+        State {
+            day,
+            water: WaterState { ml, aimed_at: at },
+            closed: Vec::new(),
         }
     }
 
@@ -289,11 +386,20 @@ mod tests {
     fn the_day_turning_under_a_running_daemon_puts_yesterday_away() {
         let scratch = Scratch::new("awake");
         let mut store = Store::open_at(&scratch.file(), TODAY);
-        store.put(water(TODAY, 6));
+        store.put(aiming(TODAY, 1500, 2000));
 
         let rolled = store.roll_to(TODAY + 1).clone();
 
-        assert_eq!(rolled, water(TODAY + 1, 0));
+        assert_eq!(
+            rolled.water,
+            WaterState::default(),
+            "today started from yesterday's count"
+        );
+        assert_eq!(
+            rolled.closed,
+            vec![Closed { day: TODAY, ml: 1500, aimed_at: 2000 }],
+            "yesterday was dropped instead of being filed"
+        );
         assert_eq!(
             Store::open_at(&scratch.file(), TODAY + 1).state().water.ml,
             0,
@@ -318,6 +424,98 @@ mod tests {
             "a state that counted nothing reported losing something"
         );
         assert_eq!(fresh.day, TODAY, "the day was not written down");
+    }
+
+    /// A day with nothing in it is not a day worth a row — a week of bars
+    /// should have gaps where there were gaps, not rows of zero padding the
+    /// file out.
+    #[test]
+    fn a_day_that_counted_nothing_is_not_filed() {
+        let mut state = aiming(TODAY, 0, 2000);
+
+        state.roll_to(TODAY + 1);
+
+        assert!(state.closed.is_empty());
+    }
+
+    /// The history is the one thing a new day adds to rather than clears,
+    /// and `forget_the_day` has to go on leaving it alone as counters are
+    /// added beside it.
+    #[test]
+    fn the_history_outlives_every_day_that_is_forgotten() {
+        let mut state = aiming(TODAY, 500, 2000);
+
+        for day in 1..=5i64 {
+            state.roll_to(TODAY + day);
+            state.water = WaterState { ml: 100 * day as u32, aimed_at: 2000 };
+        }
+
+        assert_eq!(state.closed.len(), 5);
+        assert_eq!(state.closed.first().map(|first| first.day), Some(TODAY));
+        assert_eq!(state.closed.last().map(|last| last.ml), Some(400));
+    }
+
+    /// The file cannot grow for ever, and what falls off the end is the
+    /// oldest — a month of days, which is what makes a seven-day window
+    /// answerable even on a machine that spent a fortnight shut.
+    #[test]
+    fn the_history_is_capped_and_it_is_the_oldest_that_goes() {
+        let mut state = aiming(TODAY, 1, 2000);
+
+        for day in 1..=(KEPT_DAYS as i64 + 10) {
+            state.roll_to(TODAY + day);
+            state.water = WaterState { ml: day as u32 + 1, aimed_at: 2000 };
+        }
+
+        assert_eq!(state.closed.len(), KEPT_DAYS);
+        assert_eq!(
+            state.closed.first().map(|first| first.day),
+            Some(TODAY + 10),
+            "the newest were dropped instead of the oldest"
+        );
+    }
+
+    /// A machine that was shut for a week turns the day once, not seven
+    /// times, so the days in between were never seen and are not invented.
+    #[test]
+    fn days_the_dock_never_saw_are_not_filed_as_zero() {
+        let mut state = aiming(TODAY, 1200, 2000);
+
+        state.roll_to(TODAY + 7);
+
+        assert_eq!(state.closed.len(), 1, "{:?}", state.closed);
+        assert_eq!(state.closed[0].day, TODAY);
+    }
+
+    /// And the other side of that: the week asks for seven *calendar* days,
+    /// so the days with no row come back as zero rather than shifting the
+    /// ones that have rows into the wrong place.
+    #[test]
+    fn the_week_has_seven_places_whatever_the_history_has() {
+        let mut state = aiming(TODAY, 0, 2000);
+        state.closed = vec![
+            Closed { day: TODAY - 6, ml: 2000, aimed_at: 2000 },
+            Closed { day: TODAY - 4, ml: 500, aimed_at: 2000 },
+            // Older than the window, and so none of its business.
+            Closed { day: TODAY - 20, ml: 1750, aimed_at: 2000 },
+        ];
+        state.water = WaterState { ml: 750, aimed_at: 2000 };
+
+        let week = state.week_to(TODAY);
+
+        assert_eq!(week.len(), WEEK);
+        assert_eq!(week, vec![2000, 0, 500, 0, 0, 0, 750]);
+    }
+
+    /// Today is read from the running count and not from the history,
+    /// because today has not ended — a press has to show in the last bar
+    /// now, not at midnight.
+    #[test]
+    fn the_last_place_in_the_week_is_today_as_it_stands() {
+        let mut state = aiming(TODAY, 250, 2000);
+        state.closed = vec![Closed { day: TODAY, ml: 9999, aimed_at: 2000 }];
+
+        assert_eq!(state.week_to(TODAY).last(), Some(&250));
     }
 
     #[test]

@@ -563,7 +563,7 @@ pub mod tests {
     fn water(drunk: u32, goal: u32) -> WidgetState {
         WidgetState::new(
             "water",
-            Body::Water(Water { drunk, goal, bottle: 500 }),
+            Body::Water(Water { drunk, goal, bottle: 500, week: vec![0; 7] }),
         )
     }
 

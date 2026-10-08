@@ -13,6 +13,13 @@ pub struct Water {
     drunk: u32,
     /// What one go adds — the bottle, not a glass.
     bottle: u32,
+    /// The last seven days, oldest first, today last.
+    ///
+    /// Carried rather than worked out at poll time because the days that have
+    /// ended live in the state file, and the widget is handed that once, when
+    /// it is built or when the day turns — polling is every sixty seconds and
+    /// has no business reading a file.
+    week: Vec<u32>,
 }
 
 impl Water {
@@ -21,6 +28,7 @@ impl Water {
             goal: settings.goal.max(1),
             drunk: 0,
             bottle: settings.bottle.max(1),
+            week: vec![0; crate::state::WEEK],
         }
     }
 
@@ -51,6 +59,21 @@ impl Water {
         self.drunk = 0;
     }
 
+    /// The week as it stands this instant: the days that have ended as they
+    /// were adopted, and today as it is right now.
+    ///
+    /// Today's place is overwritten rather than read from the history because
+    /// today has not ended — a press has to show in the panel's last bar in
+    /// the same frame, and waiting for midnight to find out what you drank is
+    /// not a week chart.
+    fn week(&self) -> Vec<u32> {
+        let mut week = self.week.clone();
+        if let Some(today) = week.last_mut() {
+            *today = self.drunk;
+        }
+        week
+    }
+
     /// The count and the goal, and nothing worked out from them.
     ///
     /// The first widget with a variant of its own, and the reason it is this
@@ -65,6 +88,7 @@ impl Water {
                 drunk: self.drunk,
                 goal: self.goal,
                 bottle: self.bottle,
+                week: self.week(),
             }),
         )
     }
@@ -94,10 +118,15 @@ impl Widget for Water {
     /// before it arrived, in `State::roll_to`.
     fn adopt_state(&mut self, state: &State) {
         self.drunk = state.water.ml;
+        self.week = state.week_to(state.day);
     }
 
+
     fn remember(&self, state: &mut State) {
-        state.water = WaterState { ml: self.drunk };
+        state.water = WaterState {
+            ml: self.drunk,
+            aimed_at: self.goal,
+        };
     }
 
     /// A new goal, and the millilitres already counted today.
@@ -150,7 +179,7 @@ mod tests {
 
         water.adopt(&goal_of(4));
 
-        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 4, bottle: 1 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 4, bottle: 1, week: vec![0, 0, 0, 0, 0, 0, 2] });
     }
 
     #[test]
@@ -168,7 +197,7 @@ mod tests {
 
     #[test]
     fn the_day_starts_with_an_empty_count() {
-        assert_eq!(body_of(&water(8)), doca_ipc::Water { drunk: 0, goal: 8, bottle: 1 });
+        assert_eq!(body_of(&water(8)), doca_ipc::Water { drunk: 0, goal: 8, bottle: 1, week: vec![0, 0, 0, 0, 0, 0, 0] });
     }
 
     #[test]
@@ -212,7 +241,7 @@ mod tests {
         water.drink();
         water.drink();
 
-        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 2, bottle: 1 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 2, bottle: 1, week: vec![0, 0, 0, 0, 0, 0, 2] });
     }
 
     /// Past the goal the count keeps going, and the body says so plainly —
@@ -225,7 +254,7 @@ mod tests {
             water.drink();
         }
 
-        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 10, goal: 2, bottle: 1 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 10, goal: 2, bottle: 1, week: vec![0, 0, 0, 0, 0, 0, 10] });
     }
 
     #[test]
@@ -263,7 +292,8 @@ mod remembering {
 
         water.adopt_state(&State {
             day: 20_735,
-            water: WaterState { ml: 5 },
+            water: WaterState { ml: 5, aimed_at: 2000 },
+            closed: Vec::new(),
         });
 
         assert_eq!(water.drunk(), 5);

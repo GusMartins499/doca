@@ -344,7 +344,7 @@ pub mod tests {
     fn water(drunk: u32, goal: u32) -> WidgetState {
         WidgetState::new(
             "water",
-            Body::Water(doca_ipc::Water { drunk, goal, bottle: 500 }),
+            Body::Water(doca_ipc::Water { drunk, goal, bottle: 500, week: vec![0, 250, 0, 500, 1000, 750, drunk] }),
         )
     }
 
