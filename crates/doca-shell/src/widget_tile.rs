@@ -145,7 +145,7 @@ impl WidgetTile {
             Ok(Body::Simple(Simple { active: true, .. }))
         ) || matches!(
             self.shown.borrow().body(),
-            Ok(Body::Water(Water { glasses, goal })) if glasses >= goal
+            Ok(Body::Water(Water { drunk, goal, .. })) if drunk >= goal
         );
         let style = self.root.style_context();
         if active {
@@ -176,6 +176,24 @@ fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Co
             let (_, logical) = layout.pixel_extents();
             paint(cr, &layout, 0.0, (height - logical.height() as f64) / 2.0, look.palette.detail);
         }
+    }
+}
+
+/// Millilitres as a tile can show them.
+///
+/// Four digits do not fit a badge the size of one icon, and nobody reads
+/// "1750" as a quantity of water anyway — past a litre, litres is the unit
+/// people actually speak in. The tenth is dropped when it is zero, so a
+/// round two litres is `2L` and not `2.0L`.
+fn compact_ml(ml: u32) -> String {
+    if ml < 1000 {
+        return ml.to_string();
+    }
+    let litres = ml as f64 / 1000.0;
+    if ((litres * 10.0).round() as u32).is_multiple_of(10) {
+        format!("{litres:.0}L")
+    } else {
+        format!("{litres:.1}L")
     }
 }
 
@@ -238,7 +256,7 @@ fn draw_water(
     let fraction = if water.goal == 0 {
         0.0
     } else {
-        (water.glasses as f64 / water.goal as f64).clamp(0.0, 1.0)
+        (water.drunk as f64 / water.goal as f64).clamp(0.0, 1.0)
     };
     let thickness = (look.icon_size as f64 * 0.10).max(2.0);
     let radius = (width.min(height) - thickness) / 2.0 - 1.0;
@@ -267,7 +285,7 @@ fn draw_water(
     // size would be half the words at half the size for no more meaning.
     let layout = line(
         area,
-        &water.glasses.to_string(),
+        &compact_ml(water.drunk),
         text_size(look.icon_size, 0.36),
         true,
         width,
@@ -542,11 +560,39 @@ pub mod tests {
         )
     }
 
-    fn water(glasses: u32, goal: u32) -> WidgetState {
-        WidgetState::new("water", Body::Water(Water { glasses, goal }))
+    fn water(drunk: u32, goal: u32) -> WidgetState {
+        WidgetState::new(
+            "water",
+            Body::Water(Water { drunk, goal, bottle: 500 }),
+        )
     }
 
     const ICON: i32 = 48;
+
+    #[test]
+    fn millilitres_are_shown_in_the_unit_people_speak_in() {
+        assert_eq!(compact_ml(0), "0");
+        assert_eq!(compact_ml(750), "750");
+        assert_eq!(compact_ml(999), "999");
+        // Past a litre nobody reads the digits as a quantity, and four of
+        // them do not fit a badge one icon wide.
+        assert_eq!(compact_ml(1000), "1L");
+        assert_eq!(compact_ml(1500), "1.5L");
+        assert_eq!(compact_ml(1750), "1.8L");
+        assert_eq!(compact_ml(2000), "2L");
+        assert_eq!(compact_ml(6000), "6L");
+    }
+
+    #[test]
+    fn no_amount_of_water_is_ever_shown_in_more_than_four_characters() {
+        for ml in (0..=doca_ipc::MAX_WATER_GOAL).step_by(10) {
+            let shown = compact_ml(ml);
+            assert!(
+                shown.chars().count() <= 4,
+                "{ml}ml came out as {shown:?}, which is wider than the badge"
+            );
+        }
+    }
 
     fn look(icon_size: i32) -> Look {
         Look {

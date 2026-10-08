@@ -570,6 +570,7 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         note_text: settings.note.text,
         timer_minutes: settings.timer.minutes,
         water_goal: settings.water.goal,
+        water_bottle: settings.water.bottle,
     }
 }
 

@@ -189,28 +189,35 @@ case "$RUNNING" in
     *) fail "the hub did not pick up the new widget list: $RUNNING" ;;
 esac
 
-# Water sends its count and its goal as numbers now, not as the words
-# "2/8" — the bar draws a ring out of them, and only the bar decides what
-# that says. So the assertions are on the payload the variant carries.
+# Water sends what it drank, what it is aiming at and what one go is worth,
+# as numbers — the bar draws out of them, and only the bar decides what that
+# says. So the assertions are on the payload the variant carries. All three
+# are millilitres.
 water_is() {
     case "$(call ListWidgets)" in
-        *"uint32 $1, uint32 $2"*) return 0 ;;
+        *"uint32 $1, uint32 $2, uint32 $3"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 call InvokeWidget "water" "drink" >/dev/null
 call InvokeWidget "water" "drink" >/dev/null
-water_is 2 8 \
-    && ok "two glasses were counted" \
+water_is 1000 2000 500 \
+    && ok "two bottles were counted, in millilitres" \
     || fail "the water widget did not count: $(call ListWidgets)"
 
 # The whole of F4 in one assertion: a setting written now, to a widget that
 # has been running for a while, keeping what it was counting.
-call SetWidgetSetting "water" "goal" "<uint32 4>" >/dev/null
-water_is 2 4 \
+call SetWidgetSetting "water" "goal" "<uint32 1500>" >/dev/null
+water_is 1000 1500 500 \
     && ok "a new goal reached the running widget and kept today's count" \
     || fail "the running widget did not take the new goal: $(call ListWidgets)"
+
+# The bottle is a setting too, and changing it must not undo the afternoon.
+call SetWidgetSetting "water" "bottle" "<uint32 250>" >/dev/null
+water_is 1000 1500 250 \
+    && ok "a smaller bottle keeps what was already drunk" \
+    || fail "the bottle setting did not land: $(call ListWidgets)"
 
 # Each widget says what shape its state takes, so a reader can have a drawer
 # per shape instead of one column of labels for all of them. Checked on the
@@ -250,7 +257,8 @@ case "$(call ListWidgets)" in
 esac
 
 case "$(call WidgetSettings)" in
-    *"'milk\nand bread'"*"uint32 4"*) ok "the settings read back the way they were written" ;;
+    *"'milk\nand bread'"*"uint32 1500, uint32 250"*)
+        ok "the settings read back the way they were written" ;;
     *) fail "WidgetSettings said: $(call WidgetSettings)" ;;
 esac
 
@@ -260,22 +268,23 @@ call SetEnvironmentWidgets "Work" "['water']" >/dev/null
 DROPPED=$(call ListWidgets)
 case "$DROPPED" in
     *"'note'"*) fail "a widget no dock asks for is still running: $DROPPED" ;;
-    *"uint32 2, uint32 4"*) ok "dropping a widget left the others counting where they were" ;;
+    *"uint32 1000, uint32 1500, uint32 250"*)
+        ok "dropping a widget left the others counting where they were" ;;
     *) fail "the surviving widget was rebuilt: $DROPPED" ;;
 esac
 
 # What the day accumulated, which no unit test can check the way this can:
 # the daemon is stopped and started, over the same state file, and the
-# glasses are still counted. A setting living in the config file and a count
-# living in the state file is the whole of why that works.
+# millilitres are still counted. A setting living in the config file and a
+# count living in the state file is the whole of why that works.
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/doca/state.toml"
 [ -f "$STATE" ] \
     && ok "the day's counters were written to $STATE" \
     || fail "nothing was written to $STATE"
-grep -q "glasses" "$STATE" 2>/dev/null \
-    && ok "the glasses are in the state file" \
+grep -q "^ml = " "$STATE" 2>/dev/null \
+    && ok "what was drunk is in the state file" \
     || fail "the state file holds no count: $(cat "$STATE" 2>&1)"
-grep -q "glasses" "$XDG_CONFIG_HOME/doca/config.toml" \
+grep -q "\bml\b" "$XDG_CONFIG_HOME/doca/config.toml" \
     && fail "a counter was written into the config file the user edits" \
     || ok "the config file was left to the choices"
 
@@ -289,7 +298,8 @@ for _ in $(seq 1 60); do
 done
 RESTARTED=$(call ListWidgets)
 case "$RESTARTED" in
-    *"uint32 2, uint32 4"*) ok "the glasses survived a restart of the daemon" ;;
+    *"uint32 1000, uint32 1500, uint32 250"*)
+        ok "what was drunk survived a restart of the daemon" ;;
     *) fail "the day started over when the daemon did: $RESTARTED" ;;
 esac
 

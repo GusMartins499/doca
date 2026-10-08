@@ -88,7 +88,7 @@ pub fn name_of(id: &str) -> String {
 /// The panel this widget's state calls for.
 ///
 /// The heading is read off the typed body, which is the point of the body
-/// being typed: a water panel says "3 of 8 glasses" because the state says
+/// being typed: a water panel says "1500 of 2000 ml" because the state says
 /// three and eight, not because the daemon sent that sentence.
 pub fn rows_for(state: &WidgetState) -> Vec<Row> {
     let heading = match state.body() {
@@ -101,11 +101,11 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
             detail: simple.detail.clone(),
         },
         Ok(Body::Water(water)) => Row::Heading {
-            title: format!("{} of {}", water.glasses, water.goal),
-            detail: if water.glasses >= water.goal {
+            title: format!("{} of {} ml", water.drunk, water.goal),
+            detail: if water.drunk >= water.goal {
                 "done for today".to_string()
             } else {
-                "glasses".to_string()
+                format!("{} ml a bottle", water.bottle)
             },
         },
         // A body this build cannot read still opens a panel that names the
@@ -341,8 +341,11 @@ pub mod tests {
         )
     }
 
-    fn water(glasses: u32, goal: u32) -> WidgetState {
-        WidgetState::new("water", Body::Water(doca_ipc::Water { glasses, goal }))
+    fn water(drunk: u32, goal: u32) -> WidgetState {
+        WidgetState::new(
+            "water",
+            Body::Water(doca_ipc::Water { drunk, goal, bottle: 500 }),
+        )
     }
 
     fn invokes_nothing() -> Invoke {
@@ -419,19 +422,21 @@ pub mod tests {
     /// because the numbers arrived as numbers.
     #[test]
     fn a_water_panel_says_what_the_count_means() {
-        let rows = rows_for(&water(3, 8));
+        let rows = rows_for(&water(1500, 2000));
 
         assert_eq!(
             rows[0],
             Row::Heading {
-                title: "3 of 8".to_string(),
-                detail: "glasses".to_string()
+                title: "1500 of 2000 ml".to_string(),
+                // What the next press will add, which is the one number the
+                // panel knows and the tile has no room to say.
+                detail: "500 ml a bottle".to_string()
             }
         );
         assert_eq!(
-            rows_for(&water(8, 8))[0],
+            rows_for(&water(2000, 2000))[0],
             Row::Heading {
-                title: "8 of 8".to_string(),
+                title: "2000 of 2000 ml".to_string(),
                 detail: "done for today".to_string()
             }
         );
