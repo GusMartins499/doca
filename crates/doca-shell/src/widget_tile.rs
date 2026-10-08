@@ -172,6 +172,7 @@ fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Co
         Ok(Body::Simple(simple)) => draw_simple(&simple, look, area, cr, width, height),
         Ok(Body::Water(water)) => draw_water(&water, look, area, cr, width, height),
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
+        Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();
@@ -348,6 +349,93 @@ fn draw_water(
     if let Some(against) = against {
         paint(cr, &against, text_left, y, look.palette.detail);
     }
+}
+
+/// A note, on the paper it was written on.
+///
+/// The one tile whose colour comes from the note and not from the theme, and
+/// the one whose shape is the thing it stands for rather than a decision
+/// about room. A post-it is yellow because post-its are, not because the
+/// desktop is dark.
+///
+/// Which means the ink cannot come from the theme either. Writing a note in
+/// `midnight`'s pale grey on a yellow square is a blur, so the ink is picked
+/// against the paper: every one of these papers is light, so the ink is the
+/// one dark that reads on all six.
+fn draw_note(
+    note: &doca_ipc::Note,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let paper = paper_of(&note.colour);
+    let corner = (look.icon_size as f64 * 0.12).max(2.0);
+    rounded(cr, 0.0, 0.0, width, height, corner);
+    cr.set_source_rgb(paper.0, paper.1, paper.2);
+    let _ = cr.fill();
+
+    let text = note.text.trim();
+    if text.is_empty() {
+        // An empty note says it is empty rather than drawing nothing, which
+        // is what `note::split` used to do in the daemon and is still the
+        // right answer — a blank square reads as a tile that is broken.
+        let layout = line(area, "empty", text_size(look.icon_size, 0.20), false, width);
+        let (_, logical) = layout.pixel_extents();
+        paint(
+            cr,
+            &layout,
+            0.0,
+            (height - logical.height() as f64) / 2.0,
+            faded(note_ink(), 0.55),
+        );
+        return;
+    }
+
+    // As many lines as the square has room for, and the rest is the panel's.
+    let layout = line(area, text, text_size(look.icon_size, 0.19), false, width - 4.0);
+    layout.set_wrap(pango::WrapMode::WordChar);
+    layout.set_height((height as i32 - 6) * pango::SCALE);
+    layout.set_ellipsize(pango::EllipsizeMode::End);
+    layout.set_alignment(pango::Alignment::Left);
+    let (_, logical) = layout.pixel_extents();
+    let y = ((height - logical.height() as f64) / 2.0).max(3.0);
+    paint(cr, &layout, 2.0, y, note_ink());
+}
+
+/// The ink a note is written in, on any of its papers.
+fn note_ink() -> gdk::RGBA {
+    gdk::RGBA::new(0.16, 0.14, 0.10, 1.0)
+}
+
+/// The six papers, as the colours they are.
+///
+/// Light, every one of them, which is what lets a single dark ink serve all
+/// six — `a_note_is_readable_on_every_paper_it_offers` holds that rather than
+/// trusting it.
+fn paper_of(colour: &str) -> (f64, f64, f64) {
+    use doca_ipc::note_colour as paper;
+    match doca_ipc::note_colour::resolve(colour) {
+        paper::PINK => (0.98, 0.78, 0.84),
+        paper::BLUE => (0.76, 0.87, 0.97),
+        paper::GREEN => (0.79, 0.93, 0.76),
+        paper::PURPLE => (0.86, 0.80, 0.95),
+        paper::RED => (0.98, 0.76, 0.72),
+        _ => (0.99, 0.91, 0.56),
+    }
+}
+
+/// A rectangle with its corners taken off, as a path.
+fn rounded(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
+    let radius = radius.min(width / 2.0).min(height / 2.0);
+    let half = std::f64::consts::FRAC_PI_2;
+    cr.new_path();
+    cr.arc(x + width - radius, y + radius, radius, -half, 0.0);
+    cr.arc(x + width - radius, y + height - radius, radius, 0.0, half);
+    cr.arc(x + radius, y + height - radius, radius, half, half * 2.0);
+    cr.arc(x + radius, y + radius, radius, half * 2.0, half * 3.0);
+    cr.close_path();
 }
 
 /// Music: the cover, and the track written over it.
@@ -821,6 +909,80 @@ pub mod tests {
             .iter()
             .map(|(_, tile)| tile.area.size_request().0)
             .collect()
+    }
+
+    /// A note is readable on every paper it offers, in every theme.
+    ///
+    /// The issue asks for this in as many words — a yellow post-it under
+    /// `midnight` must not be a blur. It is the one tile whose colours come
+    /// from the note instead of the theme, which is exactly why it needs
+    /// saying: nothing else in the bar would have noticed.
+    ///
+    /// Contrast is measured as the plain difference in luminance between the
+    /// ink and the paper. The threshold is not a standard, it is the number
+    /// below which these six stop being legible, and it is here so that a
+    /// seventh paper added later has to clear the same bar.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_note_is_readable_on_every_paper_it_offers() {
+        let ink = note_ink();
+        let ink_luma = 0.2126 * ink.red() + 0.7152 * ink.green() + 0.0722 * ink.blue();
+
+        for paper in doca_ipc::note_colour::ALL {
+            let (red, green, blue) = paper_of(paper);
+            let paper_luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+
+            assert!(
+                paper_luma > ink_luma,
+                "{paper} paper is darker than the ink, so the note is light on light"
+            );
+            assert!(
+                paper_luma - ink_luma > 0.45,
+                "{paper} paper and the ink are {:.2} apart, which is not enough to read",
+                paper_luma - ink_luma
+            );
+        }
+    }
+
+    /// And the theme really has no say in it, which is the part a luminance
+    /// sum cannot check: the same note drawn under all four themes comes out
+    /// the same pixels.
+    pub fn a_note_looks_the_same_whatever_the_desktop_is_wearing() {
+        let (width, height) = (48, 48);
+        let mut first: Option<Vec<u8>> = None;
+        for theme in crate::theme::names() {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height)
+                    .expect("no surface");
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let area = gtk::DrawingArea::new();
+                draw_note(
+                    &doca_ipc::Note {
+                        text: "call the dentist".into(),
+                        colour: "pink".into(),
+                    },
+                    Look {
+                        icon_size: ICON,
+                        palette: crate::theme::palette(theme),
+                        level: Level::Full,
+                    },
+                    &area,
+                    &cr,
+                    width as f64,
+                    height as f64,
+                );
+            }
+            surface.flush();
+            let pixels = surface.data().expect("the surface is still borrowed").to_vec();
+            match &first {
+                None => first = Some(pixels),
+                Some(before) => assert_eq!(
+                    *before, pixels,
+                    "the note came out differently under {theme}, so the theme reached it"
+                ),
+            }
+        }
     }
 
     /// A cover of any colour is made dark enough to write on.

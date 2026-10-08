@@ -105,6 +105,10 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
             },
             detail: simple.detail.clone(),
         },
+        Ok(Body::Note(note)) => Row::Heading {
+            title: name_of(&state.id),
+            detail: note.text.lines().next().unwrap_or("empty note").to_string(),
+        },
         Ok(Body::Music(music)) => Row::Heading {
             title: if music.title.is_empty() {
                 name_of(&state.id)

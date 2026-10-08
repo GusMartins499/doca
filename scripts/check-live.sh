@@ -182,7 +182,7 @@ call RemoveEnvironment "Studio" >/dev/null
 # What the Widgets tab reads and writes. The point of these is that the widget
 # already running hears it: the value landing in the file proves nothing, and
 # a restart would hide the whole question.
-call SetEnvironmentWidgets "Work" "['water', 'note']" >/dev/null
+call SetEnvironmentWidgets "Work" "['water', 'note', 'clock']" >/dev/null
 RUNNING=$(call ListWidgets)
 case "$RUNNING" in
     *"'water'"*"'note'"*) ok "the widgets a dock asked for are the ones running" ;;
@@ -237,11 +237,12 @@ case "$(call ListWidgets)" in
     *) fail "the typed state did not come back as a name and a payload: $(call ListWidgets)" ;;
 esac
 case "$(call ListWidgets)" in
-    # Two lines, a progress figure and a flag: the tile the nine widgets
-    # without a variant of their own still draw.
-    *"'note', 'simple', <("*", -1.0, false)>"*)
+    # Two lines, a progress figure and a flag: the tile the widgets without a
+    # variant of their own still draw. The clock, now — the note grew one of
+    # its own when it became a post-it you can write on.
+    *"'clock', 'simple', <("*", -1.0, false)>"*)
         ok "a widget with no variant of its own still sends one" ;;
-    *) fail "the note did not come back as a simple body: $(call ListWidgets)" ;;
+    *) fail "the clock did not come back as a simple body: $(call ListWidgets)" ;;
 esac
 
 # An action nobody has is refused in words rather than shrugged off, which is
@@ -261,7 +262,9 @@ call InvokeWidget "water" "undo" >/dev/null
 
 call SetWidgetSetting "note" "text" "<'milk\nand bread'>" >/dev/null
 case "$(call ListWidgets)" in
-    *"'milk'"*"'and bread'"*) ok "a note written now is the note the bar shows" ;;
+    # Whole, newlines and all: the daemon stopped splitting it into a first
+    # line and a rest when the note became something you edit in the panel.
+    *"'milk\nand bread'"*) ok "a note written now is the note the bar shows" ;;
     *) fail "the note widget kept the old text: $(call ListWidgets)" ;;
 esac
 

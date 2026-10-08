@@ -152,6 +152,7 @@ pub struct Tab {
     label: gtk::Entry,
     note: gtk::TextView,
     save_note: gtk::Button,
+    note_colour: gtk::ComboBoxText,
     minutes: gtk::Adjustment,
     goal: gtk::Adjustment,
     bottle: gtk::Adjustment,
@@ -222,6 +223,12 @@ impl Tab {
             0,
         );
         note_page.pack_start(&save_note, false, false, 0);
+
+        let note_colour = gtk::ComboBoxText::new();
+        for paper in doca_ipc::note_colour::ALL {
+            note_colour.append(Some(paper), &pretty(paper));
+        }
+        note_page.pack_start(&titled("Paper", &note_colour), false, false, 0);
         pages.add_named(&note_page, key::NOTE);
 
         let minutes = gtk::Adjustment::new(
@@ -311,6 +318,7 @@ impl Tab {
             minutes,
             goal,
             bottle,
+            note_colour,
             trouble,
             state: Rc::new(State::default()),
         };
@@ -441,6 +449,25 @@ impl Tab {
             glib::Propagation::Proceed
         });
 
+        // The paper writes the moment it is picked, unlike the note's text:
+        // a colour is one click and you can see what it did, where a note is
+        // typing you do not want interrupted by a disk write a letter.
+        let writing = put.clone();
+        let filling = self.state.filling.clone();
+        self.note_colour.connect_changed(move |chooser| {
+            if filling.is_filling() {
+                return;
+            }
+            let Some(paper) = chooser.active_id() else {
+                return;
+            };
+            writing(Wrote::Text {
+                widget: key::NOTE,
+                key: key::COLOUR,
+                text: paper.to_string(),
+            });
+        });
+
         for (adjustment, widget, name) in [
             (&self.minutes, key::TIMER, key::MINUTES),
             (&self.goal, key::WATER, key::GOAL),
@@ -483,6 +510,8 @@ impl Tab {
                 self.state.note.replace(settings.note_text.clone());
             }
             self.minutes.set_value(settings.timer_minutes as f64);
+            self.note_colour
+                .set_active_id(Some(doca_ipc::note_colour::resolve(&settings.note_colour)));
             self.goal.set_value(settings.water_goal as f64);
             self.bottle.set_value(settings.water_bottle as f64);
         });
@@ -565,6 +594,7 @@ pub mod on_a_display {
             timer_minutes: 10,
             water_goal: 2000,
             water_bottle: 500,
+            note_colour: "yellow".to_string(),
         }
     }
 
@@ -603,6 +633,7 @@ pub mod on_a_display {
             timer_minutes: 25,
             water_goal: 2500,
             water_bottle: 750,
+            note_colour: "pink".to_string(),
             ..settings()
         });
 
@@ -761,6 +792,39 @@ pub mod on_a_display {
                 key: "goal",
                 count: 2500
             }]
+        );
+    }
+
+    /// The paper writes the moment it is picked, and writes the paper that
+    /// was picked rather than the one beside it.
+    pub fn choosing_a_paper_writes_that_paper() {
+        let (tab, written) = watched();
+        tab.show(&settings());
+
+        tab.note_colour.set_active_id(Some("green"));
+
+        assert_eq!(
+            *written.borrow(),
+            vec![Wrote::Text {
+                widget: "note",
+                key: "colour",
+                text: "green".to_string()
+            }]
+        );
+    }
+
+    /// And filling the controls from the daemon writes nothing, which is the
+    /// one that matters for every control here — a window that echoes what it
+    /// was told is a window that fights the next writer.
+    pub fn filling_the_paper_from_the_daemon_writes_nothing() {
+        let (tab, written) = watched();
+
+        tab.show(&settings());
+
+        assert!(
+            written.borrow().is_empty(),
+            "showing the settings wrote back: {:?}",
+            written.borrow()
         );
     }
 
