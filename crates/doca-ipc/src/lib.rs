@@ -437,7 +437,7 @@ pub mod widget_action {
         ("timer", "reset", "Reset"),
         ("time-progress", "next", "Next span"),
         ("time-progress", "reset", "Back to today"),
-        ("water", "drink", "One more glass"),
+        ("water", "drink", "One more bottle"),
         ("water", "undo", "Take one back"),
         ("water", "reset", "Start the day over"),
     ];
