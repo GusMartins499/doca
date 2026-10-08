@@ -709,7 +709,8 @@ mod tests {
     fn a_widget_is_built_holding_what_the_day_already_counted() {
         let state = State {
             day: TODAY,
-            water: crate::state::WaterState { ml: 4 },
+            water: crate::state::WaterState { ml: 4, aimed_at: 2000 },
+            closed: Vec::new(),
         };
 
         let built = build(&ids_of(&["water"]), &WidgetSettings::default(), &state);
@@ -717,7 +718,7 @@ mod tests {
         let mut built = built;
         assert_eq!(
             built[0].poll().body().expect("a water body"),
-            doca_ipc::Body::Water(doca_ipc::Water { drunk: 4, goal: 2000, bottle: 500 })
+            doca_ipc::Body::Water(doca_ipc::Water { drunk: 4, goal: 2000, bottle: 500, week: vec![0, 0, 0, 0, 0, 0, 4] })
         );
     }
 
@@ -727,7 +728,8 @@ mod tests {
     fn a_save_does_not_zero_a_counter_whose_widget_is_not_running() {
         let held = State {
             day: TODAY,
-            water: crate::state::WaterState { ml: 7 },
+            water: crate::state::WaterState { ml: 7, aimed_at: 2000 },
+            closed: Vec::new(),
         };
         let clock_alone = build(&ids_of(&["clock"]), &WidgetSettings::default(), &held);
 
