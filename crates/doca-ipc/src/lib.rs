@@ -107,6 +107,7 @@ pub enum Body {
     Simple(Simple),
     Water(Water),
     Music(Music),
+    Note(Note),
 }
 
 /// The name each [`Body`] arm travels under, which is the `s` of the `(s v)`.
@@ -117,9 +118,10 @@ pub mod body_kind {
     pub const SIMPLE: &str = "simple";
     pub const WATER: &str = "water";
     pub const MUSIC: &str = "music";
+    pub const NOTE: &str = "note";
 
     /// Every name there is, for a test to walk.
-    pub const ALL: [&str; 3] = [SIMPLE, WATER, MUSIC];
+    pub const ALL: [&str; 4] = [SIMPLE, WATER, MUSIC, NOTE];
 }
 
 /// Two lines and a progress bar.
@@ -189,6 +191,43 @@ pub struct Music {
     pub art: String,
 }
 
+/// A note, whole, and the colour of the paper it is written on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Note {
+    /// The note as it was written, newlines and all.
+    ///
+    /// Whole rather than split into a first line and a rest, which is what
+    /// the daemon used to send. The tile shows what fits and the panel edits
+    /// the lot, and both of those need the text as it is — a split made in
+    /// the daemon is a guess about how much room the bar has.
+    pub text: String,
+    /// One of [`note_colour::ALL`].
+    pub colour: String,
+}
+
+/// The papers a note can be written on.
+///
+/// The primo.dock's six, kept whole rather than pruned: a post-it colour is
+/// not a setting anybody needs explained, it costs a line each, and the one
+/// somebody wants is always the one that was cut.
+pub mod note_colour {
+    pub const YELLOW: &str = "yellow";
+    pub const PINK: &str = "pink";
+    pub const BLUE: &str = "blue";
+    pub const GREEN: &str = "green";
+    pub const PURPLE: &str = "purple";
+    pub const RED: &str = "red";
+
+    pub const ALL: [&str; 6] = [YELLOW, PINK, BLUE, GREEN, PURPLE, RED];
+
+    /// The one a config that never asked gets.
+    pub const DEFAULT: &str = YELLOW;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+}
+
 /// How much room a tile asks for on the bar: about one icon, or about two
 /// and a half.
 ///
@@ -232,6 +271,7 @@ impl Body {
             Body::Simple(_) => body_kind::SIMPLE,
             Body::Water(_) => body_kind::WATER,
             Body::Music(_) => body_kind::MUSIC,
+            Body::Note(_) => body_kind::NOTE,
         }
     }
 
@@ -253,6 +293,9 @@ impl Body {
             // A cover is a picture, and a picture one icon wide is a thumbnail
             // with the title written over it.
             Body::Music(_) => Tile::Wide,
+            // A post-it is a square. It is the one tile whose shape is the
+            // thing it is standing for rather than a choice about room.
+            Body::Note(_) => Tile::Square,
         }
     }
 }
@@ -292,6 +335,7 @@ impl WidgetState {
             Body::Simple(simple) => OwnedValue::try_from(simple),
             Body::Water(water) => OwnedValue::try_from(water),
             Body::Music(music) => OwnedValue::try_from(music),
+            Body::Note(note) => OwnedValue::try_from(note),
         };
         Self {
             id: id.into(),
@@ -323,6 +367,9 @@ impl WidgetState {
                 .map_err(|e| unreadable(e.to_string())),
             body_kind::MUSIC => Music::try_from(self.body.clone())
                 .map(Body::Music)
+                .map_err(|e| unreadable(e.to_string())),
+            body_kind::NOTE => Note::try_from(self.body.clone())
+                .map(Body::Note)
                 .map_err(|e| unreadable(e.to_string())),
             unknown => Err(UnreadableBody {
                 kind: unknown.to_string(),
@@ -374,6 +421,8 @@ pub struct WidgetSettings {
     pub water_goal: u32,
     /// Millilitres in one bottle.
     pub water_bottle: u32,
+    /// One of [`note_colour::ALL`].
+    pub note_colour: String,
 }
 
 /// The widgets that take a setting, and what `SetWidgetSetting` calls each.
@@ -393,12 +442,14 @@ pub mod widget_key {
     pub const MINUTES: &str = "minutes";
     pub const GOAL: &str = "goal";
     pub const BOTTLE: &str = "bottle";
+    pub const COLOUR: &str = "colour";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 6] = [
+    pub const ALL: [(&str, &str); 7] = [
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),
+        (NOTE, COLOUR),
         (TIMER, MINUTES),
         (WATER, GOAL),
         (WATER, BOTTLE),
@@ -752,6 +803,13 @@ mod tests {
             (
                 body_kind::WATER,
                 Body::Water(Water { drunk: 3, goal: 8, bottle: 500, week: vec![0; 7] }),
+            ),
+            (
+                body_kind::NOTE,
+                Body::Note(Note {
+                    text: "milk\nand bread".to_string(),
+                    colour: note_colour::PINK.to_string(),
+                }),
             ),
             (
                 body_kind::MUSIC,

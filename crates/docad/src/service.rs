@@ -568,6 +568,7 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         countdown_date: settings.countdown.date,
         countdown_label: settings.countdown.label,
         note_text: settings.note.text,
+        note_colour: settings.note.colour,
         timer_minutes: settings.timer.minutes,
         water_goal: settings.water.goal,
         water_bottle: settings.water.bottle,

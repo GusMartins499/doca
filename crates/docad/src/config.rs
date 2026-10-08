@@ -132,12 +132,20 @@ impl Default for CountdownSettings {
 pub struct NoteSettings {
     #[serde(default)]
     pub text: String,
+    /// The paper it is written on, one of `doca_ipc::note_colour::ALL`.
+    #[serde(default = "default_note_colour")]
+    pub colour: String,
+}
+
+fn default_note_colour() -> String {
+    doca_ipc::note_colour::DEFAULT.to_string()
 }
 
 impl Default for NoteSettings {
     fn default() -> Self {
         Self {
             text: "a note lives here".to_string(),
+            colour: default_note_colour(),
         }
     }
 }
@@ -252,7 +260,8 @@ impl WidgetSettings {
                 label: self.countdown.label.trim().to_string(),
             },
             note: NoteSettings {
-                text: self.note.text.clone(),
+            text: self.note.text.clone(),
+                colour: doca_ipc::note_colour::resolve(self.note.colour.trim()).to_string(),
             },
             timer: TimerSettings {
                 minutes: self.timer.minutes.clamp(MIN_TIMER_MINUTES, MAX_TIMER_MINUTES),
@@ -279,6 +288,7 @@ impl WidgetSettings {
             (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
             (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
+            (k::NOTE, k::COLOUR) => self.note.colour = value.into_text()?,
             (k::TIMER, k::MINUTES) => self.timer.minutes = value.into_count()?,
             (k::WATER, k::GOAL) => self.water.goal = value.into_count()?,
             (k::WATER, k::BOTTLE) => self.water.bottle = value.into_count()?,

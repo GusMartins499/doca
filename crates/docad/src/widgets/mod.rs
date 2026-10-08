@@ -478,15 +478,25 @@ mod tests {
     fn label_of(widget: &mut Box<dyn Widget>) -> String {
         match widget.poll().body().expect("a body reads back") {
             doca_ipc::Body::Simple(simple) => simple.label,
-            other => panic!("a {other:?} has no one label"),
+            doca_ipc::Body::Note(note) => note.text,
+            doca_ipc::Body::Music(music) => music.title,
+            doca_ipc::Body::Water(water) => water.drunk.to_string(),
         }
     }
 
+    /// The first widget's state, as the one line a test can compare.
+    ///
+    /// Every variant that a test here runs through: what is asserted is that
+    /// a setting reached the running widget, and the shortest honest way to
+    /// say that is the text the widget is now showing — whatever shape its
+    /// body takes.
     async fn first_label(hub: &WidgetHandle) -> String {
         let states = hub.list().await.expect("the hub answers");
         match states[0].body().expect("a body reads back") {
             doca_ipc::Body::Simple(simple) => simple.label,
-            other => panic!("a {other:?} has no one label"),
+            doca_ipc::Body::Note(note) => note.text,
+            doca_ipc::Body::Music(music) => music.title,
+            doca_ipc::Body::Water(water) => water.drunk.to_string(),
         }
     }
 
@@ -536,8 +546,9 @@ mod tests {
     fn a_settled_widget_shows_the_setting_that_was_just_written() {
         let settings = WidgetSettings {
             note: crate::config::NoteSettings {
-                text: "milk".to_string(),
-            },
+            text: "milk".to_string(),
+            colour: doca_ipc::note_colour::DEFAULT.to_string(),
+        },
             ..WidgetSettings::default()
         };
         let mut built = build(&ids_of(&["note"]), &WidgetSettings::default(), &State::default());
@@ -646,8 +657,9 @@ mod tests {
             ids_of(&["note"]),
             WidgetSettings {
                 note: crate::config::NoteSettings {
-                    text: "call the dentist".to_string(),
-                },
+            text: "call the dentist".to_string(),
+            colour: doca_ipc::note_colour::DEFAULT.to_string(),
+        },
                 ..WidgetSettings::default()
             },
         )
