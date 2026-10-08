@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use super::Widget;
 
@@ -44,13 +44,15 @@ pub fn format_remaining(reading: &Reading) -> String {
 }
 
 pub fn state_from(reading: &Reading) -> WidgetState {
-    WidgetState {
-        id: "battery".to_string(),
-        label: format!("{}%", reading.percent),
-        detail: format_remaining(reading),
-        progress: reading.percent as f64 / 100.0,
-        active: reading.status == "Charging",
-    }
+    WidgetState::new(
+        "battery",
+        Body::Simple(Simple {
+            label: format!("{}%", reading.percent),
+            detail: format_remaining(reading),
+            progress: reading.percent as f64 / 100.0,
+            active: reading.status == "Charging",
+        }),
+    )
 }
 
 fn read_number(dir: &Path, name: &str) -> Option<u64> {
@@ -128,13 +130,15 @@ impl Widget for Battery {
         let reading = self.path.as_deref().and_then(read_reading);
         match reading {
             Some(reading) => state_from(&reading),
-            None => WidgetState {
-                id: "battery".to_string(),
-                label: "—".to_string(),
-                detail: "no battery".to_string(),
-                progress: NO_PROGRESS,
-                active: false,
-            },
+            None => WidgetState::new(
+                "battery",
+                Body::Simple(Simple {
+                    label: "—".to_string(),
+                    detail: "no battery".to_string(),
+                    progress: NO_PROGRESS,
+                    active: false,
+                }),
+            ),
         }
     }
 }
@@ -142,6 +146,7 @@ impl Widget for Battery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     fn reading(status: &str, now: u64, full: u64, rate: u64, percent: u8) -> Reading {
         Reading {
@@ -183,14 +188,14 @@ mod tests {
 
     #[test]
     fn charging_is_the_state_that_makes_the_tile_active() {
-        assert!(state_from(&reading("Charging", 1, 2, 1, 50)).active);
-        assert!(!state_from(&reading("Discharging", 1, 2, 1, 50)).active);
+        assert!(state_from(&reading("Charging", 1, 2, 1, 50)).active());
+        assert!(!state_from(&reading("Discharging", 1, 2, 1, 50)).active());
     }
 
     #[test]
     fn the_progress_ring_follows_the_reported_percentage() {
-        assert_eq!(state_from(&reading("Full", 1, 1, 0, 100)).progress, 1.0);
-        assert_eq!(state_from(&reading("Discharging", 1, 2, 1, 50)).progress, 0.5);
+        assert_eq!(state_from(&reading("Full", 1, 1, 0, 100)).progress(), 1.0);
+        assert_eq!(state_from(&reading("Discharging", 1, 2, 1, 50)).progress(), 0.5);
     }
 
     #[test]

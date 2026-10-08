@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use super::Widget;
 
@@ -93,13 +93,15 @@ impl Widget for Network {
         };
         self.previous = Some((current, now));
 
-        WidgetState {
-            id: "network".to_string(),
-            label: format!("\u{2193}{}", format_rate(down)),
-            detail: format!("\u{2191}{}", format_rate(up)),
-            progress: NO_PROGRESS,
-            active: down + up > 256.0 * 1024.0,
-        }
+        WidgetState::new(
+            "network",
+            Body::Simple(Simple {
+                label: format!("\u{2193}{}", format_rate(down)),
+                detail: format!("\u{2191}{}", format_rate(up)),
+                progress: NO_PROGRESS,
+                active: down + up > 256.0 * 1024.0,
+            }),
+        )
     }
 }
 

@@ -1,9 +1,11 @@
+mod atomic;
 mod config;
 mod desktop;
 mod folder;
 mod model;
 mod patch;
 mod service;
+mod state;
 mod trash;
 mod widgets;
 mod x11;
@@ -49,9 +51,19 @@ async fn main() -> Result<()> {
         .lock()
         .map(|c| (c.all_widgets(), c.widgets.clone()))
         .unwrap_or_default();
-    let (widgets, widget_changes) =
-        crate::widgets::spawn_hub(crate::widgets::build(&widget_ids, &widget_settings))?;
-    tracing::info!(widgets = widget_ids.len(), "widgets started");
+    // What the day accumulated, which is not what the user chose and so does
+    // not live in the config file — see `state.rs`. Read before the widgets
+    // are built, because what it holds is what they are built holding.
+    let day = crate::state::Day::here();
+    let store = crate::state::Store::open(day.today());
+    let widgets_now =
+        crate::widgets::build(&widget_ids, &widget_settings, store.state());
+    let (widgets, widget_changes) = crate::widgets::spawn_hub(widgets_now, store, day)?;
+    tracing::info!(
+        widgets = widget_ids.len(),
+        state = %crate::state::state_path().display(),
+        "widgets started"
+    );
 
     let chosen = Chosen::default();
 

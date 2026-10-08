@@ -3,6 +3,7 @@ mod dock;
 mod ground;
 mod magnify;
 mod motion;
+mod panel;
 mod row;
 mod stack;
 mod strut;
@@ -257,6 +258,7 @@ async fn drive(
         hide,
         label,
         themes: appearance::Themes::capture(),
+        panels: panel::Remembered::default(),
     };
 
     // A theme switched in GNOME Tweaks arrives as a GtkSettings notification,
@@ -493,6 +495,9 @@ struct Chrome {
     label: tooltip::Tooltip,
     /// None when GTK has no settings to override, which no real session is.
     themes: Option<appearance::Themes>,
+    /// How big each widget's panel was the last time it was opened, so the
+    /// next open does not blink — see `panel::Remembered`.
+    panels: panel::Remembered,
 }
 
 impl Style {
@@ -561,6 +566,113 @@ impl Style {
     }
 }
 
+/// What a click on a tile does: open that widget's panel over it.
+///
+/// The panel goes up in the frame the click landed in, and the daemon is
+/// asked for what goes in it afterwards — the same order the folder grid
+/// opens in, and for the same reason: a widget's contents are a question
+/// whose cost has no ceiling, and the shell can put none on it.
+fn expanding(
+    window: gtk::Window,
+    proxy: Rc<DocaProxy<'static>>,
+    panels: panel::Remembered,
+    hide: Hide,
+) -> widget_tile::Expand {
+    let invoke: panel::Invoke = {
+        let asking = proxy.clone();
+        Rc::new(move |id: &str, action: &str| {
+            let (id, action) = (id.to_string(), action.to_string());
+            let proxy = asking.clone();
+            glib::spawn_future_local(async move {
+                if let Err(e) = proxy.invoke_widget(&id, &action).await {
+                    tracing::warn!("widget {id} rejected {action}: {e}");
+                }
+            });
+        })
+    };
+
+    Rc::new(move |id: &str, over: &gtk::Widget| {
+        let expected = panels.of(id);
+        let menu = panel::opening(expected);
+
+        // Over the tile that asked, and the same way every time it is
+        // reopened — including the reopen `panel::fill` does when the panel
+        // turns out to be a different shape than it was opened for.
+        let anchor = over.clone();
+        let show: panel::Show = Rc::new(move |menu: &gtk::Menu| {
+            menu.popup_at_widget(
+                &anchor,
+                gdk::Gravity::NorthWest,
+                gdk::Gravity::SouthWest,
+                None,
+            );
+        });
+        show(&menu);
+        let opened = std::time::Instant::now();
+
+        // The focus and the auto-hide, both of which the grab takes charge of
+        // while the panel is up.
+        //
+        // A menu's grab is what carries keys over a window of type DOCK, and
+        // handing it back is what returns the keyboard to the bar. What it
+        // does not hand back is the bar's own idea of where the pointer is:
+        // the window gets no leave event for a pointer that went to the menu
+        // and none when the menu closes either, so a bar that auto-hides
+        // would sit there shown for ever. Asking again on close is what makes
+        // auto-hide work after a panel rather than only before one.
+        let closing = hide.clone();
+        let dock = window.clone();
+        let back_to = over.clone();
+        menu.connect_hide(move |_| {
+            back_to.grab_focus();
+            closing.slide(&dock, pointer_is_over(&dock));
+        });
+
+        let filling = menu.clone();
+        let proxy = proxy.clone();
+        let invoke = invoke.clone();
+        let panels = panels.clone();
+        let id = id.to_string();
+        glib::spawn_future_local(async move {
+            // Asked again rather than taken from the tile: a panel shows what
+            // the widget is now, and the tile's state is as old as the last
+            // signal. A widget the daemon no longer has leaves the rows to
+            // the id alone, which is still a panel with working controls.
+            let states = proxy.list_widgets().await.unwrap_or_default();
+            let rows = match states.iter().find(|state| state.id == id) {
+                Some(state) => panel::rows_for(state),
+                None => {
+                    // A widget that was dropped between the click and the
+                    // answer. `fill` says so rather than leaving a skeleton
+                    // on screen for ever.
+                    tracing::debug!("the daemon no longer has {id}");
+                    Vec::new()
+                }
+            };
+            panels.note(&id, rows.len().max(1));
+            panel::fill(&filling, expected, &id, &rows, &invoke, &show, opened);
+        });
+    })
+}
+
+/// Whether the pointer is inside this window this instant.
+///
+/// Asked rather than remembered, because the thing that would have remembered
+/// it — the window's own enter and leave events — is exactly what a menu's
+/// grab takes away.
+fn pointer_is_over(window: &gtk::Window) -> bool {
+    let Some(surface) = window.window() else {
+        return false;
+    };
+    let Some(pointer) = gdk::Display::default()
+        .and_then(|display| display.default_seat())
+        .and_then(|seat| seat.pointer())
+    else {
+        return false;
+    };
+    surface.device_position(&pointer).0.is_some()
+}
+
 async fn rebuild(
     window: &gtk::Window,
     bar: &gtk::Box,
@@ -576,6 +688,7 @@ async fn rebuild(
         hide,
         label,
         themes,
+        panels,
     } = chrome;
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
@@ -603,6 +716,12 @@ async fn rebuild(
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
 
+    // The size the tiles are drawn at: what the config asked for, clamped,
+    // and not the size the row of icons settles on. `widget_tile::room_for`
+    // says why — the row's size is worked out from the room the tiles leave,
+    // so sizing the tiles from the row's would be circular.
+    let tile_icon = preferred_icon.clamp(dock::MIN_ICON_SIZE, dock::MAX_ICON_SIZE);
+
     // Everything but the row and the shelf is torn down and built again. The
     // row stays put: unparenting a widget destroys its window, and the pointer
     // leaving a window that was taken out from under it is a leave event like
@@ -627,7 +746,7 @@ async fn rebuild(
     } else {
         let icon_size = dock::icon_size_for(
             entries.len() as i32,
-            widgets.len() as i32,
+            widget_tile::room_for(&widgets, tile_icon),
             screen.width(),
             preferred_icon,
             magnification,
@@ -651,17 +770,16 @@ async fn rebuild(
     // The dock may have changed under a pointer that never moved.
     name_what_is_hovered(row, label);
 
-    let asking = proxy.clone();
-    let invoke: widget_tile::Invoke = Rc::new(move |id: &str, action: &str| {
-        let (id, action) = (id.to_string(), action.to_string());
-        let proxy = asking.clone();
-        glib::spawn_future_local(async move {
-            if let Err(e) = proxy.invoke_widget(&id, &action).await {
-                tracing::warn!("widget {id} rejected {action}: {e}");
-            }
-        });
-    });
-    tiles.show(items, &widgets, &invoke);
+    let expand = expanding(window.clone(), proxy.clone(), panels.clone(), hide.clone());
+    tiles.show(
+        items,
+        &widgets,
+        widget_tile::Look {
+            icon_size: tile_icon,
+            palette: theme::palette_for(&style.applied.borrow(), &row.area.style_context()),
+        },
+        &expand,
+    );
 
     // The row is drawn on a surface wider than the place it holds, and the
     // surplus hangs off both ends. Off the left end and, with no tiles, off
@@ -781,6 +899,18 @@ fn on_a_display() {
     widget_tile::tests::the_divider_that_comes_back_is_the_one_that_left();
     widget_tile::tests::the_shelf_knows_what_is_its_own();
     widget_tile::tests::a_state_for_a_widget_with_no_tile_is_not_claimed();
+    widget_tile::tests::a_tile_is_the_size_the_widget_declared();
+    widget_tile::tests::a_tile_follows_the_icon_size_without_being_rebuilt();
+    widget_tile::tests::a_tile_coming_or_going_does_not_resize_its_neighbours();
+    widget_tile::tests::drawing_a_tile_asks_the_daemon_for_nothing();
+    widget_tile::tests::a_widget_this_bar_cannot_read_still_gets_a_tile();
+    widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
+    panel::tests::a_panel_opens_before_the_daemon_has_answered();
+    panel::tests::a_panel_opened_at_the_shape_it_turns_out_to_have_does_not_move();
+    panel::tests::a_panel_larger_than_it_opened_for_is_still_shown_whole();
+    panel::tests::a_panel_opened_before_is_drawn_at_the_size_it_was();
+    panel::tests::choosing_a_control_asks_the_daemon_for_it();
+    panel::tests::the_keyboard_walks_the_controls_and_skips_the_heading();
     an_undefined_colour_is_not_something_gtk_reports();
     a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();
     the_system_sheet_loads_against_a_real_gtk_theme();

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use doca_ipc::WidgetState;
+use doca_ipc::{Body, Simple, WidgetState};
 
 use super::Widget;
 
@@ -68,13 +68,15 @@ impl Widget for Cpu {
         };
         self.previous = Some(current);
 
-        WidgetState {
-            id: "cpu".to_string(),
-            label: format!("{}%", (usage * 100.0).round() as u8),
-            detail: "CPU".to_string(),
-            progress: usage,
-            active: usage > 0.8,
-        }
+        WidgetState::new(
+            "cpu",
+            Body::Simple(Simple {
+                label: format!("{}%", (usage * 100.0).round() as u8),
+                detail: "CPU".to_string(),
+                progress: usage,
+                active: usage > 0.8,
+            }),
+        )
     }
 }
 

@@ -15,9 +15,11 @@ const SHARED: &str = "
     /* The padding here must stay dock::ITEM_PADDING: the icon size is worked
        out from that number, and a wider padding silently overflows the bar. */
     #item { border-radius: 10px; padding: 2px; }
-    #widget { border-radius: 12px; padding: 6px 8px; }
-    #widget-progress { min-height: 3px; }
-    #widget-progress progress { min-height: 3px; }
+    /* The padding here must stay dock::ITEM_PADDING, for the reason #item's
+       must: a tile's own size is declared by the widget drawing it, and the
+       bar's height and its icon sizing are both worked out from the slot a
+       tile sits in — which is the declared size plus this, twice. */
+    #widget { border-radius: 12px; padding: 2px; }
     #indicator-idle { background: transparent; }
     #tooltip { border-radius: 8px; padding: 5px 10px; }
     #indicator { border-radius: 2px; }
@@ -182,6 +184,82 @@ pub fn dots(name: &str) -> (gdk::RGBA, gdk::RGBA) {
     }
 }
 
+/// The colours a drawn tile needs, since a tile is painted and not styled.
+///
+/// The same problem the indicator dots have and the same answer: a tile draws
+/// itself, so no stylesheet can colour its text or its bar. The values live
+/// here beside the sheets that declare the same colours for everything else,
+/// so a new theme sets its tiles in the one place it sets the rest — rather
+/// than in a table of constants in the drawing code, where they would be
+/// found by whoever added the theme after it had already shipped wrong.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Palette {
+    /// The first line: the number, the time, the track.
+    pub label: gdk::RGBA,
+    /// The second line, which is always the quieter of the two.
+    pub detail: gdk::RGBA,
+    /// The groove a bar or a ring is drawn in.
+    pub track: gdk::RGBA,
+    /// What fills it, and the accent a tile marks itself with.
+    pub fill: gdk::RGBA,
+}
+
+fn rgba(red: f64, green: f64, blue: f64, alpha: f64) -> gdk::RGBA {
+    gdk::RGBA::new(red, green, blue, alpha)
+}
+
+/// The colours this theme paints a tile in, asking GTK first for `system`.
+///
+/// Every value matches the declaration the same theme's stylesheet makes for
+/// `#widget-label`, `#widget-detail` and `#widget-progress`, which is what
+/// keeps a drawn tile and a styled bar looking like one dock. The test below
+/// is what holds them together.
+pub fn palette_for(name: &str, context: &gtk::StyleContext) -> Palette {
+    match resolve(name) {
+        SYSTEM => {
+            let borrowed = palette(DEFAULT);
+            let foreground = lookup(context, "theme_fg_color");
+            Palette {
+                label: foreground.unwrap_or(borrowed.label),
+                detail: foreground
+                    .map(|colour| faded(colour, 0.55))
+                    .unwrap_or(borrowed.detail),
+                track: foreground
+                    .map(|colour| faded(colour, 0.14))
+                    .unwrap_or(borrowed.track),
+                fill: lookup(context, "theme_selected_bg_color").unwrap_or(borrowed.fill),
+            }
+        }
+        resolved => palette(resolved),
+    }
+}
+
+/// The colours of a theme that has its own, which is every theme but
+/// `system`.
+pub fn palette(name: &str) -> Palette {
+    match resolve(name) {
+        "midnight" => Palette {
+            label: rgba(0.847, 0.878, 0.941, 1.0),
+            detail: rgba(0.420, 0.455, 0.533, 1.0),
+            track: rgba(0.122, 0.141, 0.188, 1.0),
+            fill: rgba(0.478, 0.635, 0.969, 1.0),
+        },
+        "paper" => Palette {
+            label: rgba(0.149, 0.141, 0.122, 1.0),
+            detail: rgba(0.0, 0.0, 0.0, 0.45),
+            track: rgba(0.0, 0.0, 0.0, 0.10),
+            fill: rgba(0.776, 0.486, 0.306, 1.0),
+        },
+        // `native`, and whatever a sheet fell back to.
+        _ => Palette {
+            label: rgba(0.949, 0.949, 0.949, 1.0),
+            detail: rgba(1.0, 1.0, 1.0, 0.55),
+            track: rgba(1.0, 1.0, 1.0, 0.14),
+            fill: rgba(0.298, 0.553, 1.0, 1.0),
+        },
+    }
+}
+
 /// The colours the `system` sheet borrows and cannot do without.
 ///
 /// GTK does not refuse a sheet that names a colour the theme never defined —
@@ -290,6 +368,119 @@ mod tests {
     fn an_unknown_theme_falls_back_rather_than_leaving_the_bar_unstyled() {
         assert_eq!(resolve("rocket"), DEFAULT);
         assert_eq!(resolve(""), DEFAULT);
+    }
+
+    #[test]
+    fn the_padding_drawn_around_a_tile_is_the_padding_its_slot_was_worked_out_from() {
+        let declared = format!("#widget {{ border-radius: 12px; padding: {}px; }}", crate::dock::ITEM_PADDING);
+
+        for name in names() {
+            assert!(
+                css(name).contains(&declared),
+                "{name} draws a #widget padding the tile sizing does not know about"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_paints_a_tile_in_colours_that_can_be_told_apart() {
+        for name in self_coloured() {
+            let palette = palette(name);
+
+            assert!(palette.label.alpha() > 0.0, "{name} draws no label at all");
+            assert!(
+                palette.detail.alpha() < palette.label.alpha()
+                    || palette.detail != palette.label,
+                "{name} draws the second line exactly like the first"
+            );
+            assert_ne!(
+                (palette.fill.red(), palette.fill.green(), palette.fill.blue()),
+                (palette.track.red(), palette.track.green(), palette.track.blue()),
+                "{name} cannot tell a full bar from an empty one"
+            );
+        }
+    }
+
+    /// A drawn tile and a styled bar have to look like one dock, and the only
+    /// thing keeping them that way is that the numbers are the same numbers.
+    #[test]
+    fn a_painted_tile_is_the_colour_the_stylesheet_declares_for_the_same_thing() {
+        // The declarations each theme makes for the two lines, as they are
+        // written in its sheet.
+        let declared = [
+            ("native", "#f2f2f2", "rgba(255,255,255,0.55)"),
+            ("midnight", "#d8e0f0", "#6b7488"),
+            ("paper", "#26241f", "rgba(0,0,0,0.45)"),
+        ];
+
+        for (name, label, detail) in declared {
+            let sheet = css(name);
+            assert!(
+                sheet.contains(&format!("#widget-label {{ color: {label};")),
+                "{name} no longer declares its label colour as {label}"
+            );
+            assert!(
+                sheet.contains(&format!("#widget-detail {{ color: {detail};")),
+                "{name} no longer declares its detail colour as {detail}"
+            );
+
+            let painted = palette(name);
+            assert_eq!(
+                (hex_of(painted.label), name),
+                (label.to_string(), name),
+                "the painted label is not the colour {name} declares"
+            );
+            assert!(
+                detail.contains(&hex_of(painted.detail))
+                    || same_colour(detail, painted.detail),
+                "the painted detail is not the colour {name} declares"
+            );
+        }
+    }
+
+    /// `#rrggbb` for an opaque colour, and something that will not match for
+    /// one that is not — the `rgba()` declarations are compared by value
+    /// instead, by `same_colour`.
+    #[cfg(test)]
+    fn hex_of(colour: gdk::RGBA) -> String {
+        if colour.alpha() < 1.0 {
+            return format!("alpha {}", colour.alpha());
+        }
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (colour.red() * 255.0).round() as u8,
+            (colour.green() * 255.0).round() as u8,
+            (colour.blue() * 255.0).round() as u8
+        )
+    }
+
+    /// Whether an `rgba(r,g,b,a)` declaration is this colour.
+    #[cfg(test)]
+    fn same_colour(declared: &str, colour: gdk::RGBA) -> bool {
+        let Some(inside) = declared
+            .trim()
+            .strip_prefix("rgba(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return false;
+        };
+        let parts: Vec<f64> = inside
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        if parts.len() != 4 {
+            return false;
+        }
+        let near = |a: f64, b: f64| (a - b).abs() < 0.01;
+        near(parts[0] / 255.0, colour.red())
+            && near(parts[1] / 255.0, colour.green())
+            && near(parts[2] / 255.0, colour.blue())
+            && near(parts[3], colour.alpha())
+    }
+
+    #[test]
+    fn an_unknown_theme_still_has_a_palette_to_paint_with() {
+        assert_eq!(palette("no-such-theme"), palette(DEFAULT));
     }
 
     #[test]

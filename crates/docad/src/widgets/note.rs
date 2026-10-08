@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use crate::config::{NoteSettings, WidgetSettings};
 
@@ -38,13 +38,15 @@ impl Widget for Note {
 
     fn poll(&mut self) -> WidgetState {
         let (label, detail) = split(&self.settings.text);
-        WidgetState {
-            id: "note".to_string(),
-            label,
-            detail,
-            progress: NO_PROGRESS,
-            active: false,
-        }
+        WidgetState::new(
+            "note",
+            Body::Simple(Simple {
+                label,
+                detail,
+                progress: NO_PROGRESS,
+                active: false,
+            }),
+        )
     }
 
     fn adopt(&mut self, settings: &WidgetSettings) {
@@ -55,18 +57,19 @@ impl Widget for Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     #[test]
     fn a_note_rewritten_elsewhere_is_the_note_the_widget_shows() {
         let mut note = Note::new(NoteSettings { text: "old".into() });
-        assert_eq!(note.poll().label, "old");
+        assert_eq!(note.poll().label(), "old");
 
         note.adopt(&WidgetSettings {
             note: NoteSettings { text: "new".into() },
             ..WidgetSettings::default()
         });
 
-        assert_eq!(note.poll().label, "new");
+        assert_eq!(note.poll().label(), "new");
     }
 
     #[test]

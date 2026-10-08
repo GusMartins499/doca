@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use doca_ipc::WidgetState;
+use doca_ipc::{Body, WidgetState};
 
 use crate::config::{WaterSettings, WidgetSettings};
+use crate::state::{State, WaterState};
 
 use super::Widget;
 
@@ -41,18 +42,21 @@ impl Water {
         self.drunk = 0;
     }
 
+    /// The count and the goal, and nothing worked out from them.
+    ///
+    /// The first widget with a variant of its own, and the reason it is this
+    /// one: a label of `"3/8"` is a sentence the bar cannot draw a ring from,
+    /// and the share of the goal is the shape of the drawing. What the tile
+    /// says in words, and in what colour, is the bar's to decide — the daemon
+    /// only knows how many glasses there were.
     pub fn state(&self) -> WidgetState {
-        WidgetState {
-            id: "water".to_string(),
-            label: format!("{}/{}", self.drunk, self.goal),
-            detail: if self.drunk >= self.goal {
-                "done for today".to_string()
-            } else {
-                "glasses".to_string()
-            },
-            progress: (self.drunk as f64 / self.goal as f64).clamp(0.0, 1.0),
-            active: self.drunk >= self.goal,
-        }
+        WidgetState::new(
+            "water",
+            Body::Water(doca_ipc::Water {
+                glasses: self.drunk,
+                goal: self.goal,
+            }),
+        )
     }
 }
 
@@ -67,6 +71,25 @@ impl Widget for Water {
 
     fn poll(&mut self) -> WidgetState {
         self.state()
+    }
+
+    fn actions(&self) -> &'static [&'static str] {
+        &["toggle", "drink", "undo", "reset"]
+    }
+
+    /// The glasses the day had already counted when the daemon came up — or,
+    /// at midnight, the nothing a new day starts with.
+    ///
+    /// No date is read here. Whether this state belongs to today was settled
+    /// before it arrived, in `State::roll_to`.
+    fn adopt_state(&mut self, state: &State) {
+        self.drunk = state.water.glasses;
+    }
+
+    fn remember(&self, state: &mut State) {
+        state.water = WaterState {
+            glasses: self.drunk,
+        };
     }
 
     /// A new goal, and the glasses already counted today.
@@ -91,7 +114,7 @@ impl Widget for Water {
 mod tests {
     use super::*;
 
-    fn water(goal: u32) -> Water {
+    pub fn water(goal: u32) -> Water {
         Water::new(WaterSettings { goal })
     }
 
@@ -99,6 +122,14 @@ mod tests {
         WidgetSettings {
             water: WaterSettings { goal },
             ..WidgetSettings::default()
+        }
+    }
+
+    /// What the tile is told, as the typed body rather than as a sentence.
+    fn body_of(water: &Water) -> doca_ipc::Water {
+        match water.state().body().expect("a water body reads back") {
+            Body::Water(body) => body,
+            other => panic!("the water widget sent a {other:?}"),
         }
     }
 
@@ -110,7 +141,7 @@ mod tests {
 
         water.adopt(&goal_of(4));
 
-        assert_eq!(water.state().label, "2/4");
+        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 2, goal: 4 });
     }
 
     #[test]
@@ -122,12 +153,13 @@ mod tests {
 
         water.adopt(&goal_of(2));
 
-        assert!(water.state().active);
+        let body = body_of(&water);
+        assert!(body.glasses >= body.goal);
     }
 
     #[test]
     fn the_day_starts_with_an_empty_count() {
-        assert_eq!(water(8).state().label, "0/8");
+        assert_eq!(body_of(&water(8)), doca_ipc::Water { glasses: 0, goal: 8 });
     }
 
     #[test]
@@ -142,7 +174,7 @@ mod tests {
         water.drink();
         water.drink();
 
-        assert_eq!(water.state().label, "2/8");
+        assert_eq!(body_of(&water).glasses, 2);
     }
 
     #[test]
@@ -165,26 +197,26 @@ mod tests {
     }
 
     #[test]
-    fn reaching_the_goal_is_marked_and_says_so() {
+    fn reaching_the_goal_is_marked() {
         let mut water = water(2);
 
         water.drink();
         water.drink();
 
-        assert!(water.state().active);
-        assert_eq!(water.state().detail, "done for today");
+        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 2, goal: 2 });
     }
 
+    /// Past the goal the count keeps going, and the body says so plainly —
+    /// it is the bar that decides not to draw a ring past full.
     #[test]
-    fn drinking_past_the_goal_keeps_counting_without_overflowing_the_bar() {
+    fn drinking_past_the_goal_keeps_counting() {
         let mut water = water(2);
 
         for _ in 0..10 {
             water.drink();
         }
 
-        assert_eq!(water.state().label, "10/2");
-        assert_eq!(water.state().progress, 1.0);
+        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 10, goal: 2 });
     }
 
     #[test]
@@ -195,5 +227,61 @@ mod tests {
         water.reset();
 
         assert_eq!(water.drunk(), 0);
+    }
+}
+
+#[cfg(test)]
+mod remembering {
+    use super::tests::water;
+    use super::*;
+
+    #[test]
+    fn the_glasses_counted_today_are_what_gets_written_down() {
+        let mut water = water(8);
+        water.drink();
+        water.drink();
+        water.drink();
+
+        let mut state = State::default();
+        water.remember(&mut state);
+
+        assert_eq!(state.water.glasses, 3);
+    }
+
+    #[test]
+    fn a_widget_built_today_starts_from_what_the_morning_left() {
+        let mut water = water(8);
+
+        water.adopt_state(&State {
+            day: 20_735,
+            water: WaterState { glasses: 5 },
+        });
+
+        assert_eq!(water.drunk(), 5);
+    }
+
+    /// Midnight: the state handed over has already been emptied, so the
+    /// widget has nothing to decide.
+    #[test]
+    fn a_new_day_leaves_the_widget_at_zero() {
+        let mut water = water(8);
+        water.drink();
+
+        water.adopt_state(&State::default());
+
+        assert_eq!(water.drunk(), 0);
+    }
+
+    /// Every action a panel will draw a button for is one the widget takes.
+    #[test]
+    fn the_actions_offered_are_the_actions_answered() {
+        let water = water(8);
+
+        for (action, _) in doca_ipc::widget_action::of("water") {
+            assert!(
+                water.actions().contains(&action),
+                "water is offered {action} and does not answer to it"
+            );
+        }
     }
 }

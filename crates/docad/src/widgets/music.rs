@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use super::Widget;
 
@@ -29,9 +29,8 @@ pub fn is_player(bus_name: &str) -> bool {
 }
 
 pub fn state_from(now_playing: Option<&NowPlaying>) -> WidgetState {
-    match now_playing {
-        Some(track) => WidgetState {
-            id: "music".to_string(),
+    let simple = match now_playing {
+        Some(track) => Simple {
             label: if track.title.is_empty() {
                 "unknown".to_string()
             } else {
@@ -45,14 +44,14 @@ pub fn state_from(now_playing: Option<&NowPlaying>) -> WidgetState {
             progress: NO_PROGRESS,
             active: track.playing,
         },
-        None => WidgetState {
-            id: "music".to_string(),
+        None => Simple {
             label: "—".to_string(),
             detail: "nothing playing".to_string(),
             progress: NO_PROGRESS,
             active: false,
         },
-    }
+    };
+    WidgetState::new("music", Body::Simple(simple))
 }
 
 pub struct Music {
@@ -151,6 +150,10 @@ impl Music {
 }
 
 impl Widget for Music {
+    fn actions(&self) -> &'static [&'static str] {
+        &["toggle", "next", "previous"]
+    }
+
     fn id(&self) -> &str {
         "music"
     }
@@ -183,6 +186,7 @@ impl Widget for Music {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     #[test]
     fn an_mpris_bus_name_yields_the_player_it_belongs_to() {
@@ -212,9 +216,9 @@ mod tests {
 
         let state = state_from(Some(&track));
 
-        assert_eq!(state.label, "Garota de Ipanema");
-        assert_eq!(state.detail, "João e Astrud");
-        assert!(state.active);
+        assert_eq!(state.label(), "Garota de Ipanema");
+        assert_eq!(state.detail(), "João e Astrud");
+        assert!(state.active());
     }
 
     #[test]
@@ -228,16 +232,16 @@ mod tests {
 
         let state = state_from(Some(&track));
 
-        assert_eq!(state.label, "Garota de Ipanema");
-        assert!(!state.active);
+        assert_eq!(state.label(), "Garota de Ipanema");
+        assert!(!state.active());
     }
 
     #[test]
     fn no_player_at_all_still_renders_a_tile() {
         let state = state_from(None);
 
-        assert_eq!(state.detail, "nothing playing");
-        assert!(!state.active);
+        assert_eq!(state.detail(), "nothing playing");
+        assert!(!state.active());
     }
 
     #[test]
@@ -249,7 +253,7 @@ mod tests {
             playing: true,
         };
 
-        assert_eq!(state_from(Some(&track)).label, "unknown");
+        assert_eq!(state_from(Some(&track)).label(), "unknown");
     }
 
     #[test]
@@ -261,6 +265,6 @@ mod tests {
             playing: true,
         };
 
-        assert_eq!(state_from(Some(&stream)).detail, "brave");
+        assert_eq!(state_from(Some(&stream)).detail(), "brave");
     }
 }

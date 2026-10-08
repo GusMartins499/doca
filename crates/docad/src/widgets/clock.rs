@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use super::Widget;
 
@@ -100,13 +100,15 @@ impl Widget for Clock {
             .unwrap_or(0);
         let (label, detail) = format_clock(now, self.offset);
 
-        WidgetState {
-            id: "clock".to_string(),
-            label,
-            detail,
-            progress: NO_PROGRESS,
-            active: false,
-        }
+        WidgetState::new(
+            "clock",
+            Body::Simple(Simple {
+                label,
+                detail,
+                progress: NO_PROGRESS,
+                active: false,
+            }),
+        )
     }
 }
 

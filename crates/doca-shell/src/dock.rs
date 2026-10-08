@@ -38,9 +38,13 @@ pub fn divider() -> gtk::Separator {
 /// squeezing every icon that is not under the pointer. So the space the lens
 /// will want is part of what the row has to fit, which costs a few pixels of
 /// icon on a crowded dock and buys magnification that does not shove.
+/// `widget_room` is the width the tiles take, from
+/// [`crate::widget_tile::room_for`] — not a count of them, because tiles are
+/// no longer all one width: a widget declares whether it is a square or a
+/// wide tile, and the bar has to reserve what its own tiles actually ask for.
 pub fn icon_size_for(
     item_count: i32,
-    widget_count: i32,
+    widget_room: i32,
     screen_width: i32,
     preferred: i32,
     magnification: f64,
@@ -49,10 +53,8 @@ pub fn icon_size_for(
     if item_count <= 0 {
         return preferred;
     }
-    let reserved = ITEM_SPACING * 2
-        + widget_count * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
-        + BAR_PADDING * 2
-        + SCREEN_MARGIN * 2;
+    let reserved =
+        ITEM_SPACING * 2 + widget_room + BAR_PADDING * 2 + SCREEN_MARGIN * 2;
     let available = (screen_width - reserved).max(0);
     let per_item_frame = ITEM_SPACING + ITEM_PADDING * 2;
 
@@ -280,6 +282,12 @@ pub mod tests {
     const NO_LENS: f64 = 1.0;
     const LENS: f64 = 1.6;
 
+    /// The room a handful of the widest tiles take, which is what these
+    /// tests used to spell as a count of 88-pixel ones.
+    fn tiles(count: i32) -> i32 {
+        count * crate::widget_tile::slot_of(doca_ipc::Tile::Wide, ICON_SIZE)
+    }
+
     #[test]
     fn a_title_short_enough_to_fit_is_left_exactly_as_it_is() {
         assert_eq!(elide("Untitled Document 1", 48), "Untitled Document 1");
@@ -343,22 +351,22 @@ pub mod tests {
 
     #[test]
     fn a_smaller_preferred_size_is_honoured_even_when_there_is_room_to_spare() {
-        assert_eq!(icon_size_for(4, 0, SCREEN.0, 32, NO_LENS), 32);
+        assert_eq!(icon_size_for(4, tiles(0), SCREEN.0, 32, NO_LENS), 32);
     }
 
     #[test]
     fn an_icon_size_larger_than_the_default_is_honoured_when_there_is_room() {
-        assert_eq!(icon_size_for(6, 2, SCREEN.0, 72, NO_LENS), 72);
+        assert_eq!(icon_size_for(6, tiles(2), SCREEN.0, 72, NO_LENS), 72);
     }
 
     #[test]
     fn no_config_can_ask_for_an_icon_larger_than_the_dock_allows() {
-        assert_eq!(icon_size_for(4, 0, SCREEN.0, 400, NO_LENS), MAX_ICON_SIZE);
+        assert_eq!(icon_size_for(4, tiles(0), SCREEN.0, 400, NO_LENS), MAX_ICON_SIZE);
     }
 
     #[test]
     fn a_crowded_dock_of_twenty_nine_apps_still_leaves_the_icons_legible() {
-        let plank_sized_row = icon_size_for(29, 4, SCREEN.0, ICON_SIZE, LENS);
+        let plank_sized_row = icon_size_for(29, tiles(4), SCREEN.0, ICON_SIZE, LENS);
 
         assert!(
             plank_sized_row >= 32,
@@ -369,11 +377,9 @@ pub mod tests {
     #[test]
     fn a_row_sized_with_the_lens_on_leaves_the_lens_somewhere_to_open() {
         for count in 1..60 {
-            let size = icon_size_for(count, 4, SCREEN.0, ICON_SIZE, LENS);
-            let reserved = ITEM_SPACING * 2
-                + 4 * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
-                + BAR_PADDING * 2
-                + SCREEN_MARGIN * 2;
+            let size = icon_size_for(count, tiles(4), SCREEN.0, ICON_SIZE, LENS);
+            let reserved =
+                ITEM_SPACING * 2 + tiles(4) + BAR_PADDING * 2 + SCREEN_MARGIN * 2;
             let open = count * (size + ITEM_PADDING * 2 + ITEM_SPACING)
                 + crate::magnify::edge_room(size as f64, LENS) * 2
                 + reserved;
@@ -390,8 +396,8 @@ pub mod tests {
 
     #[test]
     fn turning_the_lens_off_gives_the_icons_the_room_it_was_holding() {
-        let with_lens = icon_size_for(29, 4, SCREEN.0, ICON_SIZE, LENS);
-        let without = icon_size_for(29, 4, SCREEN.0, ICON_SIZE, NO_LENS);
+        let with_lens = icon_size_for(29, tiles(4), SCREEN.0, ICON_SIZE, LENS);
+        let without = icon_size_for(29, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS);
 
         assert!(
             without > with_lens,
@@ -401,18 +407,18 @@ pub mod tests {
 
     #[test]
     fn a_preferred_size_never_overrides_the_need_to_fit() {
-        let crowded = icon_size_for(40, 4, SCREEN.0, ICON_SIZE, NO_LENS);
+        let crowded = icon_size_for(40, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS);
 
         assert!(crowded < ICON_SIZE);
     }
 
     #[test]
     fn a_handful_of_apps_keeps_icons_at_full_size() {
-        assert_eq!(icon_size_for(6, 2, SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
+        assert_eq!(icon_size_for(6, tiles(2), SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
     }
 
     #[test]
-    fn twenty_eight_pinned_apps_and_four_widgets_now_fit_at_full_size() {
+    fn twenty_eight_pinned_apps_and_two_widgets_fit_at_full_size() {
         // What the tighter moulding bought. At `ITEM_SPACING` and
         // `ITEM_PADDING` of four, a dock this full had to drop its icons
         // below the size the config asked for just to fit the screen; six
@@ -420,7 +426,40 @@ pub mod tests {
         //
         // A dock crowded enough still shrinks rather than overflowing —
         // `a_preferred_size_never_overrides_the_need_to_fit` holds that.
-        assert_eq!(icon_size_for(28, 4, SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
+        assert_eq!(icon_size_for(28, tiles(2), SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
+    }
+
+    /// What a declared tile size costs, named rather than discovered.
+    ///
+    /// A wide tile is two and a half icons, where every tile used to be 88
+    /// pixels whatever the icons were doing. At 48px icons that is 120, so
+    /// four of them take 144px more of the bar than four of the old ones —
+    /// and on a dock with twenty-eight apps already on it, that is paid out
+    /// of the icon size. Five pixels of icon for tiles that can hold a
+    /// drawing; the alternative was tiles that stay the size of two words.
+    #[test]
+    fn a_wide_tile_is_paid_for_in_icon_size_on_a_dock_that_is_already_full() {
+        let two = icon_size_for(28, tiles(2), SCREEN.0, ICON_SIZE, NO_LENS);
+        let four = icon_size_for(28, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS);
+
+        assert_eq!(two, ICON_SIZE);
+        assert!(four < ICON_SIZE, "four wide tiles cost nothing, which cannot be");
+        assert!(
+            four >= 40,
+            "{four}px icons are too small for four tiles to be worth"
+        );
+    }
+
+    /// A square tile is the cheap one, which is the point of there being two
+    /// sizes at all.
+    #[test]
+    fn a_square_tile_costs_less_of_the_bar_than_a_wide_one() {
+        let square = 4 * crate::widget_tile::slot_of(doca_ipc::Tile::Square, ICON_SIZE);
+
+        assert!(
+            icon_size_for(28, square, SCREEN.0, ICON_SIZE, NO_LENS)
+                > icon_size_for(28, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS)
+        );
     }
 
     #[test]
@@ -435,11 +474,9 @@ pub mod tests {
     #[test]
     fn the_shrunken_icons_actually_fit_the_screen_they_were_sized_for() {
         for count in 1..60 {
-            let size = icon_size_for(count, 4, SCREEN.0, ICON_SIZE, NO_LENS);
-            let reserved = ITEM_SPACING * 2
-                + 4 * (crate::widget_tile::TILE_WIDTH + ITEM_SPACING)
-                + BAR_PADDING * 2
-                + SCREEN_MARGIN * 2;
+            let size = icon_size_for(count, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS);
+            let reserved =
+                ITEM_SPACING * 2 + tiles(4) + BAR_PADDING * 2 + SCREEN_MARGIN * 2;
             let used = count * (size + ITEM_PADDING * 2 + ITEM_SPACING) + reserved;
 
             if size > MIN_ICON_SIZE {
@@ -454,12 +491,12 @@ pub mod tests {
 
     #[test]
     fn icons_never_shrink_below_the_point_of_being_recognisable() {
-        assert_eq!(icon_size_for(500, 4, SCREEN.0, ICON_SIZE, NO_LENS), MIN_ICON_SIZE);
+        assert_eq!(icon_size_for(500, tiles(4), SCREEN.0, ICON_SIZE, NO_LENS), MIN_ICON_SIZE);
     }
 
     #[test]
     fn an_empty_dock_does_not_divide_by_zero_sizing_its_icons() {
-        assert_eq!(icon_size_for(0, 0, SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
+        assert_eq!(icon_size_for(0, tiles(0), SCREEN.0, ICON_SIZE, NO_LENS), ICON_SIZE);
     }
 
     /// Run by `crate::on_a_display`, which owns the one GTK thread.

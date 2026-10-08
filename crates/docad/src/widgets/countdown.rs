@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use doca_ipc::{WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
 
 use crate::config::CountdownSettings;
 
@@ -56,23 +56,26 @@ impl Widget for Countdown {
         let today = now.div_euclid(86_400);
         let days = parse_date(&self.settings.date).map(|target| days_until(target, today));
 
-        WidgetState {
-            id: "countdown".to_string(),
-            label: label_for(days),
-            detail: if days.is_none() && !self.settings.date.trim().is_empty() {
-                "bad date".to_string()
-            } else {
-                self.settings.label.clone()
-            },
-            progress: NO_PROGRESS,
-            active: days == Some(0),
-        }
+        WidgetState::new(
+            "countdown",
+            Body::Simple(Simple {
+                label: label_for(days),
+                detail: if days.is_none() && !self.settings.date.trim().is_empty() {
+                    "bad date".to_string()
+                } else {
+                    self.settings.label.clone()
+                },
+                progress: NO_PROGRESS,
+                active: days == Some(0),
+            }),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     fn today() -> i64 {
         days_from_civil(2026, 6, 15)
@@ -126,14 +129,14 @@ mod tests {
 
         let state = widget.poll();
 
-        assert_eq!(state.label, "—");
-        assert_eq!(state.detail, "bad date");
+        assert_eq!(state.label(), "—");
+        assert_eq!(state.detail(), "bad date");
     }
 
     #[test]
     fn an_empty_date_is_not_treated_as_a_mistake() {
         let mut widget = Countdown::new(CountdownSettings::default());
 
-        assert_ne!(widget.poll().detail, "bad date");
+        assert_ne!(widget.poll().detail(), "bad date");
     }
 }

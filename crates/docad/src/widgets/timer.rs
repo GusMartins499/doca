@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use doca_ipc::WidgetState;
+use doca_ipc::{Body, Simple, WidgetState};
 
 use crate::config::{TimerSettings, WidgetSettings};
 
@@ -81,23 +81,29 @@ impl Timer {
     pub fn state(&self) -> WidgetState {
         let seconds = self.remaining.as_secs();
         let elapsed = self.full.as_secs().saturating_sub(seconds);
-        WidgetState {
-            id: "timer".to_string(),
-            label: format!("{:02}:{:02}", seconds / 60, seconds % 60),
-            detail: if self.rang {
-                "done".to_string()
-            } else if self.running {
-                "running".to_string()
-            } else {
-                "paused".to_string()
-            },
-            progress: elapsed as f64 / self.full.as_secs().max(1) as f64,
-            active: self.rang || self.running,
-        }
+        WidgetState::new(
+            "timer",
+            Body::Simple(Simple {
+                label: format!("{:02}:{:02}", seconds / 60, seconds % 60),
+                detail: if self.rang {
+                    "done".to_string()
+                } else if self.running {
+                    "running".to_string()
+                } else {
+                    "paused".to_string()
+                },
+                progress: elapsed as f64 / self.full.as_secs().max(1) as f64,
+                active: self.rang || self.running,
+            }),
+        )
     }
 }
 
 impl Widget for Timer {
+    fn actions(&self) -> &'static [&'static str] {
+        &["toggle", "reset", "add"]
+    }
+
     fn id(&self) -> &str {
         "timer"
     }
@@ -141,6 +147,7 @@ impl Widget for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::Drawn;
 
     fn timer(minutes: u32) -> Timer {
         Timer::new(TimerSettings { minutes })
@@ -166,7 +173,7 @@ mod tests {
         timer.adopt(&minutes(15));
 
         assert_eq!(timer.remaining(), Duration::from_secs(15 * 60));
-        assert_eq!(timer.state().label, "15:00");
+        assert_eq!(timer.state().label(), "15:00");
     }
 
     #[test]
@@ -178,7 +185,7 @@ mod tests {
         timer.adopt(&minutes(15));
 
         assert_eq!(timer.remaining(), Duration::from_secs(9 * 60 + 30));
-        assert_eq!(timer.state().detail, "running");
+        assert_eq!(timer.state().detail(), "running");
     }
 
     #[test]
@@ -209,8 +216,8 @@ mod tests {
     fn a_new_timer_shows_its_configured_length_and_waits() {
         let timer = timer(10);
 
-        assert_eq!(timer.state().label, "10:00");
-        assert_eq!(timer.state().detail, "paused");
+        assert_eq!(timer.state().label(), "10:00");
+        assert_eq!(timer.state().detail(), "paused");
     }
 
     #[test]
@@ -225,7 +232,7 @@ mod tests {
 
         run(&mut timer, 90);
 
-        assert_eq!(timer.state().label, "08:30");
+        assert_eq!(timer.state().label(), "08:30");
     }
 
     #[test]
@@ -237,7 +244,7 @@ mod tests {
 
         assert_eq!(timer.remaining(), Duration::ZERO);
         assert!(timer.has_rung());
-        assert_eq!(timer.state().detail, "done");
+        assert_eq!(timer.state().detail(), "done");
     }
 
     #[test]
@@ -261,7 +268,7 @@ mod tests {
         timer.add(Duration::from_secs(60));
 
         assert_eq!(timer.remaining(), Duration::from_secs(5 * 60));
-        assert!((0.0..=1.0).contains(&timer.state().progress));
+        assert!((0.0..=1.0).contains(&timer.state().progress()));
     }
 
     #[test]
@@ -295,7 +302,7 @@ mod tests {
 
         for _ in 0..200 {
             timer.tick(Duration::from_secs(1));
-            let progress = timer.state().progress;
+            let progress = timer.state().progress();
             assert!((0.0..=1.0).contains(&progress), "progress escaped: {progress}");
         }
     }
