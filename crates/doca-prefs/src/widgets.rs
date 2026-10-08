@@ -622,7 +622,8 @@ pub mod on_a_display {
         assert_eq!(tab.label.text(), "Christmas");
         assert_eq!(note_of(&tab), "milk\nand bread");
         assert_eq!(tab.minutes.value(), 10.0);
-        assert_eq!(tab.goal.value(), 8.0);
+        assert_eq!(tab.goal.value(), 2000.0);
+        assert_eq!(tab.bottle.value(), 500.0);
     }
 
     pub fn selecting_a_widget_shows_that_widgets_own_page() {
@@ -751,14 +752,33 @@ pub mod on_a_display {
         let (tab, written) = watched();
         tab.show(&settings());
 
-        tab.goal.set_value(12.0);
+        tab.goal.set_value(2500.0);
 
         assert_eq!(
             *written.borrow(),
             vec![Wrote::Count {
                 widget: "water",
                 key: "goal",
-                count: 12
+                count: 2500
+            }]
+        );
+    }
+
+    /// Three spins now, and the bottle is the one that arrived last — the
+    /// goal and the bottle are both counts on the same widget, so a wire
+    /// crossed between them would set the wrong one and look right.
+    pub fn the_bottle_is_not_written_to_the_goal() {
+        let (tab, written) = watched();
+        tab.show(&settings());
+
+        tab.bottle.set_value(750.0);
+
+        assert_eq!(
+            *written.borrow(),
+            vec![Wrote::Count {
+                widget: "water",
+                key: "bottle",
+                count: 750
             }]
         );
     }

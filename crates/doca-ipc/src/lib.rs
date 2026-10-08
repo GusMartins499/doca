@@ -213,7 +213,10 @@ impl Body {
     pub fn tile(&self) -> Tile {
         match self {
             Body::Simple(_) => Tile::Wide,
-            Body::Water(_) => Tile::Square,
+            // A bottle filling needs height to read as filling, and the
+            // amount beside it needs room to be read at a glance: a badge one
+            // icon wide could hold one of the two.
+            Body::Water(_) => Tile::Wide,
         }
     }
 }
@@ -781,6 +784,31 @@ mod tests {
         };
 
         assert!(lying.body().is_err(), "two integers read back as a Simple");
+    }
+
+    /// Which shape each variant asks for is a contract fact, not a drawing
+    /// detail: the bar reserves the room before it has drawn anything, and a
+    /// variant that changed its mind quietly would be a bar that is the wrong
+    /// width on the frame the widget arrives.
+    #[test]
+    fn every_variant_declares_the_shape_the_bar_reserves_for_it() {
+        assert_eq!(
+            Body::Simple(Simple {
+                label: String::new(),
+                detail: String::new(),
+                progress: NO_PROGRESS,
+                active: false,
+            })
+            .tile(),
+            Tile::Wide
+        );
+        // Water is wide: a bottle filling needs height to read as filling and
+        // the amount beside it needs room to be read at a glance, and a badge
+        // one icon wide holds one of the two.
+        assert_eq!(
+            Body::Water(Water { drunk: 0, goal: 2000, bottle: 500, week: vec![0; 7] }).tile(),
+            Tile::Wide
+        );
     }
 
     #[test]
