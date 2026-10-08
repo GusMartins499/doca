@@ -2,6 +2,7 @@ mod atomic;
 mod config;
 mod desktop;
 mod folder;
+mod merge;
 mod model;
 mod patch;
 mod service;

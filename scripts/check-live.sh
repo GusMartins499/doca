@@ -77,9 +77,14 @@ fi
 # the dock window and a click needs no arithmetic to find it.
 mkdir -p "$WORK/folder"
 for n in 1 2 3 4 5 6 7; do : > "$WORK/folder/file-$n.txt"; done
+# Written the way a person writes it, comments and all. The daemon rewrites
+# this file every time anything is set, and what it does to the parts it was
+# not asked about is only visible here — a unit test can check the merge, but
+# only a running daemon proves the merge is the thing that runs.
 cat > "$XDG_CONFIG_HOME/doca/config.toml" <<CONFIG
+# Kept by hand. The daemon must not eat this.
 [appearance]
-show_trash = false
+show_trash = false   # the trash is somebody else's business
 
 [[environments]]
 name = "Work"
@@ -103,6 +108,27 @@ gdbus introspect --session --dest "$BUS" --object-path "$OBJECT" >/dev/null 2>&1
 call() {
     gdbus call --session --dest "$BUS" --object-path "$OBJECT" --method "$INTERFACE.$1" "${@:2}" 2>&1
 }
+
+# The file is the user's, not ours. A setting written over the bus has to land
+# in it without taking the comments and the hand spacing with it — this is the
+# one thing `Config::save_to` can get wrong where nothing else would notice,
+# because every reader goes through the struct and the struct never had them.
+call SetAppearance "{'icon_size': <int32 64>}" >/dev/null
+KEPT=$(cat "$XDG_CONFIG_HOME/doca/config.toml")
+case "$KEPT" in
+    *"icon_size = 64"*) ok "the setting reached the file" ;;
+    *) fail "the setting never landed: $KEPT" ;;
+esac
+case "$KEPT" in
+    *"# Kept by hand. The daemon must not eat this."*)
+        ok "a comment above a table outlived a write" ;;
+    *) fail "the daemon ate a comment it was not asked about: $KEPT" ;;
+esac
+case "$KEPT" in
+    *"show_trash = false   # the trash is somebody else's business"*)
+        ok "a line it was not asked about was not reflowed" ;;
+    *) fail "the daemon reformatted a line nobody touched: $KEPT" ;;
+esac
 
 # What the Docks tab reads and writes, checked without the window: the tab can
 # only be as right as these are.

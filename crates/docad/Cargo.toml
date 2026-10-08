@@ -18,6 +18,7 @@ tracing-subscriber.workspace = true
 x11rb = { version = "0.13", features = ["xtest"] }
 async-channel = "2"
 toml = "0.8"
+toml_edit = "0.25"
 
 [dev-dependencies]
 futures-lite = "2"

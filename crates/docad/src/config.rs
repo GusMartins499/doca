@@ -317,13 +317,21 @@ impl Config {
         self.save_to(&config_path())
     }
 
-    /// Write the config out whole, or leave the old one untouched.
+    /// Write the config out, or leave the old one untouched.
     ///
     /// The file is the only record of what the dock looks like, so the write
     /// goes through [`crate::atomic::write`] — which is also what the state
     /// file uses, and says there why.
+    ///
+    /// And it is written *onto* the file that is there rather than over it:
+    /// this is the file the project tells people to edit by hand, so the
+    /// comments and the order they put in it outlive a widget counting a
+    /// glass of water. [`crate::merge::keeping`] is the whole of that, and
+    /// says there what it costs.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        crate::atomic::write(path, &toml::to_string_pretty(self)?)
+        let fresh = toml::to_string_pretty(self)?;
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        crate::atomic::write(path, &crate::merge::keeping(&existing, &fresh))
     }
 
     pub fn environment_for(&self, workspace: i32) -> &Environment {
