@@ -60,9 +60,10 @@ pub type Show = Rc<dyn Fn(&gtk::Menu)>;
 
 /// What a panel is made of.
 ///
-/// The chassis knows two kinds of row. A widget's own issue adds the kinds it
-/// needs — a week of bars, a list of events — and the panel grows by a drawer
-/// here rather than by a second panel somewhere else.
+/// The chassis knew two kinds of row and said the kinds a widget needs are
+/// that widget's issue to add. [`Row::Week`] is the first of those, added by
+/// #28 — the panel grows by a drawer here rather than by a second panel
+/// somewhere else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
     /// What the widget is showing now, in words rather than as a drawing.
@@ -72,6 +73,8 @@ pub enum Row {
         action: &'static str,
         label: &'static str,
     },
+    /// Seven days as bars, oldest first, today last and marked.
+    Week { days: Vec<u32>, goal: u32 },
 }
 
 /// The widget's name as a person would write it: `time-progress` is
@@ -118,6 +121,14 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
     };
 
     let mut rows = vec![heading];
+    // The week sits above the controls: it is what you came to look at, and
+    // the controls are what you do about it.
+    if let Ok(Body::Water(water)) = state.body() {
+        rows.push(Row::Week {
+            days: water.week.clone(),
+            goal: water.goal,
+        });
+    }
     rows.extend(
         doca_ipc::widget_action::of(&state.id)
             .map(|(action, label)| Row::Action { action, label }),
@@ -263,6 +274,103 @@ fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
             let invoke = invoke.clone();
             control.connect_activate(move |_| invoke(&id, &action));
             control
+        }
+        Row::Week { days, goal } => {
+            let area = gtk::DrawingArea::new();
+            area.set_size_request(-1, WEEK_HEIGHT);
+            let (days, goal) = (days.clone(), *goal);
+            area.connect_draw(move |area, cr| {
+                // The colour is read here, off the row that is really on
+                // screen, and handed down — so the drawing itself is numbers
+                // and a colour, and can be checked without a widget.
+                let ink = area.style_context().color(gtk::StateFlags::NORMAL);
+                draw_week(
+                    &days,
+                    goal,
+                    ink,
+                    cr,
+                    area.allocated_width() as f64,
+                    area.allocated_height() as f64,
+                );
+                glib::Propagation::Proceed
+            });
+
+            let row = gtk::MenuItem::new();
+            row.add(&area);
+            // A picture, not a control: insensitive keeps the keyboard off it
+            // so the arrows go straight from the heading to the first thing
+            // that does something.
+            row.set_sensitive(false);
+            row
+        }
+    }
+}
+
+/// How tall the week's bars are drawn.
+const WEEK_HEIGHT: i32 = 34;
+
+/// The mark under today, and the room kept for it.
+const TODAY_MARK: f64 = 3.0;
+
+/// A week of days as bars, in whatever colour the desktop's menus use.
+///
+/// `ink` is read off the row that is on screen rather than picked here, for
+/// the reason the heading is dimmed rather than coloured: the panel wears the
+/// desktop's menu style, and a colour chosen in this file would be a guess
+/// about a background it never selected. The groove and the fill are that one
+/// ink at different strengths, so they are right on any of them.
+///
+/// The size is handed in rather than read off a widget, which is what lets
+/// this be checked by drawing it onto a surface and counting — a drawer that
+/// asks an unrealised widget how wide it is draws into a sliver and says
+/// nothing is wrong.
+fn draw_week(
+    days: &[u32],
+    goal: u32,
+    ink: gdk::RGBA,
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    if width <= 0.0 || height <= 0.0 || days.is_empty() {
+        return;
+    }
+    let gap = 4.0;
+    let count = days.len() as f64;
+    let bar = ((width - gap * (count - 1.0)) / count).max(1.0);
+    let tall = (height - TODAY_MARK - 2.0).max(1.0);
+
+    for (at, ml) in days.iter().enumerate() {
+        let x = at as f64 * (bar + gap);
+        let today = at + 1 == days.len();
+        let share = if goal == 0 {
+            0.0
+        } else {
+            (*ml as f64 / goal as f64).clamp(0.0, 1.0)
+        };
+
+        cr.set_source_rgba(ink.red(), ink.green(), ink.blue(), ink.alpha() * 0.16);
+        cr.rectangle(x, 0.0, bar, tall);
+        let _ = cr.fill();
+
+        if share > 0.0 {
+            // Today at full strength and the days behind it quieter: the week
+            // is there to be glanced at, and the one you can still change is
+            // the one worth looking at.
+            let strength = if today { 1.0 } else { 0.5 };
+            cr.set_source_rgba(ink.red(), ink.green(), ink.blue(), ink.alpha() * strength);
+            let filled = tall * share;
+            cr.rectangle(x, tall - filled, bar, filled);
+            let _ = cr.fill();
+        }
+
+        if today {
+            // Marked underneath rather than by its colour alone, because a
+            // today with nothing drunk in it has no bar to be brighter than
+            // the others.
+            cr.set_source_rgba(ink.red(), ink.green(), ink.blue(), ink.alpha());
+            cr.rectangle(x, height - TODAY_MARK, bar, TODAY_MARK);
+            let _ = cr.fill();
         }
     }
 }
@@ -418,6 +526,44 @@ pub mod tests {
         );
     }
 
+    /// The week is in the panel and nowhere else: the tile has room for the
+    /// day, and seven days is what you open the panel to see.
+    #[test]
+    fn a_water_panel_carries_the_week_above_its_controls() {
+        let rows = rows_for(&water(750, 2000));
+
+        let week = rows
+            .iter()
+            .position(|row| matches!(row, Row::Week { .. }))
+            .expect("the panel has no week in it");
+        let first_control = rows
+            .iter()
+            .position(|row| matches!(row, Row::Action { .. }))
+            .expect("the panel has no controls");
+
+        assert!(
+            week < first_control,
+            "the week is below the controls, which is not what you opened it for"
+        );
+        assert_eq!(
+            rows[week],
+            Row::Week {
+                // The fixture's week, with today in the last place.
+                days: vec![0, 250, 0, 500, 1000, 750, 750],
+                goal: 2000
+            }
+        );
+    }
+
+    /// And only water has one. A clock with a week of bars under it would be
+    /// a drawer that ran on the wrong body.
+    #[test]
+    fn a_widget_with_nothing_to_show_a_week_of_has_none() {
+        assert!(!rows_for(&clock())
+            .iter()
+            .any(|row| matches!(row, Row::Week { .. })));
+    }
+
     /// The point of a typed body: the sentence is the panel's to write,
     /// because the numbers arrived as numbers.
     #[test]
@@ -452,7 +598,7 @@ pub mod tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Action { action, .. } => Some(*action),
-                Row::Heading { .. } => None,
+                Row::Heading { .. } | Row::Week { .. } => None,
             })
             .collect();
         assert_eq!(offered, vec!["drink", "undo", "reset"]);
@@ -489,6 +635,61 @@ pub mod tests {
                 "{id} has nothing at the top of its panel to say what it is"
             );
         }
+    }
+
+    /// Each bar in the week is as tall as that day was full, and today is
+    /// marked whether or not anything has been drunk in it.
+    ///
+    /// Counted in pixels for the reason the bottle's test is: a drawing is
+    /// the one part of this nothing else can reach, and the bottle's first
+    /// version was full at every level with every other test passing.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn the_weeks_bars_stand_for_the_days_they_are_drawn_from() {
+        let (width, height) = (210, WEEK_HEIGHT);
+        let painted = |days: Vec<u32>| -> Vec<usize> {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height)
+                    .expect("no surface");
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let ink = gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+                draw_week(&days, 2000, ink, &cr, width as f64, height as f64);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+            // How much ink each seventh of the row got, which is one bar.
+            (0..7)
+                .map(|at| {
+                    let from = at * width as usize / 7;
+                    let to = (at + 1) * width as usize / 7;
+                    let mut ink = 0usize;
+                    for row in 0..height as usize {
+                        for column in from..to {
+                            ink += data[row * stride + column * 4 + 3] as usize;
+                        }
+                    }
+                    ink
+                })
+                .collect()
+        };
+
+        let climbing = painted(vec![0, 300, 600, 900, 1200, 1500, 1800]);
+        for pair in climbing.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "a fuller day is not a taller bar: {climbing:?}"
+            );
+        }
+
+        // Today is the last place, and it is marked even when it is empty —
+        // a day with nothing in it has no bar to be brighter than the rest.
+        let empty_today = painted(vec![0, 0, 0, 0, 0, 0, 0]);
+        assert!(
+            empty_today[6] > empty_today[5],
+            "today is not marked on a day nothing has been drunk: {empty_today:?}"
+        );
     }
 
     /// Cancelling the panel closes it and lets go of the grab — which is
@@ -674,10 +875,11 @@ pub mod tests {
         assert_eq!(panels.of("water"), UNKNOWN, "a panel nobody opened has no size to use");
         panels.note("water", rows_for(&water(3, 8)).len());
 
-        assert_eq!(panels.of("water"), 4);
+        // A heading, the week, and the three controls water declares.
+        assert_eq!(panels.of("water"), 5);
         assert_eq!(
             opening(panels.of("water")).children().len(),
-            4,
+            5,
             "the second open guessed again instead of using what it saw"
         );
     }
@@ -746,9 +948,13 @@ pub mod tests {
             .selected_item()
             .expect("a panel with controls in it selects one");
         assert!(selected.is_sensitive(), "the keyboard landed on the heading");
+        // The first row that does something, rather than a fixed place: the
+        // panel grew a week between the heading and the controls, and it will
+        // grow more — what has to hold is that the arrow skips everything
+        // that is only there to be looked at.
         assert_eq!(
             panel.children().iter().position(|row| *row == selected),
-            Some(1),
+            panel.children().iter().position(|row| row.is_sensitive()),
             "the first arrow key did not land on the first control"
         );
         panel.popdown();
