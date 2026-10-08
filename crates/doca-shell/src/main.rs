@@ -693,6 +693,31 @@ fn expanding(
         })
     };
 
+    // Typing into a row is a setting written, not an action invoked — a
+    // different shape, and the daemon validates the pair.
+    let write: panel::Write = {
+        let asking = proxy.clone();
+        Rc::new(move |id: &str, text: &str| {
+            let (id, text) = (id.to_string(), text.to_string());
+            let proxy = asking.clone();
+            glib::spawn_future_local(async move {
+                let value = zbus::zvariant::Value::from(text).try_to_owned();
+                let Ok(value) = value else {
+                    tracing::warn!("cannot send the {id} text");
+                    return;
+                };
+                if let Err(e) = proxy
+                    .set_widget_setting(&id, doca_ipc::widget_key::TEXT, value)
+                    .await
+                {
+                    tracing::warn!("widget {id} refused its text: {e}");
+                }
+            });
+        })
+    };
+
+    let asks = panel::Asks { invoke, write };
+
     Rc::new(move |id: &str, over: &gtk::Widget| {
         let expected = panels.of(id);
         let menu = panel::opening(expected);
@@ -733,7 +758,7 @@ fn expanding(
 
         let filling = menu.clone();
         let proxy = proxy.clone();
-        let invoke = invoke.clone();
+        let asks = asks.clone();
         let panels = panels.clone();
         let id = id.to_string();
         glib::spawn_future_local(async move {
@@ -753,7 +778,7 @@ fn expanding(
                 }
             };
             panels.note(&id, rows.len().max(1));
-            panel::fill(&filling, expected, &id, &rows, &invoke, &show, opened);
+            panel::fill(&filling, expected, &id, &rows, &asks, &show, opened);
         });
     })
 }
@@ -1077,6 +1102,7 @@ fn on_a_display() {
     widget_tile::tests::drawing_a_tile_asks_the_daemon_for_nothing();
     widget_tile::tests::a_widget_this_bar_cannot_read_still_gets_a_tile();
     widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
+    panel::tests::reading_a_note_and_closing_writes_nothing();
     panel::tests::the_weeks_bars_stand_for_the_days_they_are_drawn_from();
     panel::tests::a_panel_closes_on_escape_and_holds_the_grab_that_dismisses_it();
     panel::tests::a_panel_opens_before_the_daemon_has_answered();
