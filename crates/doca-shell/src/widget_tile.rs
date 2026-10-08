@@ -16,6 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::fit::Level;
 use doca_ipc::{Body, Simple, Tile, Water, WidgetState, NO_PROGRESS};
 use gtk::cairo;
 use gtk::prelude::*;
@@ -28,30 +29,6 @@ pub fn height_of(icon_size: i32) -> i32 {
     icon_size
 }
 
-/// The room one tile takes on the bar: what the widget declared, plus the
-/// frame the stylesheet draws round it and the gap to the next thing.
-///
-/// The same arithmetic the row does per icon, which is what makes the bar's
-/// width the sum of its slots and nothing else.
-pub fn slot_of(tile: Tile, icon_size: i32) -> i32 {
-    tile.width(icon_size) + crate::dock::ITEM_PADDING * 2 + crate::dock::ITEM_SPACING
-}
-
-/// The room all of these tiles take together.
-///
-/// Worked out from the icon size the *config* asked for rather than the one
-/// the row ends up with. The two differ only on a dock crowded enough to
-/// shrink its icons, and sizing the tiles from the fitted size would be
-/// circular: the fitted size is worked out from the room the tiles leave.
-/// This way a tile is the size the user asked for, the icons give up the
-/// pixels, and neither depends on the other twice.
-pub fn room_for(widgets: &[WidgetState], icon_size: i32) -> i32 {
-    widgets
-        .iter()
-        .map(|state| slot_of(state.tile().unwrap_or(Tile::Wide), icon_size))
-        .sum()
-}
-
 /// What a tile is drawn at: the size the icons are, and the colours the theme
 /// paints with.
 ///
@@ -62,6 +39,9 @@ pub fn room_for(widgets: &[WidgetState], icon_size: i32) -> i32 {
 pub struct Look {
     pub icon_size: i32,
     pub palette: Palette,
+    /// How much of itself the tile is still drawing. Everything but
+    /// [`Level::Full`] is a crowded bar giving way — see `fit`.
+    pub level: Level,
 }
 
 /// What a click on a tile does: ask for this widget's panel, over this tile.
@@ -154,7 +134,7 @@ impl WidgetTile {
         let look = self.look.get();
         let tile = self.shown.borrow().tile().unwrap_or(Tile::Wide);
         self.area
-            .set_size_request(tile.width(look.icon_size), height_of(look.icon_size));
+            .set_size_request(look.level.width(tile, look.icon_size), height_of(look.icon_size));
     }
 
     /// The one thing still left to the stylesheet: the wash of accent behind
@@ -212,13 +192,19 @@ fn draw_simple(
     let label = line(area, &simple.label, text_size(look.icon_size, 0.30), true, width);
     let detail = line(area, &simple.detail, text_size(look.icon_size, 0.21), false, width);
 
+    // What the tile gives up first when the bar is crowded: the quiet second
+    // line, and then the bar under it. The loud line is the last thing left,
+    // because a tile that cannot say its own number is not worth the pixels.
+    let shows_detail = look.level == Level::Full && !simple.detail.is_empty();
+    let shows_bar = look.level != Level::Minimal && simple.progress != NO_PROGRESS;
+
     let label_height = label.pixel_extents().1.height() as f64;
-    let detail_height = if simple.detail.is_empty() {
-        0.0
-    } else {
+    let detail_height = if shows_detail {
         detail.pixel_extents().1.height() as f64
+    } else {
+        0.0
     };
-    let bar = (simple.progress != NO_PROGRESS).then(|| bar_height(look.icon_size));
+    let bar = shows_bar.then(|| bar_height(look.icon_size));
     let bar_room = bar.map(|thickness| thickness + GAP).unwrap_or(0.0);
 
     let stack = label_height + detail_height + bar_room;
@@ -566,6 +552,7 @@ pub mod tests {
         Look {
             icon_size,
             palette: crate::theme::palette(crate::theme::DEFAULT),
+            level: Level::Full,
         }
     }
 
@@ -909,36 +896,6 @@ pub mod tests {
         let ((_, kind, body), _): ((String, String, zbus::zvariant::OwnedValue), _) =
             bytes.deserialize().expect("a state is an id, a name and a payload");
         (kind, body)
-    }
-
-    #[test]
-    fn a_tile_sits_in_the_same_slot_an_icon_would() {
-        // The row pays `ITEM_SPACING + ITEM_PADDING * 2` per icon, and the
-        // bar's width is the sum of its slots: a tile measured any other way
-        // is a bar that is wider or narrower than it says it is.
-        let frame = crate::dock::ITEM_PADDING * 2 + crate::dock::ITEM_SPACING;
-
-        assert_eq!(slot_of(Tile::Square, 48), 48 + frame);
-        assert_eq!(slot_of(Tile::Wide, 48), 120 + frame);
-        assert_eq!(height_of(48), 48);
-    }
-
-    #[test]
-    fn the_room_the_tiles_need_is_the_sum_of_what_each_declared() {
-        let widgets = [simple("clock"), water(1, 8), simple("cpu")];
-
-        assert_eq!(
-            room_for(&widgets, 48),
-            slot_of(Tile::Wide, 48) * 2 + slot_of(Tile::Square, 48)
-        );
-        assert_eq!(room_for(&[], 48), 0, "no widgets need no room");
-    }
-
-    #[test]
-    fn a_bar_with_no_widgets_asks_for_no_room_at_any_icon_size() {
-        for icon in [24, 48, 96] {
-            assert_eq!(room_for(&[], icon), 0);
-        }
     }
 
     /// A progress bar that grows with the icons, and never to nothing.

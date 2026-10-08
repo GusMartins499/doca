@@ -1,5 +1,6 @@
 mod appearance;
 mod dock;
+mod fit;
 mod ground;
 mod magnify;
 mod motion;
@@ -738,24 +739,53 @@ async fn rebuild(
         items.add(&row.perch);
     }
 
+    // What the bar gives up to fit the screen, and in what order — the gap
+    // first, then the icons, then how much of itself a tile draws. `fit` has
+    // the ladder and the reason for its order; here it is only read.
+    let shapes: Vec<doca_ipc::Tile> = widgets
+        .iter()
+        .map(|state| state.tile().unwrap_or(doca_ipc::Tile::Wide))
+        .collect();
+    let fitted = fit::fits(
+        entries.len() as i32,
+        &shapes,
+        screen.width(),
+        preferred_icon,
+        magnification,
+    );
+    if !fitted.gave_nothing_up(preferred_icon) {
+        tracing::debug!(
+            icon = fitted.icon,
+            spacing = fitted.spacing,
+            tiles = ?fitted.tiles,
+            overflow = fitted.overflow,
+            "the bar gave way to fit the screen"
+        );
+    }
+    if fitted.overflow > 0 {
+        // The last rung of the ladder, and the one with nowhere to put what
+        // comes off it yet. Everything is still shown and GTK still squeezes,
+        // exactly as before this — dropping the apps would be worse than the
+        // squeeze until there is a way to reach them again.
+        tracing::warn!(
+            overflow = fitted.overflow,
+            shown = fitted.shown,
+            "more apps than there is bar, and nowhere yet to put the rest"
+        );
+    }
+    items.set_spacing(fitted.spacing);
+
     if entries.is_empty() {
         row.fill(&[], row::Rest::default());
         let empty = gtk::Label::new(Some("nothing running, nothing pinned"));
         empty.set_widget_name("empty");
         items.add(&empty);
     } else {
-        let icon_size = dock::icon_size_for(
-            entries.len() as i32,
-            widget_tile::room_for(&widgets, tile_icon),
-            screen.width(),
-            preferred_icon,
-            magnification,
-        );
         row.fill(
             &entries,
             row::Rest::new(
-                icon_size,
-                dock::ITEM_SPACING,
+                fitted.icon,
+                fitted.spacing,
                 dock::ITEM_PADDING,
                 magnification,
             ),
@@ -777,6 +807,7 @@ async fn rebuild(
         widget_tile::Look {
             icon_size: tile_icon,
             palette: theme::palette_for(&style.applied.borrow(), &row.area.style_context()),
+            level: fitted.tiles,
         },
         &expand,
     );
@@ -876,6 +907,7 @@ fn on_a_display() {
     gtk::init().expect("no X display");
 
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
+    fit::tests::the_model_never_promises_room_the_bar_does_not_have();
     ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
