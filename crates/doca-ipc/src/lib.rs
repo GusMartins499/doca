@@ -139,8 +139,16 @@ pub struct Simple {
 /// with what it was derived from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
 pub struct Water {
-    pub glasses: u32,
+    /// Millilitres drunk today.
+    pub drunk: u32,
+    /// Millilitres the day is aiming at.
     pub goal: u32,
+    /// How much one go is worth — the bottle the user drinks from.
+    ///
+    /// Here rather than only in the settings because the panel's button says
+    /// what it will add, and a panel that had to ask the daemon for that
+    /// would be a D-Bus call on the way to drawing a label.
+    pub bottle: u32,
 }
 
 /// How much room a tile asks for on the bar: about one icon, or about two
@@ -313,7 +321,10 @@ pub struct WidgetSettings {
     pub countdown_label: String,
     pub note_text: String,
     pub timer_minutes: u32,
+    /// Millilitres.
     pub water_goal: u32,
+    /// Millilitres in one bottle.
+    pub water_bottle: u32,
 }
 
 /// The widgets that take a setting, and what `SetWidgetSetting` calls each.
@@ -332,14 +343,16 @@ pub mod widget_key {
     pub const TEXT: &str = "text";
     pub const MINUTES: &str = "minutes";
     pub const GOAL: &str = "goal";
+    pub const BOTTLE: &str = "bottle";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 5] = [
+    pub const ALL: [(&str, &str); 6] = [
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),
         (TIMER, MINUTES),
         (WATER, GOAL),
+        (WATER, BOTTLE),
     ];
 }
 
@@ -448,8 +461,22 @@ pub const MAX_MAGNIFICATION: f64 = 2.5;
 /// A timer of no minutes has nothing to count, so one is the floor.
 pub const MIN_TIMER_MINUTES: u32 = 1;
 pub const MAX_TIMER_MINUTES: u32 = 24 * 60;
-pub const MIN_WATER_GOAL: u32 = 1;
-pub const MAX_WATER_GOAL: u32 = 64;
+/// Millilitres, not glasses.
+///
+/// A glass is a unit nobody's bottle is marked in. The range is the one
+/// primo.dock offers; a config written when this counted glasses is carried
+/// over by [`crate::GLASS`] rather than clamped, and the two ranges do not
+/// overlap, which is what makes that migration safe to run more than once.
+pub const MIN_WATER_GOAL: u32 = 500;
+pub const MAX_WATER_GOAL: u32 = 6000;
+/// What a glass was worth, for carrying an old config over.
+///
+/// Eight of them is 2000ml, which is both the old default and the new one —
+/// so somebody who never changed the setting does not notice it changed
+/// units.
+pub const GLASS: u32 = 250;
+pub const MIN_WATER_BOTTLE: u32 = 100;
+pub const MAX_WATER_BOTTLE: u32 = 2000;
 
 /// The keys `SetAppearance` understands, by the name they carry on the wire.
 pub mod appearance_key {
@@ -675,7 +702,7 @@ mod tests {
             (body_kind::SIMPLE, simple()),
             (
                 body_kind::WATER,
-                Body::Water(Water { glasses: 3, goal: 8 }),
+                Body::Water(Water { drunk: 3, goal: 8, bottle: 500 }),
             ),
         ]
     }
@@ -740,7 +767,7 @@ mod tests {
     /// And a payload that is not the shape its name claims.
     #[test]
     fn a_payload_that_does_not_match_its_name_is_refused() {
-        let water = WidgetState::new("water", Body::Water(Water { glasses: 1, goal: 8 }));
+        let water = WidgetState::new("water", Body::Water(Water { drunk: 1, goal: 8, bottle: 500 }));
         let lying = WidgetState {
             id: water.id.clone(),
             kind: body_kind::SIMPLE.to_string(),

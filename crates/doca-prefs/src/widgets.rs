@@ -154,6 +154,7 @@ pub struct Tab {
     save_note: gtk::Button,
     minutes: gtk::Adjustment,
     goal: gtk::Adjustment,
+    bottle: gtk::Adjustment,
     trouble: gtk::Label,
     state: Rc<State>,
 }
@@ -249,16 +250,28 @@ impl Tab {
         );
         pages.add_named(&timer, key::TIMER);
 
+        // Millilitres, and in steps somebody would actually set: fifty at a
+        // time on the goal, because nobody aims for 2037ml, and a hundred on
+        // the bottle, because that is how bottles are sold.
         let goal = gtk::Adjustment::new(
-            8.0,
+            2000.0,
             doca_ipc::MIN_WATER_GOAL as f64,
             doca_ipc::MAX_WATER_GOAL as f64,
-            1.0,
-            4.0,
+            50.0,
+            250.0,
+            0.0,
+        );
+        let bottle = gtk::Adjustment::new(
+            500.0,
+            doca_ipc::MIN_WATER_BOTTLE as f64,
+            doca_ipc::MAX_WATER_BOTTLE as f64,
+            50.0,
+            100.0,
             0.0,
         );
         let water = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        water.pack_start(&titled("Glasses", &spin(&goal)), false, false, 0);
+        water.pack_start(&titled("Goal for the day (ml)", &spin(&goal)), false, false, 0);
+        water.pack_start(&titled("One bottle (ml)", &spin(&bottle)), false, false, 0);
         water.pack_start(
             &hint("Today's count is kept; only the goal it is measured against moves."),
             false,
@@ -297,6 +310,7 @@ impl Tab {
             save_note,
             minutes,
             goal,
+            bottle,
             trouble,
             state: Rc::new(State::default()),
         };
@@ -430,6 +444,7 @@ impl Tab {
         for (adjustment, widget, name) in [
             (&self.minutes, key::TIMER, key::MINUTES),
             (&self.goal, key::WATER, key::GOAL),
+            (&self.bottle, key::WATER, key::BOTTLE),
         ] {
             let writing = put.clone();
             let filling = self.state.filling.clone();
@@ -469,6 +484,7 @@ impl Tab {
             }
             self.minutes.set_value(settings.timer_minutes as f64);
             self.goal.set_value(settings.water_goal as f64);
+            self.bottle.set_value(settings.water_bottle as f64);
         });
         self.trouble.set_text("");
     }
@@ -547,7 +563,8 @@ pub mod on_a_display {
             countdown_label: "Christmas".to_string(),
             note_text: "milk\nand bread".to_string(),
             timer_minutes: 10,
-            water_goal: 8,
+            water_goal: 2000,
+            water_bottle: 500,
         }
     }
 
@@ -584,7 +601,8 @@ pub mod on_a_display {
         tab.show(&settings());
         tab.show(&WidgetSettings {
             timer_minutes: 25,
-            water_goal: 12,
+            water_goal: 2500,
+            water_bottle: 750,
             ..settings()
         });
 

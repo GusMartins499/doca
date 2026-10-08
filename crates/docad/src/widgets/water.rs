@@ -8,8 +8,11 @@ use crate::state::{State, WaterState};
 use super::Widget;
 
 pub struct Water {
+    /// Millilitres, both of them.
     goal: u32,
     drunk: u32,
+    /// What one go adds — the bottle, not a glass.
+    bottle: u32,
 }
 
 impl Water {
@@ -17,6 +20,7 @@ impl Water {
         Self {
             goal: settings.goal.max(1),
             drunk: 0,
+            bottle: settings.bottle.max(1),
         }
     }
 
@@ -30,12 +34,17 @@ impl Water {
         self.goal
     }
 
+    /// One bottle more.
+    ///
+    /// A bottle and not a glass: what is counted is what the user actually
+    /// picks up, so the number on the tile is one they can check against the
+    /// thing on their desk.
     pub fn drink(&mut self) {
-        self.drunk = self.drunk.saturating_add(1);
+        self.drunk = self.drunk.saturating_add(self.bottle);
     }
 
     pub fn undo(&mut self) {
-        self.drunk = self.drunk.saturating_sub(1);
+        self.drunk = self.drunk.saturating_sub(self.bottle);
     }
 
     pub fn reset(&mut self) {
@@ -45,16 +54,17 @@ impl Water {
     /// The count and the goal, and nothing worked out from them.
     ///
     /// The first widget with a variant of its own, and the reason it is this
-    /// one: a label of `"3/8"` is a sentence the bar cannot draw a ring from,
-    /// and the share of the goal is the shape of the drawing. What the tile
-    /// says in words, and in what colour, is the bar's to decide — the daemon
-    /// only knows how many glasses there were.
+    /// one: a label of `"3/8"` is a sentence the bar cannot draw a bottle
+    /// from, and the share of the goal is the shape of the drawing. What the
+    /// tile says in words, and in what colour, is the bar's to decide — the
+    /// daemon only knows how many millilitres there were.
     pub fn state(&self) -> WidgetState {
         WidgetState::new(
             "water",
             Body::Water(doca_ipc::Water {
-                glasses: self.drunk,
+                drunk: self.drunk,
                 goal: self.goal,
+                bottle: self.bottle,
             }),
         )
     }
@@ -77,27 +87,26 @@ impl Widget for Water {
         &["toggle", "drink", "undo", "reset"]
     }
 
-    /// The glasses the day had already counted when the daemon came up — or,
+    /// The millilitres the day had already counted when the daemon came up — or,
     /// at midnight, the nothing a new day starts with.
     ///
     /// No date is read here. Whether this state belongs to today was settled
     /// before it arrived, in `State::roll_to`.
     fn adopt_state(&mut self, state: &State) {
-        self.drunk = state.water.glasses;
+        self.drunk = state.water.ml;
     }
 
     fn remember(&self, state: &mut State) {
-        state.water = WaterState {
-            glasses: self.drunk,
-        };
+        state.water = WaterState { ml: self.drunk };
     }
 
-    /// A new goal, and the glasses already counted today.
+    /// A new goal, and the millilitres already counted today.
     ///
     /// Resetting `drunk` here would be a settings change that quietly undoes
     /// the user's afternoon.
     fn adopt(&mut self, settings: &WidgetSettings) {
         self.goal = settings.water.goal.max(1);
+        self.bottle = settings.water.bottle.max(1);
     }
 
     fn invoke(&mut self, action: &str) {
@@ -115,12 +124,12 @@ mod tests {
     use super::*;
 
     pub fn water(goal: u32) -> Water {
-        Water::new(WaterSettings { goal })
+        Water::new(WaterSettings { goal, bottle: 1 })
     }
 
     fn goal_of(goal: u32) -> WidgetSettings {
         WidgetSettings {
-            water: WaterSettings { goal },
+            water: WaterSettings { goal, bottle: 1 },
             ..WidgetSettings::default()
         }
     }
@@ -141,7 +150,7 @@ mod tests {
 
         water.adopt(&goal_of(4));
 
-        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 2, goal: 4 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 4, bottle: 1 });
     }
 
     #[test]
@@ -154,12 +163,12 @@ mod tests {
         water.adopt(&goal_of(2));
 
         let body = body_of(&water);
-        assert!(body.glasses >= body.goal);
+        assert!(body.drunk >= body.goal);
     }
 
     #[test]
     fn the_day_starts_with_an_empty_count() {
-        assert_eq!(body_of(&water(8)), doca_ipc::Water { glasses: 0, goal: 8 });
+        assert_eq!(body_of(&water(8)), doca_ipc::Water { drunk: 0, goal: 8, bottle: 1 });
     }
 
     #[test]
@@ -174,7 +183,7 @@ mod tests {
         water.drink();
         water.drink();
 
-        assert_eq!(body_of(&water).glasses, 2);
+        assert_eq!(body_of(&water).drunk, 2);
     }
 
     #[test]
@@ -203,7 +212,7 @@ mod tests {
         water.drink();
         water.drink();
 
-        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 2, goal: 2 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 2, goal: 2, bottle: 1 });
     }
 
     /// Past the goal the count keeps going, and the body says so plainly —
@@ -216,7 +225,7 @@ mod tests {
             water.drink();
         }
 
-        assert_eq!(body_of(&water), doca_ipc::Water { glasses: 10, goal: 2 });
+        assert_eq!(body_of(&water), doca_ipc::Water { drunk: 10, goal: 2, bottle: 1 });
     }
 
     #[test]
@@ -236,7 +245,7 @@ mod remembering {
     use super::*;
 
     #[test]
-    fn the_glasses_counted_today_are_what_gets_written_down() {
+    fn what_was_drunk_today_is_what_gets_written_down() {
         let mut water = water(8);
         water.drink();
         water.drink();
@@ -245,7 +254,7 @@ mod remembering {
         let mut state = State::default();
         water.remember(&mut state);
 
-        assert_eq!(state.water.glasses, 3);
+        assert_eq!(state.water.ml, 3);
     }
 
     #[test]
@@ -254,7 +263,7 @@ mod remembering {
 
         water.adopt_state(&State {
             day: 20_735,
-            water: WaterState { glasses: 5 },
+            water: WaterState { ml: 5 },
         });
 
         assert_eq!(water.drunk(), 5);

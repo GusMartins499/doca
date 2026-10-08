@@ -709,7 +709,7 @@ mod tests {
     fn a_widget_is_built_holding_what_the_day_already_counted() {
         let state = State {
             day: TODAY,
-            water: crate::state::WaterState { glasses: 4 },
+            water: crate::state::WaterState { ml: 4 },
         };
 
         let built = build(&ids_of(&["water"]), &WidgetSettings::default(), &state);
@@ -717,7 +717,7 @@ mod tests {
         let mut built = built;
         assert_eq!(
             built[0].poll().body().expect("a water body"),
-            doca_ipc::Body::Water(doca_ipc::Water { glasses: 4, goal: 8 })
+            doca_ipc::Body::Water(doca_ipc::Water { drunk: 4, goal: 2000, bottle: 500 })
         );
     }
 
@@ -727,19 +727,19 @@ mod tests {
     fn a_save_does_not_zero_a_counter_whose_widget_is_not_running() {
         let held = State {
             day: TODAY,
-            water: crate::state::WaterState { glasses: 7 },
+            water: crate::state::WaterState { ml: 7 },
         };
         let clock_alone = build(&ids_of(&["clock"]), &WidgetSettings::default(), &held);
 
         let next = remembered(&clock_alone, &held);
 
-        assert_eq!(next.water.glasses, 7, "the water count was wiped by a clock");
+        assert_eq!(next.water.ml, 7, "the water count was wiped by a clock");
     }
 
     /// The whole of the water half of item 4, through the hub: a click is
     /// written down, and the next daemon starts where this one left off.
     #[tokio::test]
-    async fn a_glass_counted_now_is_a_glass_the_next_start_still_knows_about() {
+    async fn a_bottle_drunk_now_is_a_bottle_the_next_start_still_knows_about() {
         let today = crate::state::Day::at_offset(0).today();
         let (hub, scratch) = running_with(&["water"], Scratch::new("counted")).await;
 
@@ -750,12 +750,13 @@ mod tests {
         hub.list().await.expect("the hub answers");
 
         let next_time = scratch.store(today);
-        assert_eq!(next_time.state().water.glasses, 2);
+        // Two bottles at the default five hundred millilitres.
+        assert_eq!(next_time.state().water.ml, 1000);
     }
 
     /// And the day after: the file is there, and the count in it is not.
     #[tokio::test]
-    async fn a_glass_counted_yesterday_is_not_counted_today() {
+    async fn a_bottle_drunk_yesterday_is_not_counted_today() {
         let today = crate::state::Day::at_offset(0).today();
         let (hub, scratch) = running_with(&["water"], Scratch::new("yesterday")).await;
         hub.invoke("water", "drink").await.expect("the hub answers");
@@ -763,7 +764,7 @@ mod tests {
 
         let tomorrow = scratch.store(today + 1);
 
-        assert_eq!(tomorrow.state().water.glasses, 0);
+        assert_eq!(tomorrow.state().water.ml, 0);
     }
 
     #[test]

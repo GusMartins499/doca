@@ -162,19 +162,48 @@ impl Default for TimerSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaterSettings {
+    /// Millilitres for the day.
     #[serde(default = "default_water_goal")]
     pub goal: u32,
+    /// Millilitres in one go — the bottle on the desk, not an abstract glass.
+    #[serde(default = "default_water_bottle")]
+    pub bottle: u32,
 }
 
 fn default_water_goal() -> u32 {
-    8
+    2000
+}
+
+fn default_water_bottle() -> u32 {
+    500
 }
 
 impl Default for WaterSettings {
     fn default() -> Self {
         Self {
             goal: default_water_goal(),
+            bottle: default_water_bottle(),
         }
+    }
+}
+
+impl WaterSettings {
+    /// A goal written when this counted glasses, read as the millilitres it
+    /// always meant.
+    ///
+    /// The old range was 1 to 64 glasses and the new one is 500 to 6000
+    /// millilitres: they do not overlap, which is the whole of why this is
+    /// safe to run on every load. A number below the new floor cannot be a
+    /// goal somebody set in the new unit, so it can only be an old one — and
+    /// once carried over it is above the floor and this never sees it again.
+    ///
+    /// Eight glasses was the old default and 2000ml is the new one, so a
+    /// config nobody ever edited comes out meaning exactly what it meant.
+    fn carried_over(mut self) -> Self {
+        if self.goal < MIN_WATER_GOAL {
+            self.goal = (self.goal * doca_ipc::GLASS).clamp(MIN_WATER_GOAL, MAX_WATER_GOAL);
+        }
+        self
     }
 }
 
@@ -230,6 +259,10 @@ impl WidgetSettings {
             },
             water: WaterSettings {
                 goal: self.water.goal.clamp(MIN_WATER_GOAL, MAX_WATER_GOAL),
+                bottle: self
+                    .water
+                    .bottle
+                    .clamp(doca_ipc::MIN_WATER_BOTTLE, doca_ipc::MAX_WATER_BOTTLE),
             },
         }
     }
@@ -248,6 +281,7 @@ impl WidgetSettings {
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
             (k::TIMER, k::MINUTES) => self.timer.minutes = value.into_count()?,
             (k::WATER, k::GOAL) => self.water.goal = value.into_count()?,
+            (k::WATER, k::BOTTLE) => self.water.bottle = value.into_count()?,
             _ => anyhow::bail!("no setting {key} on widget {widget}"),
         }
         *self = self.sanitised();
@@ -310,6 +344,7 @@ impl Config {
             });
         }
         self.pinned.clear();
+        self.widgets.water = std::mem::take(&mut self.widgets.water).carried_over();
         self
     }
 
@@ -832,8 +867,52 @@ mod tests {
         let settings = config("[[environments]]\nname = \"A\"\n").widgets;
 
         assert_eq!(settings.timer.minutes, 10);
-        assert_eq!(settings.water.goal, 8);
+        assert_eq!(settings.water.goal, 2000);
+        assert_eq!(settings.water.bottle, 500);
         assert!(settings.date_is_unset());
+    }
+
+    /// The unit changed under people who already had a goal, so the goal has
+    /// to change with it rather than be clamped into nonsense — a saved `8`
+    /// read as millilitres would be a goal of eight millilitres.
+    #[test]
+    fn a_goal_written_in_glasses_is_read_as_the_millilitres_it_meant() {
+        let carried = config("[widgets.water]\ngoal = 8\n").widgets;
+
+        assert_eq!(carried.water.goal, 2000, "eight glasses is two litres");
+    }
+
+    /// And the half of it that matters more: it cannot happen twice. The old
+    /// range stopped at 64 and the new one starts at 500, so a goal that has
+    /// already been carried over can never be mistaken for one that has not.
+    #[test]
+    fn carrying_a_goal_over_a_second_time_does_nothing() {
+        let once = config("[widgets.water]\ngoal = 8\n").widgets.water;
+
+        let twice = once.clone().carried_over();
+
+        assert_eq!(twice.goal, once.goal);
+        for glasses in 1..=64u32 {
+            let carried = WaterSettings { goal: glasses, bottle: 500 }.carried_over();
+            assert_eq!(
+                carried.clone().carried_over().goal,
+                carried.goal,
+                "{glasses} glasses moved twice"
+            );
+            assert!(carried.goal >= MIN_WATER_GOAL);
+        }
+    }
+
+    /// A goal somebody set in the new unit is left exactly alone, including
+    /// the smallest one the range allows — which is the number the carry-over
+    /// has to stop at.
+    #[test]
+    fn a_goal_already_in_millilitres_is_not_touched() {
+        for goal in [MIN_WATER_GOAL, 1500, 2000, MAX_WATER_GOAL] {
+            let settings = WaterSettings { goal, bottle: 500 };
+
+            assert_eq!(settings.carried_over().goal, goal);
+        }
     }
 
     #[test]
@@ -841,7 +920,7 @@ mod tests {
         let settings = config("[widgets.timer]\nminutes = 25\n").widgets;
 
         assert_eq!(settings.timer.minutes, 25);
-        assert_eq!(settings.water.goal, 8);
+        assert_eq!(settings.water.goal, 2000);
     }
 
     #[test]

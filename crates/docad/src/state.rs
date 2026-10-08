@@ -1,7 +1,7 @@
 //! What the day accumulated, as opposed to what the user chose.
 //!
-//! The config file is choices: a goal of eight glasses, a theme, which docks
-//! pin what. This is the other half — the six glasses already drunk, which
+//! The config file is choices: a goal of two litres, a theme, which docks
+//! pin what. This is the other half — the millilitres already drunk, which
 //! nobody chose and nothing should offer to edit. Keeping the two apart is
 //! what lets the preferences window show the whole config without showing a
 //! counter, and what lets the daemon come back up still knowing what the
@@ -49,8 +49,9 @@ pub struct State {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaterState {
+    /// Millilitres drunk today.
     #[serde(default)]
-    pub glasses: u32,
+    pub ml: u32,
 }
 
 impl State {
@@ -251,7 +252,7 @@ mod tests {
     fn water(day: i64, glasses: u32) -> State {
         State {
             day,
-            water: WaterState { glasses },
+            water: WaterState { ml: glasses },
         }
     }
 
@@ -266,7 +267,7 @@ mod tests {
 
         let again = Store::open_at(&scratch.file(), TODAY);
 
-        assert_eq!(again.state().water.glasses, 6);
+        assert_eq!(again.state().water.ml, 6);
     }
 
     /// And the other half: it is not still counted tomorrow.
@@ -278,7 +279,7 @@ mod tests {
 
         let tomorrow = Store::open_at(&scratch.file(), TODAY + 1);
 
-        assert_eq!(tomorrow.state().water.glasses, 0);
+        assert_eq!(tomorrow.state().water.ml, 0);
         assert_eq!(tomorrow.day(), TODAY + 1);
     }
 
@@ -294,7 +295,7 @@ mod tests {
 
         assert_eq!(rolled, water(TODAY + 1, 0));
         assert_eq!(
-            Store::open_at(&scratch.file(), TODAY + 1).state().water.glasses,
+            Store::open_at(&scratch.file(), TODAY + 1).state().water.ml,
             0,
             "the turn of the day was never written down"
         );
@@ -305,7 +306,7 @@ mod tests {
         let mut state = water(TODAY, 6);
 
         assert!(!state.roll_to(TODAY), "a day that did not turn was reported as turning");
-        assert_eq!(state.water.glasses, 6);
+        assert_eq!(state.water.ml, 6);
     }
 
     #[test]
@@ -334,7 +335,7 @@ mod tests {
         let scratch = Scratch::new("empty");
         std::fs::write(scratch.file(), "").unwrap();
 
-        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.glasses, 0);
+        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.ml, 0);
     }
 
     #[test]
@@ -342,7 +343,7 @@ mod tests {
         let scratch = Scratch::new("torn");
         std::fs::write(scratch.file(), "day = 20735\n[water]\nglass").unwrap();
 
-        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.glasses, 0);
+        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.ml, 0);
     }
 
     /// A file from a build that knew fields this one does not.
@@ -351,11 +352,11 @@ mod tests {
         let scratch = Scratch::new("newer");
         std::fs::write(
             scratch.file(),
-            "day = 20735\nstreak = 9\n[water]\nglasses = 4\n[sleep]\nhours = 7\n",
+            "day = 20735\nstreak = 9\n[water]\nml = 4\n[sleep]\nhours = 7\n",
         )
         .unwrap();
 
-        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.glasses, 4);
+        assert_eq!(Store::open_at(&scratch.file(), TODAY).state().water.ml, 4);
     }
 
     #[test]
@@ -368,7 +369,7 @@ mod tests {
         store.put(water(TODAY, 1));
 
         assert_eq!(std::fs::metadata(scratch.file()).unwrap().len(), written);
-        assert_eq!(store.state().water.glasses, 1);
+        assert_eq!(store.state().water.ml, 1);
     }
 
     #[test]
@@ -378,7 +379,7 @@ mod tests {
         store.put(water(TODAY, 3));
 
         assert_eq!(
-            store.state().water.glasses, 3,
+            store.state().water.ml, 3,
             "the dock in front of the user should still be right"
         );
     }
@@ -396,7 +397,7 @@ mod tests {
         let chosen =
             leaves(&toml::to_string(&crate::config::WidgetSettings::default()).unwrap());
 
-        assert!(counted.contains(&"glasses".to_string()), "{counted:?}");
+        assert!(counted.contains(&"ml".to_string()), "{counted:?}");
         assert!(chosen.contains(&"goal".to_string()), "{chosen:?}");
         for name in &counted {
             assert!(
