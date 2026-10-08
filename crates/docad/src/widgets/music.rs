@@ -184,6 +184,26 @@ impl Music {
         let _: Result<(), _> = proxy.call(method, &());
     }
 
+    /// Which player the tile and the controls follow, when more than one is
+    /// on the bus.
+    ///
+    /// **The first one that is playing wins, and otherwise the first that has
+    /// a track at all.** Written down because the issue asked for it to be,
+    /// and because "first" here means first in the order the bus lists names,
+    /// which is not an order anybody chose.
+    ///
+    /// The rule is not arbitrary even if the order is. Two players *playing*
+    /// at once is a state nobody wants and nobody can read anyway — whichever
+    /// the tile picked, the other is still making noise — so the tile is
+    /// worth no cleverness there. One playing and three paused is the case
+    /// that actually happens, a browser tab left open behind the music, and
+    /// for that "the one that is playing" is exactly right.
+    ///
+    /// What it is *not* is sticky: a player that stops hands the tile to the
+    /// next one that is going rather than keeping it. That is the behaviour
+    /// to revisit if this ever feels wrong, and it would want remembering
+    /// which player the user last touched, which is state this widget does
+    /// not have.
     fn preferred_player(&self) -> Option<(String, NowPlaying)> {
         let players = self.players();
         let mut fallback = None;

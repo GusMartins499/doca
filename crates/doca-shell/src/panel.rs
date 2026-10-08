@@ -75,6 +75,8 @@ pub enum Row {
     },
     /// Seven days as bars, oldest first, today last and marked.
     Week { days: Vec<u32>, goal: u32 },
+    /// An album cover at a size worth looking at.
+    Cover { art: String },
 }
 
 /// The widget's name as a person would write it: `time-progress` is
@@ -133,6 +135,14 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
     };
 
     let mut rows = vec![heading];
+    // The cover sits above the controls for the reason the week does: it is
+    // what you opened the panel to see. Only when there is one — a row that
+    // is a picture of nothing is worse than no row.
+    if let Ok(Body::Music(music)) = state.body() {
+        if !music.art.is_empty() {
+            rows.push(Row::Cover { art: music.art });
+        }
+    }
     // The week sits above the controls: it is what you came to look at, and
     // the controls are what you do about it.
     if let Ok(Body::Water(water)) = state.body() {
@@ -287,6 +297,22 @@ fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
             control.connect_activate(move |_| invoke(&id, &action));
             control
         }
+        Row::Cover { art } => {
+            let picture = gtk::Image::new();
+            // Square and the width of the panel, which is the one size a
+            // menu row can be sure of: the rows beside it are text at
+            // `ROW_CHARS`, and a cover wider than them would stretch the menu
+            // around itself.
+            if let Some(pixbuf) = crate::dock::scaled_to_fill(art, COVER, COVER) {
+                picture.set_from_pixbuf(Some(&pixbuf));
+            }
+
+            let row = gtk::MenuItem::new();
+            row.add(&picture);
+            // A picture, not a control.
+            row.set_sensitive(false);
+            row
+        }
         Row::Week { days, goal } => {
             let area = gtk::DrawingArea::new();
             area.set_size_request(-1, WEEK_HEIGHT);
@@ -317,6 +343,9 @@ fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
         }
     }
 }
+
+/// How big the cover is in the panel, square.
+const COVER: f64 = 180.0;
 
 /// How tall the week's bars are drawn.
 const WEEK_HEIGHT: i32 = 34;
@@ -538,6 +567,55 @@ pub mod tests {
         );
     }
 
+    fn music(title: &str, art: &str) -> WidgetState {
+        WidgetState::new(
+            "music",
+            Body::Music(doca_ipc::Music {
+                title: title.to_string(),
+                artist: "João Gilberto".to_string(),
+                player: "rhythmbox".to_string(),
+                playing: true,
+                art: art.to_string(),
+            }),
+        )
+    }
+
+    /// The cover is what you opened the panel for, so it is above the
+    /// controls — and it is the panel's job, not the tile's: the tile has
+    /// room for a thumbnail with words on it, and this has room for the
+    /// picture.
+    #[test]
+    fn a_music_panel_puts_the_cover_above_its_controls() {
+        let rows = rows_for(&music("Garota de Ipanema", "/tmp/cover.png"));
+
+        let cover = rows
+            .iter()
+            .position(|row| matches!(row, Row::Cover { .. }))
+            .expect("the panel has no cover in it");
+        let first_control = rows
+            .iter()
+            .position(|row| matches!(row, Row::Action { .. }))
+            .expect("the panel has no controls");
+
+        assert!(cover < first_control);
+        assert_eq!(rows[cover], Row::Cover { art: "/tmp/cover.png".to_string() });
+    }
+
+    /// A track with no cover gets no row, rather than a row that is a picture
+    /// of nothing. The controls are the same either way — they come from the
+    /// id, not from the body.
+    #[test]
+    fn a_track_with_no_cover_gets_no_row_for_one() {
+        let rows = rows_for(&music("Some radio stream", ""));
+
+        assert!(!rows.iter().any(|row| matches!(row, Row::Cover { .. })));
+        assert_eq!(
+            rows.iter().filter(|row| matches!(row, Row::Action { .. })).count(),
+            3,
+            "the controls went with the cover"
+        );
+    }
+
     /// The week is in the panel and nowhere else: the tile has room for the
     /// day, and seven days is what you open the panel to see.
     #[test]
@@ -610,7 +688,7 @@ pub mod tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Action { action, .. } => Some(*action),
-                Row::Heading { .. } | Row::Week { .. } => None,
+                Row::Heading { .. } | Row::Week { .. } | Row::Cover { .. } => None,
             })
             .collect();
         assert_eq!(offered, vec!["drink", "undo", "reset"]);
