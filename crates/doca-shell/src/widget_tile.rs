@@ -240,11 +240,13 @@ fn draw_simple(
     }
 }
 
-/// Water: the glasses counted, inside a ring of how much of the goal that is.
+/// Water: a bottle that fills, and what is in it.
 ///
-/// A square badge, which is the chassis' half of #28 — the wide card with the
-/// week's bars and the next reminder in it is that issue's, and this becomes
-/// it by changing which [`Tile`] the variant declares.
+/// A bottle and not a ring, because a ring is a share and water is a
+/// quantity: you look at a bottle on a desk and know how much is left
+/// without reading a number off it. The fill is the day against the goal and
+/// the number beside it is the day in millilitres, so the glance and the
+/// reading answer the same question at two different speeds.
 fn draw_water(
     water: &Water,
     look: Look,
@@ -258,46 +260,123 @@ fn draw_water(
     } else {
         (water.drunk as f64 / water.goal as f64).clamp(0.0, 1.0)
     };
-    let thickness = (look.icon_size as f64 * 0.10).max(2.0);
-    let radius = (width.min(height) - thickness) / 2.0 - 1.0;
-    if radius <= 0.0 {
-        return;
-    }
-    let (centre_x, centre_y) = (width / 2.0, height / 2.0);
+    let done = water.goal > 0 && water.drunk >= water.goal;
 
-    cr.set_line_width(thickness);
-    let track = look.palette.track;
-    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
-    cr.arc(centre_x, centre_y, radius, 0.0, std::f64::consts::TAU);
-    let _ = cr.stroke();
+    // The bottle keeps its own proportions whatever the tile is doing: it is
+    // a picture of a bottle, and a bottle stretched to fill a box stops being
+    // one.
+    let bottle_height = (height * 0.88).max(1.0);
+    let bottle_width = (bottle_height * 0.46).min(width);
+    let gap = (look.icon_size as f64 * 0.14).max(3.0);
+    let top = (height - bottle_height) / 2.0;
 
+    // The water first and the glass over it, so the outline stays crisp
+    // however full the bottle is. Stroked first, the inner half of the line
+    // is painted over and a full bottle loses its edge.
     if fraction > 0.0 {
+        let _ = cr.save();
+        bottle(cr, 0.0, top, bottle_width, bottle_height);
+        // `clip` and not `clip_preserve`: the bottle has to stop being the
+        // current path once it is the clip, or the fill below adds the water
+        // to it and paints the pair — which is a bottle full at every level,
+        // and was.
+        cr.clip();
         let fill = look.palette.fill;
         cr.set_source_rgba(fill.red(), fill.green(), fill.blue(), fill.alpha());
-        // From the top, clockwise, the way a ring of anything counted is
-        // read.
-        let from = -std::f64::consts::FRAC_PI_2;
-        cr.arc(centre_x, centre_y, radius, from, from + fraction * std::f64::consts::TAU);
-        let _ = cr.stroke();
+        let surface = top + bottle_height * (1.0 - fraction);
+        cr.rectangle(0.0, surface, bottle_width, top + bottle_height - surface);
+        let _ = cr.fill();
+        let _ = cr.restore();
     }
 
-    // The count alone. The goal is the ring, so saying "3/8" in a square this
-    // size would be half the words at half the size for no more meaning.
-    let layout = line(
+    bottle(cr, 0.0, top, bottle_width, bottle_height);
+    let track = look.palette.track;
+    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
+    cr.set_line_width((look.icon_size as f64 * 0.045).max(1.0));
+    let _ = cr.stroke();
+
+    // At the narrowest the bar ever squeezes a tile, the bottle is the whole
+    // of it: the fill still says how the day is going, and a number in the
+    // room left would be two characters of nothing.
+    if look.level == Level::Minimal {
+        return;
+    }
+
+    let text_left = bottle_width + gap;
+    let room = (width - text_left).max(0.0);
+    if room <= 0.0 {
+        return;
+    }
+
+    let amount = line(
         area,
         &compact_ml(water.drunk),
-        text_size(look.icon_size, 0.36),
+        text_size(look.icon_size, 0.34),
         true,
-        width,
+        room,
     );
-    let (_, logical) = layout.pixel_extents();
-    paint(
-        cr,
-        &layout,
-        0.0,
-        centre_y - logical.height() as f64 / 2.0,
-        look.palette.label,
-    );
+    // The goal under the amount, and only when the tile is drawing whole —
+    // it is the one thing here the fill already says.
+    let against = (look.level == Level::Full).then(|| {
+        line(
+            area,
+            &if done {
+                "done".to_string()
+            } else {
+                format!("of {}", compact_ml(water.goal))
+            },
+            text_size(look.icon_size, 0.21),
+            false,
+            room,
+        )
+    });
+
+    let amount_height = amount.pixel_extents().1.height() as f64;
+    let against_height = against
+        .as_ref()
+        .map(|layout| layout.pixel_extents().1.height() as f64)
+        .unwrap_or(0.0);
+    let mut y = ((height - amount_height - against_height) / 2.0).max(0.0);
+
+    // A day that reached its goal says so in the colour the water is drawn
+    // in, and says it by standing still. A tile that blinks to be noticed is
+    // a tile you end up covering up.
+    let ink = if done { look.palette.fill } else { look.palette.label };
+    paint(cr, &amount, text_left, y, ink);
+    y += amount_height;
+    if let Some(against) = against {
+        paint(cr, &against, text_left, y, look.palette.detail);
+    }
+}
+
+/// The outline of a bottle, left on `cr` as the current path.
+///
+/// Left rather than stroked so the caller can both draw it and pour into it
+/// without describing the shape twice.
+fn bottle(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64) {
+    let neck_width = width * 0.44;
+    let neck_height = height * 0.20;
+    let shoulder = height * 0.14;
+    let corner = width * 0.26;
+    let (left, right) = (x, x + width);
+    let neck_left = x + (width - neck_width) / 2.0;
+    let neck_right = x + (width + neck_width) / 2.0;
+    let shoulder_top = y + neck_height;
+    let body_top = shoulder_top + shoulder;
+    let bottom = y + height;
+
+    cr.new_path();
+    cr.move_to(neck_left, y);
+    cr.line_to(neck_right, y);
+    cr.line_to(neck_right, shoulder_top);
+    cr.curve_to(neck_right, body_top, right, shoulder_top, right, body_top);
+    cr.line_to(right, bottom - corner);
+    cr.curve_to(right, bottom, right, bottom, right - corner, bottom);
+    cr.line_to(left + corner, bottom);
+    cr.curve_to(left, bottom, left, bottom, left, bottom - corner);
+    cr.line_to(left, body_top);
+    cr.curve_to(left, shoulder_top, neck_left, body_top, neck_left, shoulder_top);
+    cr.close_path();
 }
 
 /// The gap between two things in a tile, and the one tunable in here.
@@ -634,6 +713,70 @@ pub mod tests {
             .collect()
     }
 
+    /// The bottle holds as much water as the day has in it.
+    ///
+    /// Drawing is the one part of a tile no assertion about state can reach,
+    /// and it is where the mistakes are: the first bottle written here was
+    /// full at every level, because the outline was still the current path
+    /// when the water was filled and Cairo painted the pair. Nothing but
+    /// counting pixels would have said so.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn the_bottle_holds_as_much_as_the_day_has_in_it() {
+        let poured = |drunk: u32| {
+            let (width, height) = (120, 48);
+            let mut surface = gtk::cairo::ImageSurface::create(
+                gtk::cairo::Format::ARgb32,
+                width,
+                height,
+            )
+            .expect("no surface");
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let area = gtk::DrawingArea::new();
+                area.set_size_request(width, height);
+                draw_water(
+                    &Water { drunk, goal: 2000, bottle: 500, week: vec![0; 7] },
+                    look(ICON),
+                    &area,
+                    &cr,
+                    width as f64,
+                    height as f64,
+                );
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+            // Only the left third, where the bottle is: the amount beside it
+            // is text, and text that got longer would read as more water.
+            //
+            // Any alpha at all, not a threshold: the outline is drawn in the
+            // groove colour, which is a fourteen-percent white — asking for
+            // half-opaque pixels finds the water and calls the glass nothing.
+            let mut painted = 0usize;
+            for row in 0..height as usize {
+                for column in 0..(width as usize / 3) {
+                    if data[row * stride + column * 4 + 3] > 0 {
+                        painted += 1;
+                    }
+                }
+            }
+            painted
+        };
+
+        let (empty, quarter, half, full) = (poured(0), poured(500), poured(1000), poured(2000));
+
+        assert!(empty > 0, "nothing was drawn at all");
+        assert!(
+            quarter > empty && half > quarter && full > half,
+            "the bottle does not track the day: {empty} < {quarter} < {half} < {full}"
+        );
+        assert!(
+            full > empty * 2,
+            "a full bottle is barely fuller than an empty one: {empty} against {full}"
+        );
+    }
+
     /// The one that matters. Everything else here is about this holding under
     /// a list that moved.
     ///
@@ -769,7 +912,7 @@ pub mod tests {
 
         assert_eq!(
             widths(&shelf),
-            vec![Tile::Wide.width(ICON), Tile::Square.width(ICON)],
+            vec![Tile::Wide.width(ICON), Tile::Wide.width(ICON)],
             "a tile is not the width its own variant asked for"
         );
     }
@@ -789,10 +932,10 @@ pub mod tests {
 
         assert_eq!(did, Reconciled { kept: 2, made: 0, gone: 0 });
         assert_eq!(before, roots(&shelf), "resizing the icons remade the tiles");
-        assert_eq!(small, vec![Tile::Wide.width(24), Tile::Square.width(24)]);
+        assert_eq!(small, vec![Tile::Wide.width(24), Tile::Wide.width(24)]);
         assert_eq!(
             widths(&shelf),
-            vec![Tile::Wide.width(96), Tile::Square.width(96)],
+            vec![Tile::Wide.width(96), Tile::Wide.width(96)],
             "the tiles are the same size at 96px icons as at 24px"
         );
     }

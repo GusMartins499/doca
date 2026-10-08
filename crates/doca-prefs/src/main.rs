@@ -333,6 +333,7 @@ fn on_a_display() {
     widgets::on_a_display::a_widget_no_dock_shows_is_told_where_to_turn_it_on();
     widgets::on_a_display::a_spin_writes_its_number_to_its_own_widget_and_key();
     widgets::on_a_display::the_water_goal_is_not_written_to_the_timer();
+    widgets::on_a_display::the_bottle_is_not_written_to_the_goal();
     widgets::on_a_display::a_finished_date_goes_out_with_the_countdowns_name_on_it();
     widgets::on_a_display::a_date_is_not_sent_until_it_is_finished();
     widgets::on_a_display::a_date_that_is_not_a_date_is_said_rather_than_sent();
