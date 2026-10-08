@@ -864,17 +864,6 @@ async fn rebuild(
             "the bar gave way to fit the screen"
         );
     }
-    if fitted.overflow > 0 {
-        // The last rung of the ladder, and the one with nowhere to put what
-        // comes off it yet. Everything is still shown and GTK still squeezes,
-        // exactly as before this — dropping the apps would be worse than the
-        // squeeze until there is a way to reach them again.
-        tracing::warn!(
-            overflow = fitted.overflow,
-            shown = fitted.shown,
-            "more apps than there is bar, and nowhere yet to put the rest"
-        );
-    }
     items.set_spacing(fitted.spacing);
 
     if entries.is_empty() {
@@ -883,8 +872,13 @@ async fn rebuild(
         empty.set_widget_name("empty");
         items.add(&empty);
     } else {
+        // The last rung of the ladder: what fits goes on the row, and what
+        // does not goes behind the control beside it. `fit::fits` already
+        // counted that control as a slot, which is why `shown` leaves room
+        // for it.
+        let (on_the_bar, over) = entries.split_at(fitted.shown.max(0) as usize);
         row.fill(
-            &entries,
+            on_the_bar,
             row::Rest::new(
                 fitted.icon,
                 fitted.spacing,
@@ -892,6 +886,37 @@ async fn rebuild(
                 magnification,
             ),
         );
+        if !over.is_empty() {
+            tracing::info!(
+                overflow = over.len(),
+                shown = on_the_bar.len(),
+                "more apps than there is bar; the rest are behind the control"
+            );
+            let control = dock::overflow_control(over.len(), fitted.icon);
+            let (over, asking) = (over.to_vec(), proxy.clone());
+            let (holding, under) = (hide.clone(), window.clone());
+            let icon_size = fitted.icon;
+            let activate: stack::Open = Rc::new(move |id: &str| {
+                let (id, proxy) = (id.to_string(), asking.clone());
+                glib::spawn_future_local(async move {
+                    if let Err(e) = proxy.activate_item(&id).await {
+                        tracing::warn!("cannot activate {id}: {e}");
+                    }
+                });
+            });
+            control.connect_button_press_event(move |control, _| {
+                let grid = dock::overflow_grid(&over, icon_size, &activate);
+                holding.holds_for(&under, &grid);
+                grid.popup_at_widget(
+                    control,
+                    gdk::Gravity::NorthWest,
+                    gdk::Gravity::SouthWest,
+                    None,
+                );
+                glib::Propagation::Stop
+            });
+            items.add(&control);
+        }
         // The row draws its own dots, so for `system` they are looked up as
         // values rather than read from the sheet.
         let (running, active) =
@@ -1014,6 +1039,8 @@ fn on_a_display() {
     hide_tests::an_open_menu_keeps_the_bar_where_it_is();
     hide_tests::the_first_menu_to_close_does_not_release_the_second();
     hide_tests::switching_auto_hide_off_drops_a_move_nobody_wants_any_more();
+    dock::tests::every_app_that_did_not_fit_is_in_the_grid();
+    dock::tests::the_control_says_how_many_it_is_hiding();
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
     fit::tests::the_model_never_promises_room_the_bar_does_not_have();
     ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();

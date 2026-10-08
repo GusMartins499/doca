@@ -43,6 +43,7 @@ const NATIVE: &str = "
     #widget-progress { background: rgba(255,255,255,0.14); }
     #widget-progress progress { background: #4c8dff; }
     #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
+    #overflow { color: rgba(255,255,255,0.55); font-weight: 700; }
     #tooltip { background: rgba(38,38,42,0.96); border: 1px solid rgba(255,255,255,0.10); }
     #tooltip-label { color: #f2f2f2; font-size: 12px; }
 ";
@@ -64,6 +65,7 @@ const MIDNIGHT: &str = "
     #widget-progress { background: #1f2430; }
     #widget-progress progress { background: #7aa2f7; }
     #empty { color: #6b7488; font-size: 13px; padding: 12px; }
+    #overflow { color: #6b7488; font-weight: 700; }
     #tooltip { background: #11141b; border: 1px solid #232a38; }
     #tooltip-label { color: #d8e0f0; font-size: 12px; }
 ";
@@ -85,6 +87,7 @@ const PAPER: &str = "
     #widget-progress { background: rgba(0,0,0,0.10); }
     #widget-progress progress { background: #c67c4e; }
     #empty { color: rgba(0,0,0,0.45); font-size: 13px; padding: 12px; }
+    #overflow { color: rgba(0,0,0,0.45); font-weight: 700; }
     #tooltip { background: rgba(250,248,243,0.98); border: 1px solid rgba(0,0,0,0.12); }
     #tooltip-label { color: #26241f; font-size: 12px; }
 ";
@@ -120,6 +123,7 @@ const SYSTEM_CSS: &str = "
     #widget-progress { background: alpha(@theme_fg_color, 0.14); }
     #widget-progress progress { background: @theme_selected_bg_color; }
     #empty { color: alpha(@theme_fg_color, 0.55); font-size: 13px; padding: 12px; }
+    #overflow { color: alpha(@theme_fg_color, 0.55); font-weight: 700; }
     #tooltip {
         background: alpha(@theme_bg_color, 0.96);
         border: 1px solid alpha(@borders, 0.8);
@@ -496,6 +500,7 @@ mod tests {
             "#widget-detail",
             "#widget-progress",
             "#empty",
+            "#overflow",
         ];
 
         for name in names() {
