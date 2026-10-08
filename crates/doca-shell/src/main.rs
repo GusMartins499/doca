@@ -1058,6 +1058,8 @@ fn on_a_display() {
     stack::tests::a_folder_with_nothing_in_it_says_so_rather_than_waiting_for_ever();
     stack::tests::a_folder_opened_before_is_drawn_at_the_size_it_was();
     stack::tests::a_grid_always_has_a_cell_to_show_however_little_is_expected();
+    widget_tile::tests::a_cover_of_any_colour_is_made_dark_enough_to_write_on();
+    widget_tile::tests::words_on_a_cover_are_white_whatever_the_theme_is();
     widget_tile::tests::the_bottle_holds_as_much_as_the_day_has_in_it();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();

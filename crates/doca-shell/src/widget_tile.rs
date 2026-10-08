@@ -171,6 +171,7 @@ fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Co
     match state.body() {
         Ok(Body::Simple(simple)) => draw_simple(&simple, look, area, cr, width, height),
         Ok(Body::Water(water)) => draw_water(&water, look, area, cr, width, height),
+        Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();
@@ -347,6 +348,115 @@ fn draw_water(
     if let Some(against) = against {
         paint(cr, &against, text_left, y, look.palette.detail);
     }
+}
+
+/// Music: the cover, and the track written over it.
+///
+/// The cover is the tile. Everything else here exists to keep the words on
+/// top of it readable, which is the hard part — a cover is somebody else's
+/// picture and can be white, black or a saturated orange, and the text has to
+/// hold against all three.
+///
+/// The answer is a veil, not a colour chosen per cover. A gradient from
+/// nothing at the top to nearly opaque at the bottom, with the words in the
+/// bottom third, means the pixel behind any letter is dark whatever the cover
+/// is — and dark by an amount this file decides rather than by an amount the
+/// album decided. `a_cover_of_any_colour_keeps_its_words_readable` measures
+/// exactly that, against a white cover and a black one.
+///
+/// So the words are white here even under `paper`, which is the one place in
+/// the bar that ignores the theme's own ink. A photo with a scrim over it is
+/// a photo with a scrim over it on every desktop.
+fn draw_music(
+    music: &doca_ipc::Music,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let cover = (!music.art.is_empty())
+        .then(|| crate::dock::scaled_to_fill(&music.art, width, height))
+        .flatten();
+
+    if let Some(cover) = &cover {
+        let _ = cr.save();
+        // Centred and cropped rather than squashed: a square cover in a wide
+        // tile has to lose its edges, not its proportions.
+        let x = (width - cover.width() as f64) / 2.0;
+        let y = (height - cover.height() as f64) / 2.0;
+        cr.rectangle(0.0, 0.0, width, height);
+        cr.clip();
+        cr.set_source_pixbuf(cover, x, y);
+        let _ = cr.paint();
+        let _ = cr.restore();
+        veil(cr, width, height);
+    }
+
+    // Written by the bar and not by the daemon, because the bar is the one
+    // that knows how much room there is to say it in.
+    let (title, under) = if music.title.is_empty() && music.artist.is_empty() {
+        ("\u{2014}".to_string(), "nothing playing".to_string())
+    } else {
+        (
+            if music.title.is_empty() {
+                "unknown".to_string()
+            } else {
+                music.title.clone()
+            },
+            if music.artist.is_empty() {
+                music.player.clone()
+            } else {
+                music.artist.clone()
+            },
+        )
+    };
+
+    let (ink, quiet) = if cover.is_some() {
+        (ON_A_COVER, faded(ON_A_COVER, 0.78))
+    } else {
+        (look.palette.label, look.palette.detail)
+    };
+
+    let name = line(area, &title, text_size(look.icon_size, 0.28), true, width);
+    let who = line(area, &under, text_size(look.icon_size, 0.21), false, width);
+    let name_height = name.pixel_extents().1.height() as f64;
+    let who_height = who.pixel_extents().1.height() as f64;
+
+    // Sat at the bottom when there is a cover, because that is where the veil
+    // is; centred when there is not, because then there is nothing to hide
+    // behind and the tile is just two lines.
+    let mut y = if cover.is_some() {
+        height - name_height - who_height - GAP
+    } else {
+        ((height - name_height - who_height) / 2.0).max(0.0)
+    };
+    paint(cr, &name, 0.0, y, ink);
+    y += name_height;
+    paint(cr, &who, 0.0, y, quiet);
+}
+
+/// The ink the words take when they are sitting on somebody else's picture.
+const ON_A_COVER: gdk::RGBA = gdk::RGBA::WHITE;
+
+fn faded(colour: gdk::RGBA, alpha: f64) -> gdk::RGBA {
+    gdk::RGBA::new(colour.red(), colour.green(), colour.blue(), alpha)
+}
+
+/// The scrim that makes a cover safe to write on.
+///
+/// Nothing at the top, so the picture is still a picture, and nearly opaque
+/// where the words are. The whole of the contrast guarantee is here: not that
+/// the text is bright enough, but that whatever is under it has been made
+/// dark enough first.
+fn veil(cr: &cairo::Context, width: f64, height: f64) {
+    let shade = cairo::LinearGradient::new(0.0, 0.0, 0.0, height);
+    shade.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+    shade.add_color_stop_rgba(0.45, 0.0, 0.0, 0.0, 0.38);
+    shade.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.88);
+    let _ = cr.set_source(&shade);
+    cr.rectangle(0.0, 0.0, width, height);
+    let _ = cr.fill();
 }
 
 /// The outline of a bottle, left on `cr` as the current path.
@@ -711,6 +821,132 @@ pub mod tests {
             .iter()
             .map(|(_, tile)| tile.area.size_request().0)
             .collect()
+    }
+
+    /// A cover of any colour is made dark enough to write on.
+    ///
+    /// The issue calls this a contrast requirement and not a matter of taste,
+    /// so it is measured. A cover is somebody else's picture: it can be white,
+    /// black or a saturated orange, and the words go on all three. What is
+    /// asserted is not that the text is bright enough — it is white, it cannot
+    /// be brighter — but that whatever ends up *under* it has been made dark
+    /// enough first. That is the veil's whole job and the only part of the
+    /// contrast this code controls.
+    ///
+    /// The veil is measured on its own rather than through `draw_music`,
+    /// because a tile with words in it measures the words: the first version
+    /// of this test reported 216 on a white cover and I took it for a veil
+    /// that was too thin. It was the letters.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_cover_of_any_colour_is_made_dark_enough_to_write_on() {
+        let (width, height) = (120.0, 48.0);
+        for (name, shade) in [("white", 1.0), ("black", 0.0), ("hot orange", 0.78)] {
+            let mut surface = gtk::cairo::ImageSurface::create(
+                gtk::cairo::Format::ARgb32,
+                width as i32,
+                height as i32,
+            )
+            .expect("no surface");
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                cr.set_source_rgb(shade, shade * 0.55, 0.0);
+                cr.rectangle(0.0, 0.0, width, height);
+                let _ = cr.fill();
+                veil(&cr, width, height);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+
+            // The band the words sit in: the bottom third.
+            let mut brightest = 0u8;
+            for row in (height as usize * 2 / 3)..height as usize {
+                for column in 0..width as usize {
+                    let at = row * stride + column * 4;
+                    brightest = brightest
+                        .max(data[at])
+                        .max(data[at + 1])
+                        .max(data[at + 2]);
+                }
+            }
+
+            assert!(
+                brightest < 160,
+                "under a {name} cover the brightest thing the words sit on is \
+                 {brightest}, which white text does not survive"
+            );
+        }
+    }
+
+    /// And the words really are the white that measurement assumes, which the
+    /// veil alone cannot say. Under `paper` too: a photo with a scrim over it
+    /// is a photo with a scrim over it on every desktop.
+    pub fn words_on_a_cover_are_white_whatever_the_theme_is() {
+        let cover = painted_cover(255);
+        let (width, height) = (120, 48);
+        for theme in crate::theme::names() {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height)
+                    .expect("no surface");
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let area = gtk::DrawingArea::new();
+                draw_music(
+                    &doca_ipc::Music {
+                        title: "IIIIIIII".into(),
+                        artist: "IIIIIIII".into(),
+                        player: "rhythmbox".into(),
+                        playing: true,
+                        art: cover.clone(),
+                    },
+                    Look {
+                        icon_size: ICON,
+                        palette: crate::theme::palette(theme),
+                        level: Level::Full,
+                    },
+                    &area,
+                    &cr,
+                    width as f64,
+                    height as f64,
+                );
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+            let mut brightest = 0u8;
+            for row in (height as usize * 2 / 3)..height as usize {
+                for column in 0..width as usize {
+                    let at = row * stride + column * 4;
+                    brightest = brightest.max(data[at].min(data[at + 1]).min(data[at + 2]));
+                }
+            }
+            assert!(
+                brightest > 200,
+                "under {theme} the words on a cover came out at {brightest}, not white"
+            );
+        }
+        std::fs::remove_file(&cover).ok();
+    }
+
+    /// A one-colour cover written to a file, because the drawing loads from a
+    /// path and not from a pixbuf.
+    fn painted_cover(shade: u8) -> String {
+        let pixbuf = gdk::gdk_pixbuf::Pixbuf::new(
+            gdk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            64,
+            64,
+        )
+        .expect("no pixbuf");
+        pixbuf.fill(u32::from_be_bytes([shade, shade, shade, 255]));
+        let path = std::env::temp_dir().join(format!(
+            "doca-cover-{}-{shade}.png",
+            std::process::id()
+        ));
+        pixbuf.savev(&path, "png", &[]).expect("the cover saves");
+        path.display().to_string()
     }
 
     /// The bottle holds as much water as the day has in it.

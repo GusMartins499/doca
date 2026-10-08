@@ -134,6 +134,26 @@ pub fn overflow_grid(
     menu
 }
 
+/// A picture scaled to cover a box of this size, cropping rather than
+/// squashing.
+///
+/// A square album cover in a tile two and a half icons wide has to lose its
+/// edges; stretching it to fit is the one thing that makes a cover look
+/// wrong at a glance.
+pub fn scaled_to_fill(path: &str, width: f64, height: f64) -> Option<gdk::gdk_pixbuf::Pixbuf> {
+    let source = gdk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
+    let (from_width, from_height) = (source.width() as f64, source.height() as f64);
+    if from_width <= 0.0 || from_height <= 0.0 || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let scale = (width / from_width).max(height / from_height);
+    source.scale_simple(
+        (from_width * scale).ceil() as i32,
+        (from_height * scale).ceil() as i32,
+        gdk::gdk_pixbuf::InterpType::Bilinear,
+    )
+}
+
 pub fn scaled_from_file(path: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
     gdk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, size, size, true).ok()
 }
