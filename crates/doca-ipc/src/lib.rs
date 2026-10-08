@@ -106,6 +106,7 @@ pub enum Body {
     /// issues land.
     Simple(Simple),
     Water(Water),
+    Music(Music),
 }
 
 /// The name each [`Body`] arm travels under, which is the `s` of the `(s v)`.
@@ -115,9 +116,10 @@ pub enum Body {
 pub mod body_kind {
     pub const SIMPLE: &str = "simple";
     pub const WATER: &str = "water";
+    pub const MUSIC: &str = "music";
 
     /// Every name there is, for a test to walk.
-    pub const ALL: [&str; 2] = [SIMPLE, WATER];
+    pub const ALL: [&str; 3] = [SIMPLE, WATER, MUSIC];
 }
 
 /// Two lines and a progress bar.
@@ -155,6 +157,36 @@ pub struct Water {
     /// the goal, and a date it would only use to put them in the order they
     /// already arrive in is a field free to disagree with that order.
     pub week: Vec<u32>,
+}
+
+/// What is playing, and the picture that goes with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Music {
+    pub title: String,
+    pub artist: String,
+    /// Who is playing it, for when the track has no name of its own.
+    pub player: String,
+    pub playing: bool,
+    /// The cover, as a path to a file on this machine. Empty for a track with
+    /// no art, or art this build could not get hold of.
+    ///
+    /// # Why a path and not the bytes
+    ///
+    /// The other way to spell this is the image itself on the signal, which
+    /// assumes nothing about who can see what. It is the wrong trade here for
+    /// two reasons, and the second is the one that settles it.
+    ///
+    /// MPRIS sends metadata on every change, several times a track on some
+    /// players, so bytes on the bus is a picture on the bus over and over for
+    /// a picture that did not change.
+    ///
+    /// And the assumption a path makes — that the daemon and the bar see the
+    /// same disk — is one this contract already makes everywhere else.
+    /// [`DockItem::icon`] is a path or a theme name the *bar* loads, and
+    /// [`FolderEntry::path`] is a file the bar opens. A cover sent as bytes
+    /// would be the only thing here that did not trust the filesystem both
+    /// ends are already standing on.
+    pub art: String,
 }
 
 /// How much room a tile asks for on the bar: about one icon, or about two
@@ -199,6 +231,7 @@ impl Body {
         match self {
             Body::Simple(_) => body_kind::SIMPLE,
             Body::Water(_) => body_kind::WATER,
+            Body::Music(_) => body_kind::MUSIC,
         }
     }
 
@@ -217,6 +250,9 @@ impl Body {
             // amount beside it needs room to be read at a glance: a badge one
             // icon wide could hold one of the two.
             Body::Water(_) => Tile::Wide,
+            // A cover is a picture, and a picture one icon wide is a thumbnail
+            // with the title written over it.
+            Body::Music(_) => Tile::Wide,
         }
     }
 }
@@ -255,6 +291,7 @@ impl WidgetState {
         let value = match body {
             Body::Simple(simple) => OwnedValue::try_from(simple),
             Body::Water(water) => OwnedValue::try_from(water),
+            Body::Music(music) => OwnedValue::try_from(music),
         };
         Self {
             id: id.into(),
@@ -283,6 +320,9 @@ impl WidgetState {
                 .map_err(|e| unreadable(e.to_string())),
             body_kind::WATER => Water::try_from(self.body.clone())
                 .map(Body::Water)
+                .map_err(|e| unreadable(e.to_string())),
+            body_kind::MUSIC => Music::try_from(self.body.clone())
+                .map(Body::Music)
                 .map_err(|e| unreadable(e.to_string())),
             unknown => Err(UnreadableBody {
                 kind: unknown.to_string(),
@@ -712,6 +752,16 @@ mod tests {
             (
                 body_kind::WATER,
                 Body::Water(Water { drunk: 3, goal: 8, bottle: 500, week: vec![0; 7] }),
+            ),
+            (
+                body_kind::MUSIC,
+                Body::Music(Music {
+                    title: "Girl from Ipanema".to_string(),
+                    artist: "João Gilberto".to_string(),
+                    player: "rhythmbox".to_string(),
+                    playing: true,
+                    art: "/tmp/cover.png".to_string(),
+                }),
             ),
         ]
     }

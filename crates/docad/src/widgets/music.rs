@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, WidgetState};
 
 use super::Widget;
 
@@ -12,6 +12,55 @@ pub struct NowPlaying {
     pub artist: String,
     pub player: String,
     pub playing: bool,
+    /// The cover as a path on this machine, empty when there is none to be
+    /// had. See [`cover_path`] for what counts as having one.
+    pub art: String,
+}
+
+/// The cover file an `mpris:artUrl` points at, if it points at one here.
+///
+/// Players spell this two ways. A `file://` URL is a picture already on this
+/// disk — most local players write one into a cache of their own — and that
+/// is the one taken. An `http(s)://` URL is a picture somewhere else, which
+/// Spotify in particular returns, and fetching it means a network client in
+/// the daemon and a cache with a ceiling: its own slice, with its own
+/// dependency to argue about.
+///
+/// Anything else, or a file that is not there, is no cover. A path that does
+/// not exist is worse than none: the bar would ask for it every frame and get
+/// nothing, every track, for ever.
+pub fn cover_path(art_url: &str) -> String {
+    let Some(path) = art_url.strip_prefix("file://") else {
+        return String::new();
+    };
+    // Percent-encoding, because a track called "Sign o' the Times" arrives as
+    // `Sign%20o%27%20the%20Times` and a file of that name does not exist.
+    let path = unescaped(path);
+    if std::path::Path::new(&path).is_file() {
+        path
+    } else {
+        String::new()
+    }
+}
+
+/// `%20` and friends, turned back into the bytes they stand for.
+fn unescaped(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            let pair = std::str::from_utf8(&bytes[at + 1..at + 3]).ok();
+            if let Some(byte) = pair.and_then(|pair| u8::from_str_radix(pair, 16).ok()) {
+                out.push(byte);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub fn player_name(bus_name: &str) -> String {
@@ -28,30 +77,25 @@ pub fn is_player(bus_name: &str) -> bool {
     bus_name.starts_with(MPRIS_PREFIX)
 }
 
+/// What the bar is told, which is what MPRIS said and nothing worked out
+/// from it.
+///
+/// The track and the cover, as they are. Whether a missing title reads as
+/// "unknown" or as the player's name, and what a tile with nothing playing
+/// shows, is the bar's to decide — it is the one that knows how much room
+/// there is to say it in.
 pub fn state_from(now_playing: Option<&NowPlaying>) -> WidgetState {
-    let simple = match now_playing {
-        Some(track) => Simple {
-            label: if track.title.is_empty() {
-                "unknown".to_string()
-            } else {
-                track.title.clone()
-            },
-            detail: if track.artist.is_empty() {
-                track.player.clone()
-            } else {
-                track.artist.clone()
-            },
-            progress: NO_PROGRESS,
-            active: track.playing,
-        },
-        None => Simple {
-            label: "—".to_string(),
-            detail: "nothing playing".to_string(),
-            progress: NO_PROGRESS,
-            active: false,
-        },
-    };
-    WidgetState::new("music", Body::Simple(simple))
+    let track = now_playing.cloned().unwrap_or_default();
+    WidgetState::new(
+        "music",
+        Body::Music(doca_ipc::Music {
+            title: track.title,
+            artist: track.artist,
+            player: track.player,
+            playing: track.playing,
+            art: track.art,
+        }),
+    )
 }
 
 pub struct Music {
@@ -110,11 +154,18 @@ impl Music {
             return None;
         }
 
+        let art = metadata
+            .get("mpris:artUrl")
+            .and_then(|value| String::try_from(value.clone()).ok())
+            .map(|url| cover_path(&url))
+            .unwrap_or_default();
+
         Some(NowPlaying {
             title,
             artist,
             player: player_name(bus_name),
             playing: status == "Playing",
+            art,
         })
     }
 
@@ -186,7 +237,6 @@ impl Widget for Music {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::Drawn;
 
     #[test]
     fn an_mpris_bus_name_yields_the_player_it_belongs_to() {
@@ -205,66 +255,105 @@ mod tests {
         assert!(!is_player("io.github.gusmartins499.Doca"));
     }
 
+    fn track(title: &str, artist: &str, player: &str, playing: bool) -> NowPlaying {
+        NowPlaying {
+            title: title.to_string(),
+            artist: artist.to_string(),
+            player: player.to_string(),
+            playing,
+            art: String::new(),
+        }
+    }
+
+    fn body_of(state: &WidgetState) -> doca_ipc::Music {
+        match state.body().expect("the body reads back") {
+            Body::Music(music) => music,
+            other => panic!("music sent {other:?}"),
+        }
+    }
+
+    /// What the daemon sends is what MPRIS said, and nothing worked out from
+    /// it.
+    ///
+    /// These used to assert the words — "unknown" for a track with no title,
+    /// the player's name for a stream with no artist. Those are the bar's to
+    /// choose now, because the bar is the one that knows how much room there
+    /// is to say them in; what is held here is that the daemon passes the
+    /// track through without inventing or dropping anything.
     #[test]
-    fn a_playing_track_makes_the_tile_active() {
-        let track = NowPlaying {
-            title: "Garota de Ipanema".to_string(),
-            artist: "João e Astrud".to_string(),
-            player: "spotify".to_string(),
-            playing: true,
-        };
+    fn what_is_sent_is_what_the_player_said() {
+        let playing = track("Garota de Ipanema", "João e Astrud", "spotify", true);
 
-        let state = state_from(Some(&track));
+        let music = body_of(&state_from(Some(&playing)));
 
-        assert_eq!(state.label(), "Garota de Ipanema");
-        assert_eq!(state.detail(), "João e Astrud");
-        assert!(state.active());
+        assert_eq!(music.title, "Garota de Ipanema");
+        assert_eq!(music.artist, "João e Astrud");
+        assert_eq!(music.player, "spotify");
+        assert!(music.playing);
     }
 
     #[test]
-    fn a_paused_track_is_still_shown_but_not_active() {
-        let track = NowPlaying {
-            title: "Garota de Ipanema".to_string(),
-            artist: "João e Astrud".to_string(),
-            player: "spotify".to_string(),
-            playing: false,
-        };
+    fn a_paused_track_is_still_sent_but_not_as_playing() {
+        let paused = track("Garota de Ipanema", "João e Astrud", "spotify", false);
 
-        let state = state_from(Some(&track));
+        let music = body_of(&state_from(Some(&paused)));
 
-        assert_eq!(state.label(), "Garota de Ipanema");
-        assert!(!state.active());
+        assert_eq!(music.title, "Garota de Ipanema");
+        assert!(!music.playing);
+    }
+
+    /// An empty field stays empty rather than being filled in down here: a
+    /// title the daemon guessed at is a title the bar cannot tell from a real
+    /// one.
+    #[test]
+    fn a_track_missing_a_field_arrives_missing_it() {
+        let untitled = track("", "Some Artist", "vlc", true);
+        let streaming = track("Some radio stream", "", "brave", true);
+
+        assert_eq!(body_of(&state_from(Some(&untitled))).title, "");
+        assert_eq!(body_of(&state_from(Some(&streaming))).artist, "");
+        assert_eq!(body_of(&state_from(Some(&streaming))).player, "brave");
     }
 
     #[test]
     fn no_player_at_all_still_renders_a_tile() {
-        let state = state_from(None);
+        let music = body_of(&state_from(None));
 
-        assert_eq!(state.detail(), "nothing playing");
-        assert!(!state.active());
+        assert_eq!(music.title, "");
+        assert_eq!(music.player, "");
+        assert!(!music.playing);
     }
 
+    /// A `file://` cover is one already on this disk, and the only kind this
+    /// slice takes. Percent-encoding is undone, because a track called
+    /// "Sign o' the Times" arrives with its apostrophe spelled `%27` and a
+    /// file of that name does not exist.
     #[test]
-    fn a_track_with_no_title_does_not_render_an_empty_label() {
-        let track = NowPlaying {
-            title: String::new(),
-            artist: "Some Artist".to_string(),
-            player: "vlc".to_string(),
-            playing: true,
-        };
+    fn a_cover_already_on_this_disk_is_the_one_that_is_taken() {
+        let dir = std::env::temp_dir().join(format!("doca-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Sign o' the Times.png");
+        std::fs::write(&file, b"not really a png").unwrap();
 
-        assert_eq!(state_from(Some(&track)).label(), "unknown");
+        let url = format!("file://{}", file.display().to_string().replace(' ', "%20").replace('\'', "%27"));
+
+        assert_eq!(cover_path(&url), file.display().to_string());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A path that is not there is worse than no cover: the bar would ask for
+    /// it every frame, every track, for ever.
     #[test]
-    fn a_stream_with_no_artist_falls_back_to_naming_the_player() {
-        let stream = NowPlaying {
-            title: "Some radio stream".to_string(),
-            artist: String::new(),
-            player: "brave".to_string(),
-            playing: true,
-        };
+    fn a_cover_that_is_not_there_is_no_cover() {
+        assert_eq!(cover_path("file:///nowhere/at/all.png"), "");
+    }
 
-        assert_eq!(state_from(Some(&stream)).detail(), "brave");
+    /// Remote art is somebody else's slice, and until it exists it has to
+    /// read as no art rather than as a path nothing can open.
+    #[test]
+    fn a_cover_somewhere_else_is_not_a_path_on_this_machine() {
+        assert_eq!(cover_path("https://i.scdn.co/image/abc123"), "");
+        assert_eq!(cover_path(""), "");
+        assert_eq!(cover_path("nonsense"), "");
     }
 }

@@ -103,6 +103,18 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
             },
             detail: simple.detail.clone(),
         },
+        Ok(Body::Music(music)) => Row::Heading {
+            title: if music.title.is_empty() {
+                name_of(&state.id)
+            } else {
+                music.title.clone()
+            },
+            detail: if music.artist.is_empty() {
+                music.player.clone()
+            } else {
+                music.artist.clone()
+            },
+        },
         Ok(Body::Water(water)) => Row::Heading {
             title: format!("{} of {} ml", water.drunk, water.goal),
             detail: if water.drunk >= water.goal {
