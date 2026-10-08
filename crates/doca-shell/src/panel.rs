@@ -49,6 +49,23 @@ const WAITING: f64 = 0.3;
 /// A heading and one control, which is the smallest panel any widget has.
 pub const UNKNOWN: usize = 2;
 
+/// What typing into a row does: tell the daemon what it now says.
+///
+/// Separate from [`Invoke`] because it is a different kind of thing — an
+/// action is a verb the widget declared, and this is a value only the widget
+/// in question has a key for.
+pub type Write = Rc<dyn Fn(&str, &str)>;
+
+/// Everything a panel's rows can ask the daemon for.
+///
+/// One value rather than two arguments, because every row that needs either
+/// is handed both and `fill` was growing a parameter per kind of row.
+#[derive(Clone)]
+pub struct Asks {
+    pub invoke: Invoke,
+    pub write: Write,
+}
+
 /// What a control does when it is chosen: tell the daemon so.
 pub type Invoke = Rc<dyn Fn(&str, &str)>;
 
@@ -77,6 +94,8 @@ pub enum Row {
     Week { days: Vec<u32>, goal: u32 },
     /// An album cover at a size worth looking at.
     Cover { art: String },
+    /// Something you type into, rather than something you read.
+    Text { value: String },
 }
 
 /// The widget's name as a person would write it: `time-progress` is
@@ -139,6 +158,11 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
     };
 
     let mut rows = vec![heading];
+    // The note is edited where it lives, which is the whole of #30: the
+    // preferences window is for choices, and a note is not a choice.
+    if let Ok(Body::Note(note)) = state.body() {
+        rows.push(Row::Text { value: note.text });
+    }
     // The cover sits above the controls for the reason the week does: it is
     // what you opened the panel to see. Only when there is one — a row that
     // is a picture of nothing is worse than no row.
@@ -244,7 +268,7 @@ pub fn fill(
     expected: usize,
     id: &str,
     rows: &[Row],
-    invoke: &Invoke,
+    asks: &Asks,
     show: &Show,
     opened: Instant,
 ) {
@@ -253,7 +277,7 @@ pub fn fill(
     }
 
     for row in rows {
-        menu.append(&drawn(id, row, invoke));
+        menu.append(&drawn(menu, id, row, asks));
     }
     if rows.is_empty() {
         let empty = gtk::MenuItem::with_label("nothing to show");
@@ -268,7 +292,7 @@ pub fn fill(
 }
 
 /// One row, as the thing on screen.
-fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
+fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
     match row {
         Row::Heading { title, detail } => {
             let name = heading_label(title);
@@ -297,10 +321,11 @@ fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
         Row::Action { action, label } => {
             let control = gtk::MenuItem::with_label(label);
             let (id, action) = (id.to_string(), action.to_string());
-            let invoke = invoke.clone();
+            let invoke = asks.invoke.clone();
             control.connect_activate(move |_| invoke(&id, &action));
             control
         }
+        Row::Text { value } => text_row(menu, id, value, &asks.write),
         Row::Cover { art } => {
             let picture = gtk::Image::new();
             // Square and the width of the panel, which is the one size a
@@ -347,6 +372,135 @@ fn drawn(id: &str, row: &Row, invoke: &Invoke) -> gtk::MenuItem {
         }
     }
 }
+
+/// A row you type into.
+///
+/// # Why this works at all
+///
+/// A `GtkMenu` under a keyboard grab reads space as "activate the selected
+/// item" and the arrows as "move between items", so a text widget dropped
+/// into one gets letters and nothing else — you can type `ação` and not
+/// `ação, não`. That was measured on this bar before this was written.
+///
+/// The fix is twelve lines: take the menu's key presses, hand them to the
+/// text if the text has focus, and stop the signal so the shell never sees
+/// them. Escape and Tab stay with the menu — one closes the panel, the other
+/// leaves the row — and everything else, the arrows included, belongs to
+/// whoever is being typed into. A note has newlines in it, so the arrows
+/// have to move a cursor rather than a selection.
+///
+/// # When it is written
+///
+/// After [`QUIET`] of nobody typing, and again when the panel goes down. The
+/// issue asked for this to be decided: a write a keystroke is a disk write a
+/// keystroke, and a write only on close loses whatever was not closed. The
+/// quiet interval means at most a moment of typing is ever at risk, and the
+/// close catches the last word of it.
+fn text_row(menu: &gtk::Menu, id: &str, value: &str, write: &Write) -> gtk::MenuItem {
+    let text = gtk::TextView::new();
+    text.set_widget_name("panel-text");
+    text.set_wrap_mode(gtk::WrapMode::WordChar);
+    text.set_size_request(-1, TEXT_HEIGHT);
+    text.buffer().expect("a text view has a buffer").set_text(value);
+
+    let frame = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    frame.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    frame.set_shadow_type(gtk::ShadowType::In);
+    frame.add(&text);
+
+    let row = gtk::MenuItem::new();
+    row.add(&frame);
+
+    // The keys, handed over.
+    let typing = text.clone();
+    menu.connect_key_press_event(move |_, event| {
+        if menus_own(event.keyval()) || !typing.has_focus() {
+            return glib::Propagation::Proceed;
+        }
+        typing.event(event);
+        glib::Propagation::Stop
+    });
+
+    let saving = written(id, &text, write);
+    let quiet: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let buffer = text.buffer().expect("a text view has a buffer");
+    let waiting = quiet.clone();
+    let after_quiet = saving.clone();
+    buffer.connect_changed(move |_| {
+        if let Some(pending) = waiting.replace(None) {
+            pending.remove();
+        }
+        let saving = after_quiet.clone();
+        let clearing = waiting.clone();
+        let pending = glib::timeout_add_local_once(QUIET, move || {
+            clearing.replace(None);
+            saving();
+        });
+        waiting.replace(Some(pending));
+    });
+
+    // And once more on the way down, for the word that was still being typed.
+    let on_close = saving.clone();
+    let pending = quiet.clone();
+    menu.connect_unmap(move |_| {
+        if let Some(waiting) = pending.replace(None) {
+            waiting.remove();
+        }
+        on_close();
+    });
+
+    row
+}
+
+/// Which keys stay with the menu while a row is being typed into.
+///
+/// Everything else goes to the text, and that is the whole of the fix: a
+/// `GtkMenuShell` reads space as "activate the selected item" and the arrows
+/// as "move between items", so without this a note gets letters and nothing
+/// else — you type `ação, não` and it says `ação,não`. That was measured on
+/// this bar with real key presses before the row was written.
+///
+/// Escape closes the panel and Tab leaves the row, and those are the two
+/// things you cannot do from inside a text view. The arrows are *not* on
+/// this list on purpose: a note has newlines in it, so up and down have to
+/// move a cursor rather than a selection, and the menu gives up vertical
+/// navigation for as long as the note has the focus.
+fn menus_own(key: gdk::keys::Key) -> bool {
+    matches!(
+        key,
+        gdk::keys::constants::Escape
+            | gdk::keys::constants::Tab
+            | gdk::keys::constants::ISO_Left_Tab
+    )
+}
+
+/// Send what the text now says, if it says anything new.
+fn written(id: &str, text: &gtk::TextView, write: &Write) -> Rc<dyn Fn()> {
+    let (id, write) = (id.to_string(), write.clone());
+    let buffer = text.buffer().expect("a text view has a buffer");
+    let last = Rc::new(RefCell::new(current(&buffer)));
+    Rc::new(move || {
+        let now = current(&buffer);
+        // Unchanged is not worth a write: the panel closing would otherwise
+        // save a note nobody touched, every time it was opened to read one.
+        if *last.borrow() == now {
+            return;
+        }
+        *last.borrow_mut() = now.clone();
+        write(&id, &now);
+    })
+}
+
+fn current(buffer: &gtk::TextBuffer) -> String {
+    let (from, to) = buffer.bounds();
+    buffer.text(&from, &to, false).map(|text| text.to_string()).unwrap_or_default()
+}
+
+/// How long the typing has to stop before it is written down.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// How tall the note is in the panel.
+const TEXT_HEIGHT: i32 = 90;
 
 /// How big the cover is in the panel, square.
 const COVER: f64 = 180.0;
@@ -503,6 +657,14 @@ pub mod tests {
 
     fn invokes_nothing() -> Invoke {
         Rc::new(|_: &str, _: &str| {})
+    }
+
+    fn writes_nothing() -> Write {
+        Rc::new(|_: &str, _: &str| {})
+    }
+
+    fn asks_nothing() -> Asks {
+        Asks { invoke: invokes_nothing(), write: writes_nothing() }
     }
 
     /// Let GTK get on with whatever the last call asked for.
@@ -692,7 +854,10 @@ pub mod tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Action { action, .. } => Some(*action),
-                Row::Heading { .. } | Row::Week { .. } | Row::Cover { .. } => None,
+                Row::Heading { .. }
+                | Row::Week { .. }
+                | Row::Cover { .. }
+                | Row::Text { .. } => None,
             })
             .collect();
         assert_eq!(offered, vec!["drink", "undo", "reset"]);
@@ -786,6 +951,75 @@ pub mod tests {
         );
     }
 
+    /// Which keys the menu keeps while a note is being typed into.
+    ///
+    /// The delivery is GTK's — a menu under a keyboard grab cannot be sent a
+    /// synthetic key at all, which is why the Escape test fires `cancel`
+    /// rather than pressing it. What is mine is this list, and it is the
+    /// thing that would be lost: drop the handler and a note gets letters and
+    /// no spaces, which looks like it works until somebody writes two words.
+    ///
+    /// That it really works was measured on this bar with real key presses
+    /// before the row was written: `ação, não` typed into a panel over a
+    /// `_NET_WM_WINDOW_TYPE_DOCK` window came out `ação,não` without the
+    /// handler and whole with it.
+    #[test]
+    fn the_menu_keeps_only_the_keys_a_note_cannot_use() {
+        use gdk::keys::constants as key;
+
+        // Its own: one closes the panel, the other leaves the row, and
+        // neither is a thing a text view can do.
+        assert!(menus_own(key::Escape));
+        assert!(menus_own(key::Tab));
+        assert!(menus_own(key::ISO_Left_Tab));
+
+        // The note's. Space is the one that matters — it is what a menu reads
+        // as "activate" and what two words need.
+        for typed in [key::space, key::a, key::ccedilla, key::Return, key::BackSpace] {
+            assert!(!menus_own(typed), "the menu kept a key the note needed");
+        }
+
+        // And the arrows, which a selection would want and a cursor needs
+        // more: a note has newlines in it.
+        for arrow in [key::Up, key::Down, key::Left, key::Right] {
+            assert!(!menus_own(arrow), "the arrows cannot move a cursor in a note");
+        }
+    }
+
+    /// Closing a panel that was only read must not write anything: opening a
+    /// note to look at it would otherwise touch the config every time.
+    pub fn reading_a_note_and_closing_writes_nothing() {
+        let panel = opening(1);
+        let window = a_window();
+        let (show, _) = against(&window);
+        let typed = Rc::new(RefCell::new(Vec::<String>::new()));
+        let noting = typed.clone();
+        let write: Write = Rc::new(move |_: &str, text: &str| {
+            noting.borrow_mut().push(text.to_string())
+        });
+
+        fill(
+            &panel,
+            1,
+            "note",
+            &[Row::Text { value: "call the dentist".to_string() }],
+            &Asks { invoke: invokes_nothing(), write },
+            &show,
+            Instant::now() - SETTLED,
+        );
+        show(&panel);
+        settle();
+        panel.popdown();
+        settle();
+
+        assert!(
+            typed.borrow().is_empty(),
+            "a note nobody touched was written anyway: {:?}",
+            typed.borrow()
+        );
+        window.close();
+    }
+
     /// Cancelling the panel closes it and lets go of the grab — which is
     /// what Escape and a click outside both do.
     ///
@@ -859,7 +1093,7 @@ pub mod tests {
             rows.len(),
             "water",
             &rows,
-            &invokes_nothing(),
+            &asks_nothing(),
             &show,
             Instant::now() - SETTLED,
         );
@@ -899,7 +1133,7 @@ pub mod tests {
             rows.len(),
             "water",
             &rows,
-            &invokes_nothing(),
+            &asks_nothing(),
             &show,
             Instant::now() - SETTLED,
         );
@@ -938,7 +1172,7 @@ pub mod tests {
             UNKNOWN,
             "water",
             &rows,
-            &invokes_nothing(),
+            &asks_nothing(),
             &show,
             Instant::now() - SETTLED,
         );
@@ -994,7 +1228,15 @@ pub mod tests {
         let (show, _) = against(&window);
         show(&panel);
         settle();
-        fill(&panel, rows.len(), "water", &rows, &invoke, &show, Instant::now() - SETTLED);
+        fill(
+            &panel,
+            rows.len(),
+            "water",
+            &rows,
+            &Asks { invoke, write: writes_nothing() },
+            &show,
+            Instant::now() - SETTLED,
+        );
         settle();
 
         // The heading first: it must not be a control.
@@ -1032,7 +1274,7 @@ pub mod tests {
         let (show, _) = against(&window);
         show(&panel);
         settle();
-        fill(&panel, rows.len(), "water", &rows, &invokes_nothing(), &show, Instant::now() - SETTLED);
+        fill(&panel, rows.len(), "water", &rows, &asks_nothing(), &show, Instant::now() - SETTLED);
         settle();
 
         panel.select_first(true);
