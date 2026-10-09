@@ -8,6 +8,7 @@ mod patch;
 mod service;
 mod state;
 mod trash;
+mod watch;
 mod widgets;
 mod x11;
 
@@ -90,6 +91,16 @@ async fn main() -> Result<()> {
         let _ = tx.send(change);
     })?;
 
+    // Edits made to the file by hand, reloaded without a restart. A watcher
+    // that cannot start costs only that: the dock still runs, and the D-Bus
+    // writes — the way the windows change the config — never needed it.
+    let (file_tx, mut file_changes) = mpsc::unbounded_channel::<()>();
+    if let Err(e) = crate::watch::watch_config(&crate::config::config_path(), move || {
+        let _ = file_tx.send(());
+    }) {
+        tracing::warn!("the config file will not be reloaded when it changes: {e:#}");
+    }
+
     let emitter = connection
         .object_server()
         .interface::<_, DockService>(OBJECT_PATH)
@@ -130,6 +141,13 @@ async fn main() -> Result<()> {
                 }
                 if announce.items {
                     DockService::items_changed(emitter.signal_emitter()).await?;
+                }
+            }
+            Some(()) = file_changes.recv() => {
+                crate::watch::quiet(&mut file_changes).await;
+                let service = emitter.get().await;
+                if let Err(e) = service.reload_config(emitter.signal_emitter()).await {
+                    tracing::error!("could not reload the config: {e}");
                 }
             }
             Ok(state) = widget_changes.recv() => {

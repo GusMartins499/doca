@@ -25,5 +25,12 @@ toml_edit = "0.25"
 # because nobody compresses a JPEG twice.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
+# The config file is watched from a thread of its own, like the X11 root, so
+# the blocking API is all that is needed — the default `stream` feature would
+# pull in a second way of talking to tokio for nothing.
+inotify = { version = "0.11", default-features = false }
+
 [dev-dependencies]
 futures-lite = "2"
+# A paused clock, so the debounce is tested without waiting on a real one.
+tokio = { workspace = true, features = ["test-util"] }
