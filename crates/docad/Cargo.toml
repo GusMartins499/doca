@@ -19,6 +19,12 @@ x11rb = { version = "0.13", features = ["xtest"] }
 async-channel = "2"
 toml = "0.8"
 toml_edit = "0.25"
+# Remote album covers. Blocking and small, which is what the widget side of
+# the daemon is: plain threads, no runtime. rustls rather than native-tls so
+# the daemon does not start linking OpenSSL for one JPEG per track; no gzip,
+# because nobody compresses a JPEG twice.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
 # The config file is watched from a thread of its own, like the X11 root, so
 # the blocking API is all that is needed — the default `stream` feature would
 # pull in a second way of talking to tokio for nothing.

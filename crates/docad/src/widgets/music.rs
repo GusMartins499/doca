@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use doca_ipc::{Body, WidgetState};
 
+use super::cover::Covers;
 use super::Widget;
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
@@ -13,54 +14,12 @@ pub struct NowPlaying {
     pub player: String,
     pub playing: bool,
     /// The cover as a path on this machine, empty when there is none to be
-    /// had. See [`cover_path`] for what counts as having one.
+    /// had — or none *yet*, while a remote one is on its way.
     pub art: String,
-}
-
-/// The cover file an `mpris:artUrl` points at, if it points at one here.
-///
-/// Players spell this two ways. A `file://` URL is a picture already on this
-/// disk — most local players write one into a cache of their own — and that
-/// is the one taken. An `http(s)://` URL is a picture somewhere else, which
-/// Spotify in particular returns, and fetching it means a network client in
-/// the daemon and a cache with a ceiling: its own slice, with its own
-/// dependency to argue about.
-///
-/// Anything else, or a file that is not there, is no cover. A path that does
-/// not exist is worse than none: the bar would ask for it every frame and get
-/// nothing, every track, for ever.
-pub fn cover_path(art_url: &str) -> String {
-    let Some(path) = art_url.strip_prefix("file://") else {
-        return String::new();
-    };
-    // Percent-encoding, because a track called "Sign o' the Times" arrives as
-    // `Sign%20o%27%20the%20Times` and a file of that name does not exist.
-    let path = unescaped(path);
-    if std::path::Path::new(&path).is_file() {
-        path
-    } else {
-        String::new()
-    }
-}
-
-/// `%20` and friends, turned back into the bytes they stand for.
-fn unescaped(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' && at + 2 < bytes.len() {
-            let pair = std::str::from_utf8(&bytes[at + 1..at + 3]).ok();
-            if let Some(byte) = pair.and_then(|pair| u8::from_str_radix(pair, 16).ok()) {
-                out.push(byte);
-                at += 3;
-                continue;
-            }
-        }
-        out.push(bytes[at]);
-        at += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    /// The cover as the player named it, `file://` or `http(s)://`. Kept
+    /// apart from `art` because turning one into the other may mean a
+    /// download, and that is [`Covers`]' to do, not the bus query's.
+    pub art_url: String,
 }
 
 pub fn player_name(bus_name: &str) -> String {
@@ -100,12 +59,14 @@ pub fn state_from(now_playing: Option<&NowPlaying>) -> WidgetState {
 
 pub struct Music {
     connection: Option<zbus::blocking::Connection>,
+    covers: Covers,
 }
 
 impl Music {
     pub fn new() -> Self {
         Self {
             connection: zbus::blocking::Connection::session().ok(),
+            covers: Covers::new(),
         }
     }
 
@@ -154,10 +115,9 @@ impl Music {
             return None;
         }
 
-        let art = metadata
+        let art_url = metadata
             .get("mpris:artUrl")
             .and_then(|value| String::try_from(value.clone()).ok())
-            .map(|url| cover_path(&url))
             .unwrap_or_default();
 
         Some(NowPlaying {
@@ -165,7 +125,8 @@ impl Music {
             artist,
             player: player_name(bus_name),
             playing: status == "Playing",
-            art,
+            art: String::new(),
+            art_url,
         })
     }
 
@@ -229,12 +190,31 @@ impl Widget for Music {
         "music"
     }
 
+    /// Two seconds, except while the playing track's cover is downloading.
+    ///
+    /// The hub asks for the interval after each poll, so this is how a cover
+    /// that lands half a second into a track is on the tile a quarter of a
+    /// second later rather than up to two: the tile is announced with the
+    /// track and without the cover, and again — a fresh `WidgetChanged` —
+    /// when the cover is there.
     fn interval(&self) -> Duration {
-        Duration::from_secs(2)
+        if self.covers.pending() {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(2)
+        }
     }
 
     fn poll(&mut self) -> WidgetState {
-        state_from(self.preferred_player().as_ref().map(|(_, track)| track))
+        let mut track = self.preferred_player().map(|(_, track)| track);
+        // Asked every poll, with nothing playing too, so that a cover still
+        // downloading for a track that has gone stops counting as wanted.
+        let art_url = track.as_ref().map(|track| track.art_url.as_str()).unwrap_or("");
+        let art = self.covers.resolve(art_url);
+        if let Some(track) = track.as_mut() {
+            track.art = art;
+        }
+        state_from(track.as_ref())
     }
 
     fn invoke(&mut self, action: &str) {
@@ -282,6 +262,7 @@ mod tests {
             player: player.to_string(),
             playing,
             art: String::new(),
+            art_url: String::new(),
         }
     }
 
@@ -342,38 +323,5 @@ mod tests {
         assert_eq!(music.title, "");
         assert_eq!(music.player, "");
         assert!(!music.playing);
-    }
-
-    /// A `file://` cover is one already on this disk, and the only kind this
-    /// slice takes. Percent-encoding is undone, because a track called
-    /// "Sign o' the Times" arrives with its apostrophe spelled `%27` and a
-    /// file of that name does not exist.
-    #[test]
-    fn a_cover_already_on_this_disk_is_the_one_that_is_taken() {
-        let dir = std::env::temp_dir().join(format!("doca-cover-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("Sign o' the Times.png");
-        std::fs::write(&file, b"not really a png").unwrap();
-
-        let url = format!("file://{}", file.display().to_string().replace(' ', "%20").replace('\'', "%27"));
-
-        assert_eq!(cover_path(&url), file.display().to_string());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// A path that is not there is worse than no cover: the bar would ask for
-    /// it every frame, every track, for ever.
-    #[test]
-    fn a_cover_that_is_not_there_is_no_cover() {
-        assert_eq!(cover_path("file:///nowhere/at/all.png"), "");
-    }
-
-    /// Remote art is somebody else's slice, and until it exists it has to
-    /// read as no art rather than as a path nothing can open.
-    #[test]
-    fn a_cover_somewhere_else_is_not_a_path_on_this_machine() {
-        assert_eq!(cover_path("https://i.scdn.co/image/abc123"), "");
-        assert_eq!(cover_path(""), "");
-        assert_eq!(cover_path("nonsense"), "");
     }
 }

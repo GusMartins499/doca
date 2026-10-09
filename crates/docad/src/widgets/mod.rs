@@ -1,6 +1,7 @@
 pub mod battery;
 pub mod clock;
 pub mod countdown;
+pub mod cover;
 pub mod cpu;
 pub mod note;
 pub mod timer;
