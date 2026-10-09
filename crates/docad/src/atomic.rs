@@ -36,11 +36,15 @@ fn temporary_name(path: &Path) -> String {
 
 /// Put these bytes at this path, creating the directory above it if need be.
 ///
+/// Bytes rather than text since the cover cache joined the config and the
+/// state: a picture half-written is as broken as a half-written TOML file,
+/// and the bar would be the one to find out.
+///
 /// The rename is the commit, so everything that can fail has to fail first:
 /// the bytes are written and flushed to the disk before the old file is
 /// replaced. A failure at any point leaves the old file exactly as it was and
 /// takes the scratch file with it.
-pub fn write(path: &Path, body: &str) -> Result<()> {
+pub fn write(path: &Path, body: impl AsRef<[u8]>) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no directory to write into", path.display()))?;
@@ -51,7 +55,7 @@ pub fn write(path: &Path, body: &str) -> Result<()> {
 
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&scratch)?;
-        file.write_all(body.as_bytes())?;
+        file.write_all(body.as_ref())?;
         file.sync_all()
     })();
 
