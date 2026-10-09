@@ -330,16 +330,80 @@ impl Config {
         Self::load_from(&config_path())
     }
 
+    /// The config at start-up, whatever state the file is in.
+    ///
+    /// A file that does not parse gives the defaults here, and only here:
+    /// there is nothing in memory yet to keep, and a daemon that refused to
+    /// start over a typo would be no dock at all. Once one is running, a
+    /// broken file goes through [`Self::reread`] instead, which keeps what is
+    /// on screen — falling back to defaults *then* would put them in memory,
+    /// and the next write would put them on disk over the user's file.
     pub fn load_from(path: &Path) -> Self {
         let Ok(contents) = std::fs::read_to_string(path) else {
             return Self::default().migrated();
         };
-        match toml::from_str::<Config>(&contents) {
-            Ok(config) => config.migrated(),
+        match Self::parse(&contents) {
+            Ok(config) => config,
             Err(e) => {
-                tracing::warn!("ignoring unreadable config at {}: {e}", path.display());
+                tracing::warn!("ignoring unreadable config at {}: {e:#}", path.display());
                 Self::default().migrated()
             }
+        }
+    }
+
+    /// The config this TOML describes, or why it describes none.
+    pub fn parse(contents: &str) -> Result<Self> {
+        let config = toml::from_str::<Config>(contents).context("the config is not valid TOML")?;
+        Ok(config.migrated())
+    }
+
+    /// The file read again while this config is live: the new one if it says
+    /// something different, `None` if it says what this already does.
+    ///
+    /// `None` is what keeps the daemon from answering itself. Every D-Bus
+    /// write saves the file, the watcher sees it, and this is asked about a
+    /// file whose every value the daemon has just put there — so it parses to
+    /// the config in memory, nothing is replaced and nothing is announced. The
+    /// comparison is on the config and not on the bytes on purpose: the save
+    /// merges into the file rather than replacing it, so the bytes hold the
+    /// user's comments and the daemon's values both, and the bytes are not
+    /// something memory can be held up against.
+    ///
+    /// An error leaves the caller holding the config it had. A half-saved file
+    /// from an editor, or a typo, must not turn the dock back into defaults.
+    pub fn reread(&self, contents: &str) -> Result<Option<Self>> {
+        let fresh = Self::parse(contents)?;
+        Ok((!fresh.says_the_same_as(self)).then_some(fresh))
+    }
+
+    /// Take the file at `path` in place of this config, if it says something
+    /// new. `true` when it did and this is now it.
+    ///
+    /// A file that is missing counts as broken, not as empty: an editor that
+    /// deletes before it writes leaves a moment with no file, and a dock that
+    /// reset itself in that moment would be gone by the time the write landed.
+    pub fn reload_from(&mut self, path: &Path) -> Result<bool> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        match self.reread(&contents)? {
+            Some(fresh) => {
+                *self = fresh;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Equal as far as anything that reads the config could tell.
+    ///
+    /// Compared through what would be written rather than field by field, so
+    /// a `nan` typed into the file — which is never equal to itself, and is
+    /// only cleaned up when it is read through `appearance()` — still counts
+    /// as the same config twice running instead of a change on every look.
+    fn says_the_same_as(&self, other: &Self) -> bool {
+        match (toml::to_string(self), toml::to_string(other)) {
+            (Ok(mine), Ok(theirs)) => mine == theirs,
+            _ => false,
         }
     }
 
@@ -1235,6 +1299,98 @@ mod tests {
             !written.contains("Music"),
             "the old file showed through the new one: {written}"
         );
+    }
+
+    /// The loop the watcher could have made: the daemon saves, the watcher
+    /// hears it, and the reload finds the file says exactly what memory does
+    /// — so nothing is replaced and nothing is announced. A comment the user
+    /// left in the file is not a difference either; it is not config.
+    #[test]
+    fn the_daemons_own_save_reads_back_as_nothing_new() {
+        let scratch = Scratch::new("own-save");
+        let path = scratch.file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# my dock\n[[environments]]\nname = \"Work\" # the main one\npinned = [\"code\"]\n",
+        )
+        .unwrap();
+
+        let mut live = Config::load_from(&path);
+        live.pin("Work", "firefox").unwrap();
+        live.set_widget_setting("timer", "minutes", Setting::Count(25)).unwrap();
+        live.save_to(&path).unwrap();
+
+        assert!(
+            !live.clone().reload_from(&path).unwrap(),
+            "the daemon's own write came back as a change, and would be announced again"
+        );
+    }
+
+    /// The same, for a config that holds a value which is not equal to
+    /// itself: compared field by field, a `nan` typed into the file would make
+    /// every one of the daemon's saves look like a fresh edit.
+    #[test]
+    fn a_nan_in_the_file_is_not_a_change_every_time_it_is_read() {
+        let scratch = Scratch::new("nan");
+        let path = scratch.file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[appearance]\nmagnification = nan\n").unwrap();
+
+        let mut live = Config::load_from(&path);
+        live.save_to(&path).unwrap();
+
+        assert!(!live.reload_from(&path).unwrap());
+    }
+
+    #[test]
+    fn an_edit_by_hand_is_taken() {
+        let scratch = Scratch::new("hand-edit");
+        let path = scratch.file();
+        let mut live = two_environments();
+        live.save_to(&path).unwrap();
+
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"Personal\"", "\"Home\"");
+        std::fs::write(&path, edited).unwrap();
+
+        assert!(live.reload_from(&path).unwrap());
+        assert!(live.environment_named("Home").is_some());
+        assert!(live.environment_named("Personal").is_none());
+    }
+
+    /// The finding in the issue: at start-up a broken file means defaults,
+    /// but a reload that did the same would put defaults in memory, and the
+    /// next write from a window would put them on disk over the user's file.
+    #[test]
+    fn a_broken_file_keeps_the_last_config_that_worked() {
+        let scratch = Scratch::new("broken");
+        let path = scratch.file();
+        let mut live = two_environments();
+        live.set_appearance(Appearance {
+            theme: "paper".to_string(),
+            ..Appearance::default()
+        });
+        live.save_to(&path).unwrap();
+
+        std::fs::write(&path, "[[environments]\nname = \"Work\n").unwrap();
+        let refused = live.reload_from(&path);
+
+        assert!(refused.is_err(), "a file that does not parse was taken as a config");
+        assert_eq!(live.appearance().theme, "paper");
+        assert_eq!(live.environments.len(), 2, "the docks went back to the default one");
+    }
+
+    /// An editor that deletes before it writes leaves a moment with no file
+    /// at all; a reload in that moment must not reset the dock either.
+    #[test]
+    fn a_file_that_vanished_keeps_the_last_config_too() {
+        let scratch = Scratch::new("vanished");
+        let mut live = two_environments();
+
+        assert!(live.reload_from(&scratch.file()).is_err());
+        assert_eq!(live.environments, two_environments().environments);
     }
 
     #[test]
