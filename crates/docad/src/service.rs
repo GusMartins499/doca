@@ -126,6 +126,73 @@ impl DockService {
     ) -> zbus::fdo::Result<T> {
         let before = self.widget_shape()?;
         let outcome = self.update_config(change)?;
+        self.announce(emitter, before).await?;
+        Ok(outcome)
+    }
+
+    /// Take the file back from disk, when someone other than the daemon wrote
+    /// it — an editor, a script, a dotfiles checkout.
+    ///
+    /// The read, the comparison and the swap all happen under the same lock
+    /// `update_config` holds across its change and its save. That is what
+    /// keeps a reload from undoing a D-Bus write: the file read here is either
+    /// from before that write — and memory has not changed yet either — or
+    /// from after it, when it already holds the change. A read taken outside
+    /// the lock could see the old file, lose the race for the lock, and put
+    /// the old config back over a write that had just been answered "done".
+    ///
+    /// Nothing is announced when the file says what memory already says,
+    /// which is what every one of the daemon's own saves looks like from here
+    /// — see [`Config::reread`]. And a file that does not parse is reported
+    /// and left alone: the dock keeps the last config that did.
+    pub async fn reload_config(&self, emitter: &SignalEmitter<'_>) -> zbus::fdo::Result<()> {
+        let path = crate::config::config_path();
+        let before = self.widget_shape()?;
+        let replaced = {
+            let mut config = self.config.lock().map_err(|_| {
+                zbus::fdo::Error::Failed("configuration lock was poisoned".to_string())
+            })?;
+            match config.reload_from(&path) {
+                Ok(replaced) => replaced,
+                Err(e) => {
+                    // A log line rather than a desktop notification: the
+                    // daemon talks to nothing but its own bus today, and
+                    // whoever is editing the file by hand is the person most
+                    // likely to be watching the daemon's output for it.
+                    tracing::error!(
+                        "keeping the config already loaded; {} could not be used: {e:#}",
+                        path.display()
+                    );
+                    false
+                }
+            }
+        };
+        if !replaced {
+            tracing::debug!("config file event with nothing new in it");
+            return Ok(());
+        }
+
+        tracing::info!(path = %path.display(), "config reloaded from disk");
+        // The same rule as `remove_environment`: a dock chosen by hand that
+        // the edit took away would keep the bar pointing at nothing.
+        if let Some(name) = self.chosen.get() {
+            if self.with_config(|config| config.environment_named(&name).is_none())? {
+                self.chosen.clear();
+            }
+        }
+        self.announce(emitter, before).await
+    }
+
+    /// Tell everyone the config changed: the widgets, if what they are built
+    /// from moved, and then the bus.
+    ///
+    /// Shared by the D-Bus writes and the reload from disk, so a config that
+    /// arrived either way reaches the hub and the bar the same way.
+    async fn announce(
+        &self,
+        emitter: &SignalEmitter<'_>,
+        before: (Vec<String>, crate::config::WidgetSettings),
+    ) -> zbus::fdo::Result<()> {
         let after = self.widget_shape()?;
         // Compared rather than always settled, so moving a slider in the
         // Appearance tab does not re-poll twelve widgets. Compared *here*
@@ -140,7 +207,7 @@ impl DockService {
             }
         }
         Self::config_changed(emitter).await?;
-        Ok(outcome)
+        Ok(())
     }
 
     /// What widgets there are and what they are set to — the pair the hub is
