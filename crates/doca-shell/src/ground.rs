@@ -136,9 +136,20 @@ impl Ground {
             bar_at.width(),
             bar_at.height(),
         );
-        // The row draws in its own surface, which sits in the stage at its
-        // own allocation; the edges it reports are in that surface.
-        let at = row.area.allocation().x() - origin.x();
+        // The row draws in its own surface, and the edges it reports are in
+        // that surface. Where the surface sits is asked of the stage and not
+        // read off its allocation: an overlay gives each child a window of
+        // its own and allocates the child at that window's origin, so the
+        // allocation says 0 wherever the row really is. That went unseen
+        // while the row stood still — a background reaching a few pixels too
+        // far on the left — and stopped being small once the row moved with
+        // the bar through a dock switch, when the background stayed behind
+        // where the row had been.
+        let at = row
+            .area
+            .translate_coordinates(stage, 0, 0)
+            .map(|(x, _)| x)
+            .unwrap_or(0);
         let icons = row
             .drawn_edges()
             .map(|(left, right)| (left + at as f64, right + at as f64));

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SLIDE: Duration = Duration::from_millis(160);
 /// A frame on a sixty-hertz screen. Nothing animates on this any more — both
@@ -63,6 +63,68 @@ pub const ENTRY_FROM: f64 = 0.55;
 /// that jump is spread over about six frames, none of them larger than a
 /// brisk sweep already is.
 pub const AIM_SPEED: f64 = 3000.0;
+
+/// How far onto the bar a thing has got, and which way it is going.
+///
+/// One instant and one direction, read afresh every frame — the same shape
+/// the lens and the bar use, and for the same reason: an app that opens and
+/// closes again inside a sixth of a second must turn its icon round from
+/// wherever it had got to, and nothing can do that if the position is stored
+/// instead of derived.
+///
+/// Here rather than beside the row because an icon is no longer the only
+/// thing that arrives. A dock switched for another brings its own tiles and
+/// takes the old ones away, and a tile that arrived on a different curve from
+/// the icon beside it would be two movements where there should be one.
+#[derive(Clone, Copy)]
+pub struct Life {
+    since: Instant,
+    arriving: bool,
+}
+
+impl Life {
+    /// A thing that is simply there: nothing to draw arriving, nothing to
+    /// wait for. What everything is, except for the few frames after it
+    /// joined.
+    pub fn settled() -> Self {
+        Self {
+            since: Instant::now() - ENTRY,
+            arriving: true,
+        }
+    }
+
+    pub fn arriving() -> Self {
+        Self {
+            since: Instant::now(),
+            arriving: true,
+        }
+    }
+
+    /// Turned round where it stands, rather than restarted.
+    pub fn reversed(&self) -> Self {
+        Self {
+            since: Instant::now() - reversed_start(self.since.elapsed(), ENTRY),
+            arriving: !self.arriving,
+        }
+    }
+
+    pub fn presence(&self) -> f64 {
+        entry_progress(self.since.elapsed(), self.arriving)
+    }
+
+    pub fn leaving(&self) -> bool {
+        !self.arriving
+    }
+
+    pub fn moving(&self) -> bool {
+        self.since.elapsed() < ENTRY
+    }
+
+    /// Off the bar for good: the space it was holding can be let go.
+    pub fn gone(&self) -> bool {
+        !self.arriving && !self.moving()
+    }
+}
 
 pub fn ease_out(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
