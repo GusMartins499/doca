@@ -716,7 +716,26 @@ fn expanding(
         })
     };
 
-    let asks = panel::Asks { invoke, write };
+    // A setting picked in a panel goes the way the preferences window sends
+    // one, so the file, the window and the panel cannot disagree.
+    let choose: panel::Choose = {
+        let asking = proxy.clone();
+        Rc::new(move |id: &str, key: &str, value: &str| {
+            let (id, key, value) = (id.to_string(), key.to_string(), value.to_string());
+            let proxy = asking.clone();
+            glib::spawn_future_local(async move {
+                let Ok(owned) = zbus::zvariant::Value::from(value).try_to_owned() else {
+                    tracing::warn!("cannot send {id}.{key}");
+                    return;
+                };
+                if let Err(e) = proxy.set_widget_setting(&id, &key, owned).await {
+                    tracing::warn!("widget {id} refused {key}: {e}");
+                }
+            });
+        })
+    };
+
+    let asks = panel::Asks { invoke, write, choose };
 
     Rc::new(move |id: &str, over: &gtk::Widget| {
         let expected = panels.of(id);
@@ -1112,6 +1131,7 @@ fn on_a_display() {
     panel::tests::a_panel_opened_before_is_drawn_at_the_size_it_was();
     panel::tests::choosing_a_control_asks_the_daemon_for_it();
     panel::tests::the_keyboard_walks_the_controls_and_skips_the_heading();
+    panel::tests::choosing_a_view_in_the_panel_writes_the_mode();
     an_undefined_colour_is_not_something_gtk_reports();
     a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();
     the_system_sheet_loads_against_a_real_gtk_theme();

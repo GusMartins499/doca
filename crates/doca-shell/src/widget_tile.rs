@@ -146,6 +146,9 @@ impl WidgetTile {
         ) || matches!(
             self.shown.borrow().body(),
             Ok(Body::Water(Water { drunk, goal, .. })) if drunk >= goal
+        ) || matches!(
+            self.shown.borrow().body(),
+            Ok(Body::Claude(doca_ipc::Claude { near: true, .. }))
         );
         let style = self.root.style_context();
         if active {
@@ -174,6 +177,16 @@ fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Co
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
         Ok(Body::Calendar(calendar)) => draw_calendar(&calendar, look, area, cr, width, height),
+        // Two lines and a bar: the simple tile, which is all the usage tile
+        // is. The breakdown it carries is the panel's.
+        Ok(Body::Claude(claude)) => draw_simple(
+            &Simple { label: claude.label, detail: claude.detail, progress: claude.progress, active: claude.near },
+            look,
+            area,
+            cr,
+            width,
+            height,
+        ),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();

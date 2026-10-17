@@ -35,9 +35,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as Span, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
-use doca_ipc::{claude_mode, claude_window, Body, Simple, WidgetState, NO_PROGRESS};
+use doca_ipc::{claude_mode, claude_window, Body, WidgetState, NO_PROGRESS};
 
-use super::usage::{self, Found, Ledger, Spend};
+use super::usage::{self, Found, Ledger, Spend, Tokens};
 use super::Widget;
 use crate::config::ClaudeSettings;
 
@@ -138,62 +138,87 @@ fn read_forever(tx: mpsc::Sender<Reading>) {
     }
 }
 
-/// What the tile shows at `now`.
+/// What the tile shows at `now`, and what the panel breaks it into.
 pub fn state_at(reading: Option<&Reading>, now: DateTime<Utc>, zone: Tz, settings: &ClaudeSettings) -> WidgetState {
-    let simple = |label: &str, detail: String, progress: f64, active: bool| {
+    let mode = claude_mode::resolve(&settings.mode);
+    let body = |label: String, detail: String, tokens: Tokens, turns: String, budget: u32| {
+        let (label, detail, progress, near) = if budget == 0 || label.is_empty() {
+            (if label.is_empty() { "Claude".to_string() } else { label }, detail, NO_PROGRESS, false)
+        } else {
+            let share = tokens.spent() as f64 / budget as f64;
+            (
+                format!("{:.0}%", (share * 100.0).floor()),
+                format!("{} of {} · {detail}", compact(tokens.spent()), compact(budget as u64)),
+                share.clamp(0.0, 1.0),
+                share >= NEAR,
+            )
+        };
         WidgetState::new(
             "claude",
-            Body::Simple(Simple { label: label.to_string(), detail, progress, active }),
+            Body::Claude(doca_ipc::Claude {
+                mode: mode.to_string(),
+                label,
+                detail,
+                progress,
+                near,
+                input: tokens.input,
+                output: tokens.output,
+                cache_write: tokens.cache_write,
+                cache_read: tokens.cache_read,
+                turns,
+            }),
         )
     };
+    // Said in words, never as a zero: a zero would read as a quiet day. An
+    // empty label is how `body` is told there is no number to show.
+    let missing = |words: &str| body(String::new(), words.to_string(), Tokens::default(), String::new(), 0);
     let Some(reading) = reading else {
-        return simple("Claude", String::new(), NO_PROGRESS, false);
+        return missing("");
     };
-    // Said in words, never as a zero: a zero would read as a quiet day.
     match reading.found {
-        Found::NoFolder => return simple("Claude", "Claude Code not found".to_string(), NO_PROGRESS, false),
-        Found::Empty => return simple("Claude", "no usage yet".to_string(), NO_PROGRESS, false),
-        Found::NotUnderstood => {
-            return simple("Claude", "usage format not understood".to_string(), NO_PROGRESS, false)
-        }
+        Found::NoFolder => return missing("Claude Code not found"),
+        Found::Empty => return missing("no usage yet"),
+        Found::NotUnderstood => return missing("usage format not understood"),
         Found::Read => {}
     }
 
-    let (spent, what) = match claude_mode::resolve(&settings.mode) {
+    let until_now = now + Span::seconds(1);
+    let (tokens, what, turns) = match mode {
         claude_mode::FIVE_HOURS => match usage::session_open_at(&reading.spends, now) {
             Some(opened) => {
-                let closes = (opened + Span::hours(5)).with_timezone(&zone);
+                let closes = (opened + Span::hours(5)).with_timezone(&zone).format("%H:%M").to_string();
                 (
-                    usage::between(&reading.spends, opened, now + Span::seconds(1)).spent(),
-                    format!("session · until {}", closes.format("%H:%M")),
+                    usage::between(&reading.spends, opened, until_now),
+                    format!("session · until {closes}"),
+                    closes,
                 )
             }
-            None => (0, "no session open".to_string()),
+            None => (Tokens::default(), "no session open".to_string(), String::new()),
         },
         claude_mode::WEEK => (
-            usage::between(&reading.spends, now - Span::days(7), now + Span::seconds(1)).spent(),
+            usage::between(&reading.spends, now - Span::days(7), until_now),
             "last 7 days".to_string(),
+            String::new(),
         ),
-        _ => {
-            let (from, words) = match claude_window::resolve(&settings.window) {
-                claude_window::FIVE_HOURS => (now - Span::hours(5), "last 5 hours"),
-                claude_window::TODAY => (midnight_of(now, zone), "today"),
-                _ => (now - Span::days(7), "last 7 days"),
-            };
-            (usage::between(&reading.spends, from, now + Span::seconds(1)).spent(), words.to_string())
-        }
+        _ => match claude_window::resolve(&settings.window) {
+            claude_window::FIVE_HOURS => (
+                usage::between(&reading.spends, now - Span::hours(5), until_now),
+                "last 5 hours".to_string(),
+                String::new(),
+            ),
+            claude_window::TODAY => (
+                usage::between(&reading.spends, midnight_of(now, zone), until_now),
+                "today".to_string(),
+                "midnight".to_string(),
+            ),
+            _ => (
+                usage::between(&reading.spends, now - Span::days(7), until_now),
+                "last 7 days".to_string(),
+                String::new(),
+            ),
+        },
     };
-
-    if settings.budget == 0 {
-        return simple(&compact(spent), what, NO_PROGRESS, false);
-    }
-    let share = spent as f64 / settings.budget as f64;
-    simple(
-        &format!("{:.0}%", (share * 100.0).floor()),
-        format!("{} of {} · {what}", compact(spent), compact(settings.budget as u64)),
-        share.clamp(0.0, 1.0),
-        share >= NEAR,
-    )
+    body(compact(tokens.spent()), what, tokens, turns, settings.budget)
 }
 
 fn midnight_of(now: DateTime<Utc>, zone: Tz) -> DateTime<Utc> {
@@ -204,30 +229,13 @@ fn midnight_of(now: DateTime<Utc>, zone: Tz) -> DateTime<Utc> {
         .unwrap_or(now)
 }
 
-/// Tokens as a tile can show them: `950`, `12k`, `2.4M`.
-///
-/// Three significant figures at most, because a tile is read at a glance and
-/// `2412887` is read digit by digit.
+/// Tokens as a tile can show them — the one spelling the bar shares.
 pub fn compact(tokens: u64) -> String {
-    let scaled = |value: f64, unit: &str| {
-        if value < 10.0 {
-            let tenth = format!("{value:.1}");
-            format!("{}{unit}", tenth.trim_end_matches(".0"))
-        } else {
-            format!("{value:.0}{unit}")
-        }
-    };
-    match tokens {
-        0..=999 => tokens.to_string(),
-        1_000..=999_999 => scaled(tokens as f64 / 1e3, "k"),
-        1_000_000..=999_999_999 => scaled(tokens as f64 / 1e6, "M"),
-        _ => scaled(tokens as f64 / 1e9, "B"),
-    }
+    doca_ipc::compact_tokens(tokens)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::usage::Tokens;
     use super::super::Drawn;
     use super::*;
 
@@ -313,6 +321,22 @@ mod tests {
         assert_eq!(said(Found::NoFolder), "Claude Code not found");
         assert_eq!(said(Found::Empty), "no usage yet");
         assert_eq!(said(Found::NotUnderstood), "usage format not understood");
+    }
+
+    #[test]
+    fn the_panel_gets_the_breakdown_and_when_the_window_turns() {
+        let state = state_at(Some(&day()), now(), SAO_PAULO, &settings("five-hours", "5h", 0));
+        let Ok(Body::Claude(claude)) = state.body() else { panic!("not a usage body") };
+        assert_eq!(claude.mode, "five-hours");
+        assert_eq!((claude.input, claude.cache_read), (2_400_000, 2_000_000), "two replies in the session");
+        assert_eq!(claude.turns, "20:30");
+
+        let today = state_at(Some(&day()), now(), SAO_PAULO, &settings("tokens", "today", 0));
+        let Ok(Body::Claude(claude)) = today.body() else { panic!("not a usage body") };
+        assert_eq!(claude.turns, "midnight");
+        let week = state_at(Some(&day()), now(), SAO_PAULO, &settings("week", "today", 0));
+        let Ok(Body::Claude(claude)) = week.body() else { panic!("not a usage body") };
+        assert_eq!(claude.turns, "", "seven days roll; they do not turn");
     }
 
     #[test]
