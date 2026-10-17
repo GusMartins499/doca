@@ -366,6 +366,13 @@ impl Row {
     /// windows away, took focus. What changed is which apps are running, not
     /// where the pointer is or what an icon looks like.
     pub fn fill(&self, items: &[DockItem], rest: Rest) {
+        // The row is one drawing, so a screen reader is told what is on it
+        // as the row's own description — in order, the way the keys count.
+        if let Some(accessible) = self.area.accessible() {
+            use atk::prelude::*;
+            accessible.set_name("Dock");
+            accessible.set_description(&spoken(items));
+        }
         let largest = (rest.icon * rest.scale).ceil() as i32;
         let resized = largest != self.largest.replace(largest);
         // A row that had nothing on it, or one whose icons all just changed
@@ -840,8 +847,38 @@ impl Row {
     }
 }
 
+/// What is on the row, in words: each item's name in order, and how many
+/// windows it has open when it has any.
+pub fn spoken(items: &[DockItem]) -> String {
+    items
+        .iter()
+        .map(|item| match item.windows.len() {
+            0 => item.name.clone(),
+            1 => format!("{} (open)", item.name),
+            n => format!("{} ({n} windows)", item.name),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn the_row_is_said_in_the_order_it_is_shown() {
+        let item = |name: &str, windows: usize| DockItem {
+            id: name.to_lowercase(),
+            name: name.to_string(),
+            icon: String::new(),
+            pinned: true,
+            windows: (0..windows as u32).collect(),
+            active: false,
+        };
+        assert_eq!(
+            super::spoken(&[item("Files", 0), item("Firefox", 2), item("Code", 1)]),
+            "Files, Firefox (2 windows), Code (open)"
+        );
+    }
+
     use super::*;
 
     fn item(id: &str) -> DockItem {

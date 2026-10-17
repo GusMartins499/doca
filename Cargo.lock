@@ -314,6 +314,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-channel",
+ "atk",
  "doca-ipc",
  "futures-util",
  "gdk",
