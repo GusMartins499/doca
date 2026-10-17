@@ -108,6 +108,7 @@ pub enum Body {
     Water(Water),
     Music(Music),
     Note(Note),
+    Calendar(Calendar),
 }
 
 /// The name each [`Body`] arm travels under, which is the `s` of the `(s v)`.
@@ -119,9 +120,10 @@ pub mod body_kind {
     pub const WATER: &str = "water";
     pub const MUSIC: &str = "music";
     pub const NOTE: &str = "note";
+    pub const CALENDAR: &str = "calendar";
 
     /// Every name there is, for a test to walk.
-    pub const ALL: [&str; 4] = [SIMPLE, WATER, MUSIC, NOTE];
+    pub const ALL: [&str; 5] = [SIMPLE, WATER, MUSIC, NOTE, CALENDAR];
 }
 
 /// Two lines and a progress bar.
@@ -205,6 +207,37 @@ pub struct Note {
     pub colour: String,
 }
 
+/// The day, and what is coming up in it and after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Calendar {
+    /// The day of the week, short: `Sat`.
+    pub weekday: String,
+    /// The day of the month.
+    pub day: u32,
+    /// What has not ended yet, soonest first. Only as many as a tile or a
+    /// panel could show; the daemon decides how far ahead to look.
+    pub upcoming: Vec<Upcoming>,
+    /// Empty when the calendars were read. Otherwise what is missing, in the
+    /// words the tile should say it in — "no calendar service" — so that an
+    /// empty list means *nothing ahead* and never *could not look*.
+    pub missing: String,
+}
+
+/// One thing on the calendar, as it will be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Upcoming {
+    /// When, already in words: `19:00`, `Tue 14:00`, `today`, `now`.
+    ///
+    /// Written by the daemon rather than sent as an instant because it is
+    /// the daemon that knows the user's zone and reads the calendar in it;
+    /// a bar formatting an instant would be a second opinion on what time it
+    /// is.
+    pub when: String,
+    pub title: String,
+    /// Under way right now, which is drawn apart from what is still to come.
+    pub now: bool,
+}
+
 /// The papers a note can be written on.
 ///
 /// The primo.dock's six, kept whole rather than pruned: a post-it colour is
@@ -272,6 +305,7 @@ impl Body {
             Body::Water(_) => body_kind::WATER,
             Body::Music(_) => body_kind::MUSIC,
             Body::Note(_) => body_kind::NOTE,
+            Body::Calendar(_) => body_kind::CALENDAR,
         }
     }
 
@@ -296,6 +330,9 @@ impl Body {
             // A post-it is a square. It is the one tile whose shape is the
             // thing it is standing for rather than a choice about room.
             Body::Note(_) => Tile::Square,
+            // The date on the left and the agenda beside it: the issue asks
+            // for the card, and a square holds the date and nothing else.
+            Body::Calendar(_) => Tile::Wide,
         }
     }
 }
@@ -336,6 +373,7 @@ impl WidgetState {
             Body::Water(water) => OwnedValue::try_from(water),
             Body::Music(music) => OwnedValue::try_from(music),
             Body::Note(note) => OwnedValue::try_from(note),
+            Body::Calendar(calendar) => OwnedValue::try_from(calendar),
         };
         Self {
             id: id.into(),
@@ -370,6 +408,9 @@ impl WidgetState {
                 .map_err(|e| unreadable(e.to_string())),
             body_kind::NOTE => Note::try_from(self.body.clone())
                 .map(Body::Note)
+                .map_err(|e| unreadable(e.to_string())),
+            body_kind::CALENDAR => Calendar::try_from(self.body.clone())
+                .map(Body::Calendar)
                 .map_err(|e| unreadable(e.to_string())),
             unknown => Err(UnreadableBody {
                 kind: unknown.to_string(),
@@ -820,6 +861,18 @@ mod tests {
                     player: "rhythmbox".to_string(),
                     playing: true,
                     art: "/tmp/cover.png".to_string(),
+                }),
+            ),
+            (
+                body_kind::CALENDAR,
+                Body::Calendar(Calendar {
+                    weekday: "Sat".to_string(),
+                    day: 17,
+                    upcoming: vec![
+                        Upcoming { when: "now".to_string(), title: "Standup".to_string(), now: true },
+                        Upcoming { when: "Tue 14:00".to_string(), title: "Dentist".to_string(), now: false },
+                    ],
+                    missing: String::new(),
                 }),
             ),
         ]

@@ -485,6 +485,7 @@ mod tests {
             doca_ipc::Body::Note(note) => note.text,
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
+            doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
         }
     }
 
@@ -501,6 +502,7 @@ mod tests {
             doca_ipc::Body::Note(note) => note.text,
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
+            doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
         }
     }
 

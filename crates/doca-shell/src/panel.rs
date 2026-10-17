@@ -148,6 +148,18 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
                 format!("{} ml a bottle", water.bottle)
             },
         },
+        Ok(Body::Calendar(calendar)) => Row::Heading {
+            title: format!("{} {}", calendar.weekday, calendar.day),
+            detail: if !calendar.missing.is_empty() {
+                calendar.missing.clone()
+            } else {
+                calendar
+                    .upcoming
+                    .first()
+                    .map(|up| format!("{} {}", up.when, up.title))
+                    .unwrap_or_else(|| "nothing ahead".to_string())
+            },
+        },
         // A body this build cannot read still opens a panel that names the
         // widget: the controls below come from the id, not from the body, so
         // all of them still work.
