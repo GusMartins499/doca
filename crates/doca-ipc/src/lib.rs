@@ -533,8 +533,9 @@ pub const THEMES: [&str; 4] = ["system", "native", "midnight", "paper"];
 /// to offer the list without writing it out by hand. `docad` has a test that
 /// every id here builds into a real widget, so a name that goes stale fails
 /// the suite rather than logging "ignoring unknown widget" at someone.
-pub const WIDGETS: [&str; 12] = [
+pub const WIDGETS: [&str; 13] = [
     "clock",
+    "calendar",
     "battery",
     "cpu",
     "network",
