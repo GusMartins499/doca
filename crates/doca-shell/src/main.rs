@@ -375,6 +375,18 @@ async fn drive(
             });
         }
     }
+    // Whether the desktop wants things to move at all, read now and followed:
+    // GNOME's "Reduce animation" flips it while the dock is running, and the
+    // lens has to go or come back with it, which is a rebuild.
+    let (stillness_moved, stillness_moves) = async_channel::unbounded::<()>();
+    let mut stillness_moves = Box::pin(stillness_moves);
+    if let Some(settings) = gtk::Settings::default() {
+        motion::hold_still(!settings.is_gtk_enable_animations());
+        settings.connect_gtk_enable_animations_notify(move |settings| {
+            motion::hold_still(!settings.is_gtk_enable_animations());
+            let _ = stillness_moved.send_blocking(());
+        });
+    }
     rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
@@ -392,6 +404,7 @@ async fn drive(
             // is already on screen, which is what makes a preferences window
             // possible without asking anyone to restart the dock.
             _ = futures_util::StreamExt::next(&mut config_changed) => {}
+            _ = futures_util::StreamExt::next(&mut stillness_moves) => {}
             property = futures_util::StreamExt::next(&mut theme_moves) => {
                 let Some(property) = property else { continue };
                 let Some(themes) = &chrome.themes else { continue };
@@ -836,10 +849,16 @@ async fn rebuild(
         .as_ref()
         .map(|appearance| appearance.auto_hide)
         .unwrap_or(false);
-    let magnification = appearance
-        .as_ref()
-        .map(|appearance| appearance.magnification)
-        .unwrap_or(magnify::DEFAULT_SCALE);
+    // No lens at all when the desktop asked for no animation — not a lens
+    // that snaps open, which is still an icon jumping under the pointer.
+    let magnification = if motion::still() {
+        1.0
+    } else {
+        appearance
+            .as_ref()
+            .map(|appearance| appearance.magnification)
+            .unwrap_or(magnify::DEFAULT_SCALE)
+    };
 
     let entries = proxy.list_items().await.unwrap_or_default();
     let widgets = proxy.list_widgets().await.unwrap_or_default();
@@ -1059,6 +1078,7 @@ fn on_a_display() {
     gtk::init().expect("no X display");
 
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
+    hide_tests::a_bar_held_still_is_where_it_was_sent_at_once();
     hide_tests::a_pointer_that_stays_is_an_arrival();
     hide_tests::a_hand_that_overshoots_and_comes_back_keeps_the_bar();
     hide_tests::an_open_menu_keeps_the_bar_where_it_is();
@@ -1205,6 +1225,41 @@ pub mod hide_tests {
         hide.settle();
         assert!(!hide.shown.get(), "the bar did not go away when asked");
         (window, hide)
+    }
+
+    /// With animations off, the bar does not slide: it is where it was sent
+    /// on the first frame drawn.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_bar_held_still_is_where_it_was_sent_at_once() {
+        let (shown_y, height) = (500, 60);
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(400, height);
+        window.show_all();
+        let hide = Hide::default();
+        hide.place(&window, 0, shown_y, height, false);
+
+        motion::hold_still(true);
+        hide.place(&window, 0, shown_y, height, true);
+        let first: Rc<Cell<Option<i32>>> = Rc::default();
+        let seen = first.clone();
+        let watching = hide.clone();
+        window.add_tick_callback(move |_, _| {
+            if seen.get().is_none() {
+                seen.set(Some(watching.y()));
+            }
+            glib::ControlFlow::Continue
+        });
+        waiting(motion::FRAME * 3);
+        motion::hold_still(false);
+
+        assert_eq!(
+            first.get(),
+            Some(motion::hidden_y(shown_y, height)),
+            "with animations off the bar still slid"
+        );
+        window.close();
+        waiting(std::time::Duration::from_millis(20));
     }
 
     /// The whole of the item: a pointer that crosses the edge and keeps going
