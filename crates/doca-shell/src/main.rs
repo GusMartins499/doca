@@ -728,22 +728,13 @@ fn expanding(
     let asks = panel::Asks { invoke, write };
 
     Rc::new(move |id: &str, over: &gtk::Widget| {
-        let expected = panels.of(id);
-        let menu = panel::opening(expected);
+        let menu = panel::opening(panels.of(id));
         hide.holds_for(&window, &menu);
 
         // Over the tile that asked, and the same way every time it is
         // reopened — including the reopen `panel::fill` does when the panel
         // turns out to be a different shape than it was opened for.
-        let anchor = over.clone();
-        let show: panel::Show = Rc::new(move |menu: &gtk::Menu| {
-            menu.popup_at_widget(
-                &anchor,
-                gdk::Gravity::NorthWest,
-                gdk::Gravity::SouthWest,
-                None,
-            );
-        });
+        let show = panel::above(over);
         show(&menu);
         let opened = std::time::Instant::now();
 
@@ -757,12 +748,20 @@ fn expanding(
         // and none when the menu closes either, so a bar that auto-hides
         // would sit there shown for ever. Asking again on close is what makes
         // auto-hide work after a panel rather than only before one.
+        //
+        // On the menu being closed, not on it being hidden: a panel that
+        // turns out to be a different shape is taken down and put up again
+        // by `panel::fill`, and that is a hide too — one after which the bar
+        // slid away from under the panel still on it, and the panel stopped
+        // hearing the widget's news. Escape, a click elsewhere and a lost
+        // grab all close a menu by deactivating it; taking it down from code
+        // does not.
         let closing = hide.clone();
         let dock = window.clone();
         let back_to = over.clone();
         let going = showing.clone();
         let gone = id.to_string();
-        menu.connect_hide(move |_| {
+        menu.connect_deactivate(move |_| {
             going.gone(&gone);
             back_to.grab_focus();
             closing.slide(&dock, pointer_is_over(&dock));
@@ -787,9 +786,8 @@ fn expanding(
                     // A different shape — a cover that arrived — is drawn
                     // again, which may move the panel; that is the price of a
                     // row that was not there.
-                    panels.note(&widget, rows.len().max(1));
-                    let refilled =
-                        panel::fill(&menu, current.len(), &widget, &rows, &asks, &show, opened);
+                    let refilled = panel::fill(&menu, &widget, &rows, &asks, &show, opened);
+                    panels.note(&widget, &menu);
                     live.replace(Some(refilled));
                 }),
             );
@@ -816,8 +814,8 @@ fn expanding(
                     Vec::new()
                 }
             };
-            panels.note(&id, rows.len().max(1));
-            let filled = panel::fill(&filling, expected, &id, &rows, &asks, &show, opened);
+            let filled = panel::fill(&filling, &id, &rows, &asks, &show, opened);
+            panels.note(&id, &filling);
             live.replace(Some(filled));
         });
     })
@@ -1155,6 +1153,8 @@ fn on_a_display() {
     panel::tests::a_panel_opens_before_the_daemon_has_answered();
     panel::tests::a_panel_opened_at_the_shape_it_turns_out_to_have_does_not_move();
     panel::tests::a_panel_larger_than_it_opened_for_is_still_shown_whole();
+    panel::tests::a_panel_hangs_above_the_tile_that_asked();
+    panel::tests::a_panel_opened_again_is_shown_whole();
     panel::tests::a_panel_opened_before_is_drawn_at_the_size_it_was();
     panel::tests::choosing_a_control_asks_the_daemon_for_it();
     panel::tests::the_keyboard_walks_the_controls_and_skips_the_heading();
