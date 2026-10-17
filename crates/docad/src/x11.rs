@@ -367,6 +367,7 @@ mod tests {
                             app_id: "app".into(),
                             workspace: 0,
                             active: true,
+                            fullscreen: false,
                         }]));
                     }
                     Request::CurrentWorkspace(reply) => {
