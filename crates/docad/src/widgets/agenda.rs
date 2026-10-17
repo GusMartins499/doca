@@ -304,7 +304,10 @@ fn expand(event: &Event, rule: &str, from: DateTime<Utc>, to: DateTime<Utc>, loc
     // occurrence", even when the rule would not land on it — a weekly
     // Monday-Wednesday-Friday series first put on a Sunday happens that
     // Sunday too. rrule follows dateutil, which leaves it out; GNOME
-    // Calendar and Evolution show it, so this does.
+    // Calendar and Evolution show it, so this does. With COUNT that leaves
+    // the series one occurrence long at its far end, because rrule counted
+    // without this day; a COUNT series first put off its own rule is rare
+    // enough to accept.
     if (after..=before).contains(&first) && !starts.contains(&first) {
         starts.insert(0, first);
     }
