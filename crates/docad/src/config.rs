@@ -487,6 +487,49 @@ impl Config {
             .find(|environment| environment.name != current)
     }
 
+    /// The cycle the other way round: the environment before this one,
+    /// wrapping from the first to the last. #18, item 8, "cycle backwards".
+    pub fn environment_before(&self, current: &str) -> Option<&Environment> {
+        let count = self.environments.len();
+        let position = self
+            .environments
+            .iter()
+            .position(|environment| environment.name == current)
+            .unwrap_or(0);
+        (1..count)
+            .map(|back| &self.environments[(position + count - back) % count])
+            .find(|environment| environment.name != current)
+    }
+
+    /// Auto-hide the other way from how it is; answers with how it is now.
+    pub fn toggle_auto_hide(&mut self) -> bool {
+        let mut appearance = self.appearance();
+        appearance.auto_hide = !appearance.auto_hide;
+        self.set_appearance(appearance);
+        self.appearance().auto_hide
+    }
+
+    /// A widget on this dock if it was off, off if it was on; answers with
+    /// whether it is on now. Turned on, it goes at the end, which is where a
+    /// widget the user just asked for is looked for.
+    pub fn toggle_widget(&mut self, environment: &str, widget: &str) -> Result<bool> {
+        anyhow::ensure!(
+            doca_ipc::WIDGETS.contains(&widget),
+            "no widget {widget}; there are {}",
+            doca_ipc::WIDGETS.join(", ")
+        );
+        let mut widgets = self.named_mut(environment)?.widgets.clone();
+        let on = if let Some(at) = widgets.iter().position(|held| held == widget) {
+            widgets.remove(at);
+            false
+        } else {
+            widgets.push(widget.to_string());
+            true
+        };
+        self.set_environment_widgets(environment, widgets)?;
+        Ok(on)
+    }
+
     /// Whether some environment asked for this workspace by name.
     ///
     /// A workspace only a catch-all covers was never really claimed, so moving
@@ -1500,6 +1543,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(order(&config), ["Home", "Work", "Games"]);
+    }
+
+    #[test]
+    fn the_cycle_backwards_is_the_cycle_forwards_reversed() {
+        let docks = three_docks();
+        let names: Vec<&str> = docks.environments.iter().map(|e| e.name.as_str()).collect();
+        for name in &names {
+            let back = docks.environment_before(name).map(|e| e.name.clone()).unwrap();
+            assert_eq!(
+                docks.next_environment_after(&back).map(|e| e.name.as_str()),
+                Some(*name),
+                "one back from {name} and one forward again is not {name}"
+            );
+        }
+        assert_eq!(
+            docks.environment_before(names[0]).map(|e| e.name.as_str()),
+            Some(names[2]),
+            "back from the first wraps to the last"
+        );
+        let one = config("[[environments]]\nname = \"Work\"\n");
+        assert!(one.environment_before("Work").is_none(), "nowhere to go back to");
+    }
+
+    #[test]
+    fn toggles_flip_and_say_what_they_flipped_to() {
+        let mut config = three_docks();
+        let was = config.appearance().auto_hide;
+        assert_eq!(config.toggle_auto_hide(), !was);
+        assert_eq!(config.toggle_auto_hide(), was);
+
+        let dock = config.environments[0].name.clone();
+        config.set_environment_widgets(&dock, vec!["clock".to_string(), "water".to_string()]).unwrap();
+        assert!(!config.toggle_widget(&dock, "clock").unwrap());
+        assert_eq!(config.environments[0].widgets, vec!["water"]);
+        assert!(config.toggle_widget(&dock, "clock").unwrap());
+        assert_eq!(config.environments[0].widgets, vec!["water", "clock"], "back on, at the end");
+        assert!(config.toggle_widget(&dock, "clocks").is_err(), "a misspelt widget is told, not written");
     }
 
     /// The cycle reads this list, so the two have to agree after a reorder.

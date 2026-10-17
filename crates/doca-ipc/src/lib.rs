@@ -618,6 +618,9 @@ pub trait Doca {
     fn current_environment(&self) -> zbus::Result<String>;
     fn set_environment(&self, name: &str) -> zbus::Result<()>;
     fn cycle_environment(&self) -> zbus::Result<String>;
+    fn cycle_environment_back(&self) -> zbus::Result<String>;
+    fn toggle_auto_hide(&self) -> zbus::Result<bool>;
+    fn toggle_widget(&self, id: &str) -> zbus::Result<bool>;
 
     fn appearance(&self) -> zbus::Result<Appearance>;
 

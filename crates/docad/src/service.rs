@@ -607,6 +607,47 @@ impl DockService {
         Ok(next)
     }
 
+    /// The cycle the other way round, for a second key.
+    async fn cycle_environment_back(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let current = self.shown().await?.name;
+        let back = self.with_config(|config| {
+            config
+                .environment_before(&current)
+                .map(|environment| environment.name.clone())
+        })?;
+        let Some(back) = back else {
+            return Err(zbus::fdo::Error::Failed(
+                "no other environment to cycle to".to_string(),
+            ));
+        };
+        self.chosen.set(&back);
+        Self::environment_changed(&emitter, &back).await?;
+        Ok(back)
+    }
+
+    /// Auto-hide on if it was off, off if it was on — the one appearance
+    /// change that is worth a key of its own. Answers with how it is now.
+    async fn toggle_auto_hide(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        self.commit(&emitter, |config| Ok(config.toggle_auto_hide())).await
+    }
+
+    /// A widget on the dock showing now, or off it. Answers with whether it
+    /// is on now.
+    async fn toggle_widget(
+        &self,
+        id: &str,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let shown = self.shown().await?.name;
+        self.commit(&emitter, |config| config.toggle_widget(&shown, id)).await
+    }
+
     async fn close_window(&self, id: u32) -> zbus::fdo::Result<()> {
         self.x11.close_window(id).await.map_err(failed)
     }
