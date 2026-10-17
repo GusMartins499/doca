@@ -272,6 +272,32 @@ impl DockService {
         }
     }
 
+    /// Choose the item at this place in the dock, as a click on it would —
+    /// what a `Super+1..9` binding calls (#18, item 8). Counted from one;
+    /// answers with the id it chose.
+    ///
+    /// The bar is told through `ItemActivated`, so that a key gets the same
+    /// bounce a click does: a key press is the action least likely to be
+    /// watched, and the one that most needs saying it landed.
+    async fn activate_position(
+        &self,
+        position: u32,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let items = self.items().await?;
+        let Some(item) = model::at_position(&items, position).cloned() else {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "there is no item {position}; this dock shows {}",
+                items.len()
+            )));
+        };
+        self.activate_item(&item.id).await?;
+        Self::item_activated(&emitter, &item.id, model::starts_something(&item))
+            .await
+            .map_err(failed)?;
+        Ok(item.id)
+    }
+
     async fn launch_item(&self, id: &str) -> zbus::fdo::Result<()> {
         self.spawn(id)
     }
@@ -619,6 +645,11 @@ impl DockService {
 
     #[zbus(signal)]
     pub async fn items_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// An item was chosen by something other than a click on it — a key —
+    /// and whether that started it, which is when the bar bounces it.
+    #[zbus(signal)]
+    pub async fn item_activated(emitter: &SignalEmitter<'_>, id: &str, starting: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn windows_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;

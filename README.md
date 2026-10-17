@@ -280,6 +280,36 @@ the script is the same thing for automation, and writes the same slots:
 ./scripts/bind-key.sh '<Super>1' Work    # one key straight to one environment
 ./scripts/bind-key.sh --list
 ./scripts/bind-key.sh --remove '<Super>1' Work
+./scripts/bind-key.sh --item 3           # <Super>3 chooses the third icon
+./scripts/bind-key.sh --items --take     # <Super>1..9, taken from GNOME's dash
+./scripts/bind-key.sh --remove --items
+```
+
+GNOME binds `<Super>1..9` to its own dash out of the box
+(`org.gnome.shell.keybindings switch-to-application-N`), and a key bound twice
+goes to whichever wins. So `--item` and `--items` refuse those keys and say
+which, unless `--take` is given — which clears GNOME's binding for exactly
+the keys being bound, and nothing else. `gsettings reset` gives them back.
+
+A chosen item behaves as if clicked: an open app comes forward, and one that
+is not running starts, with the same bounce on the bar a click gives.
+
+Every action a key can call, for binding by hand:
+
+| method | arguments | does |
+|---|---|---|
+| `CycleEnvironment` | — | the next dock, wrapping round |
+| `SetEnvironment` | `name` | that dock |
+| `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
+| `ActivateItem` | `id` | that item, as a click would |
+| `InvokeWidget` | `id`, `action` | a widget's action — `water drink`, `music next` |
+| `SetAppearance` | `{key: value}` | e.g. `{'auto_hide': <true>}` |
+| `SetWidgetSetting` | `id`, `key`, `value` | e.g. `water goal <uint32 2500>` |
+
+```bash
+gdbus call --session --dest io.github.gusmartins499.Doca \
+    --object-path /io/github/gusmartins499/Doca \
+    --method io.github.gusmartins499.Doca1.ActivatePosition 3
 ```
 
 The script writes a GNOME custom keybinding whose command is a `gdbus call` to
