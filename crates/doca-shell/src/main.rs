@@ -33,10 +33,7 @@ fn main() -> Result<()> {
 
     gtk::init()?;
 
-    let monitor = gdk::Display::default()
-        .and_then(|display| display.primary_monitor())
-        .ok_or_else(|| anyhow::anyhow!("no primary monitor"))?;
-    let screen = monitor.geometry();
+    let screen = measured().ok_or_else(|| anyhow::anyhow!("no monitor to put a dock on"))?;
 
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_title("Doca");
@@ -375,6 +372,22 @@ async fn drive(
             });
         }
     }
+    // The screen the bar is measured against, measured again whenever it
+    // changes: a monitor plugged in or out, a resolution switched. #18, item
+    // 11 — without this the bar stayed the width and in the place it had on
+    // the screen it started on.
+    let mut screen = screen;
+    let (screen_moved, screen_moves) = async_channel::unbounded::<()>();
+    let mut screen_moves = Box::pin(screen_moves);
+    if let Some(display_screen) = gdk::Screen::default() {
+        let telling = screen_moved.clone();
+        display_screen.connect_monitors_changed(move |_| {
+            let _ = telling.send_blocking(());
+        });
+        display_screen.connect_size_changed(move |_| {
+            let _ = screen_moved.send_blocking(());
+        });
+    }
     rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
@@ -392,6 +405,26 @@ async fn drive(
             // is already on screen, which is what makes a preferences window
             // possible without asking anyone to restart the dock.
             _ = futures_util::StreamExt::next(&mut config_changed) => {}
+            _ = futures_util::StreamExt::next(&mut screen_moves) => {
+                match measured() {
+                    Some(now) if now != screen => {
+                        tracing::info!(
+                            width = now.width(),
+                            height = now.height(),
+                            x = now.x(),
+                            y = now.y(),
+                            "the screen changed under the dock"
+                        );
+                        screen = now;
+                    }
+                    // Told twice for one change, which X does: nothing moved.
+                    Some(_) => continue,
+                    None => {
+                        tracing::warn!("no monitor left to put the dock on; staying where it is");
+                        continue;
+                    }
+                }
+            }
             property = futures_util::StreamExt::next(&mut theme_moves) => {
                 let Some(property) = property else { continue };
                 let Some(themes) = &chrome.themes else { continue };
@@ -1040,6 +1073,19 @@ async fn rebuild(
     }
 
     tracing::debug!(items = entries.len(), width, "rebuilt");
+}
+
+/// The monitor the dock lives on, as a rectangle of the whole X screen.
+///
+/// The primary one — and the first there is when none is primary, which is
+/// what a bare X server, or `xrandr` with no `--primary`, leaves you with:
+/// a dock that refused to start there was a dock missing for no reason.
+fn measured() -> Option<gdk::Rectangle> {
+    let display = gdk::Display::default()?;
+    display
+        .primary_monitor()
+        .or_else(|| display.monitor(0))
+        .map(|monitor| monitor.geometry())
 }
 
 /// The checks that need a real X display, run in the order GTK demands.
