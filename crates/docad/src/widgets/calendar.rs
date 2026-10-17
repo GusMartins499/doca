@@ -44,6 +44,7 @@ use chrono_tz::Tz;
 use doca_ipc::{Body, Upcoming, WidgetState};
 
 use super::agenda::{self, Occurrence};
+use crate::config::CalendarSettings;
 use super::Widget;
 
 const SOURCES: &str = "org.gnome.evolution.dataserver.Sources5";
@@ -54,8 +55,10 @@ const CALENDAR_FACTORY: &str = "/org/gnome/evolution/dataserver/CalendarFactory"
 const FACTORY_INTERFACE: &str = "org.gnome.evolution.dataserver.CalendarFactory";
 const CALENDAR_INTERFACE: &str = "org.gnome.evolution.dataserver.Calendar";
 
-/// How far ahead the tile looks for "next".
-const AHEAD: i64 = 7;
+/// How far ahead is read, whatever is shown: the furthest any setting
+/// looks. Changing the setting then takes effect on the next poll, from
+/// what is already read, instead of waiting for EDS.
+const AHEAD: i64 = doca_ipc::calendar_ahead::FURTHEST;
 
 /// How often the calendars are read again.
 ///
@@ -78,13 +81,14 @@ pub enum Reading {
 }
 
 pub struct Calendar {
+    settings: CalendarSettings,
     zone: Tz,
     reading: Reading,
     readings: Option<mpsc::Receiver<Reading>>,
 }
 
 impl Calendar {
-    pub fn new() -> Self {
+    pub fn new(settings: CalendarSettings) -> Self {
         let zone = local_zone();
         let (tx, rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
@@ -93,7 +97,7 @@ impl Calendar {
         if let Err(e) = spawned {
             tracing::warn!("cannot start reading the calendar: {e}");
         }
-        Self { zone, reading: Reading::Waiting, readings: Some(rx) }
+        Self { settings, zone, reading: Reading::Waiting, readings: Some(rx) }
     }
 
     fn take_readings(&mut self) {
@@ -124,7 +128,11 @@ impl Widget for Calendar {
 
     fn poll(&mut self) -> WidgetState {
         self.take_readings();
-        state_at(&self.reading, Utc::now(), self.zone)
+        state_at(&self.reading, Utc::now(), self.zone, &self.settings)
+    }
+
+    fn adopt(&mut self, settings: &crate::config::WidgetSettings) {
+        self.settings = settings.calendar.clone();
     }
 }
 
@@ -134,7 +142,7 @@ impl Widget for Calendar {
 const UPCOMING: usize = 8;
 
 /// What the tile shows at `now`, given what was read.
-pub fn state_at(reading: &Reading, now: DateTime<Utc>, zone: Tz) -> WidgetState {
+pub fn state_at(reading: &Reading, now: DateTime<Utc>, zone: Tz, settings: &CalendarSettings) -> WidgetState {
     let today = now.with_timezone(&zone);
     let (upcoming, missing) = match reading {
         Reading::Waiting => (Vec::new(), String::new()),
@@ -142,9 +150,11 @@ pub fn state_at(reading: &Reading, now: DateTime<Utc>, zone: Tz) -> WidgetState 
         Reading::NoCalendars => (Vec::new(), "no calendars".to_string()),
         Reading::Read(objects) => {
             let from = midnight_of(now, zone);
-            let found = agenda::between(objects, from, from + Span::days(AHEAD + 1), zone);
+            let days = doca_ipc::calendar_ahead::days_after_today(&settings.ahead);
+            let found = agenda::between(objects, from, from + Span::days(days + 1), zone);
             let upcoming = in_order(&found, now, zone)
                 .into_iter()
+                .filter(|event| settings.all_day || !event.all_day)
                 .take(UPCOMING)
                 .map(|event| Upcoming {
                     when: when(event, now, zone),
@@ -404,7 +414,7 @@ mod tests {
 
     /// Each upcoming thing as the tile would put it on one line.
     fn lines(reading: &Reading, at: DateTime<Utc>) -> Vec<String> {
-        calendar(&state_at(reading, at, SAO_PAULO))
+        calendar(&state_at(reading, at, SAO_PAULO, &CalendarSettings::default()))
             .upcoming
             .iter()
             .map(|up| format!("{} {}", up.when, up.title))
@@ -414,7 +424,7 @@ mod tests {
     #[test]
     fn the_tile_says_the_day_and_what_is_next_with_its_time() {
         let reading = Reading::Read(vec![event("Lunch", "20261017T150000Z", "20261017T160000Z")]);
-        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO));
+        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO, &CalendarSettings::default()));
         assert_eq!((state.weekday.as_str(), state.day), ("Sat", 17));
         assert_eq!(lines(&reading, saturday_morning()), vec!["12:00 Lunch"], "the time is the local one");
         assert!(!state.upcoming[0].now);
@@ -426,7 +436,7 @@ mod tests {
             event("Call", "20261017T124500Z", "20261017T133000Z"),
             event("Lunch", "20261017T150000Z", "20261017T160000Z"),
         ]);
-        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO));
+        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO, &CalendarSettings::default()));
         assert_eq!(lines(&reading, saturday_morning()), vec!["now Call", "12:00 Lunch"]);
         assert_eq!(state.upcoming.iter().map(|up| up.now).collect::<Vec<_>>(), vec![true, false]);
     }
@@ -458,21 +468,46 @@ mod tests {
     #[test]
     fn nothing_ahead_and_nothing_to_read_are_not_the_same_thing() {
         let at = saturday_morning();
-        let read = calendar(&state_at(&Reading::Read(vec![]), at, SAO_PAULO));
+        let read = calendar(&state_at(&Reading::Read(vec![]), at, SAO_PAULO, &CalendarSettings::default()));
         assert!(read.upcoming.is_empty() && read.missing.is_empty(), "read, and nothing ahead");
-        assert_eq!(calendar(&state_at(&Reading::NoService, at, SAO_PAULO)).missing, "no calendar service");
-        assert_eq!(calendar(&state_at(&Reading::NoCalendars, at, SAO_PAULO)).missing, "no calendars");
+        assert_eq!(calendar(&state_at(&Reading::NoService, at, SAO_PAULO, &CalendarSettings::default())).missing, "no calendar service");
+        assert_eq!(calendar(&state_at(&Reading::NoCalendars, at, SAO_PAULO, &CalendarSettings::default())).missing, "no calendars");
         // The date does not wait on any of it.
-        assert_eq!(calendar(&state_at(&Reading::Waiting, at, SAO_PAULO)).day, 17);
+        assert_eq!(calendar(&state_at(&Reading::Waiting, at, SAO_PAULO, &CalendarSettings::default())).day, 17);
     }
 
     #[test]
     fn the_date_turns_at_local_midnight_not_utc_midnight() {
         // 02:59 UTC on the 18th is still 23:59 on the 17th in São Paulo.
-        let before = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 2, 59), SAO_PAULO));
-        let after = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 3, 0), SAO_PAULO));
+        let before = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 2, 59), SAO_PAULO, &CalendarSettings::default()));
+        let after = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 3, 0), SAO_PAULO, &CalendarSettings::default()));
         assert_eq!((before.weekday.as_str(), before.day), ("Sat", 17));
         assert_eq!((after.weekday.as_str(), after.day), ("Sun", 18));
+    }
+
+    #[test]
+    fn how_far_ahead_and_whether_all_day_are_the_users_to_say() {
+        let reading = Reading::Read(vec![
+            all_day("Birthday", "20261017"),
+            event("Dinner", "20261017T220000Z", "20261017T233000Z"),
+            event("Mass", "20261018T120000Z", "20261018T130000Z"),
+            event("Dentist", "20261022T170000Z", "20261022T180000Z"),
+            event("Trip", "20261105T120000Z", "20261105T130000Z"),
+        ]);
+        let with = |ahead: &str, all_day: bool| -> Vec<String> {
+            let settings = CalendarSettings { ahead: ahead.to_string(), all_day };
+            calendar(&state_at(&reading, saturday_morning(), SAO_PAULO, &settings))
+                .upcoming
+                .iter()
+                .map(|up| up.title.clone())
+                .collect()
+        };
+        assert_eq!(with("today", true), vec!["Dinner", "Birthday"]);
+        assert_eq!(with("3-days", true), vec!["Dinner", "Birthday", "Mass"]);
+        assert_eq!(with("week", true), vec!["Dinner", "Birthday", "Mass", "Dentist"]);
+        assert_eq!(with("month", true), vec!["Dinner", "Birthday", "Mass", "Dentist", "Trip"]);
+        assert_eq!(with("week", false), vec!["Dinner", "Mass", "Dentist"], "all-day left out");
+        assert_eq!(with("fortnight", true), with("week", true), "an unknown choice is the default");
     }
 
     #[test]
@@ -480,7 +515,9 @@ mod tests {
         let many: Vec<String> = (10..30)
             .map(|day| event(&format!("e{day}"), &format!("202610{day}T150000Z"), &format!("202610{day}T160000Z")))
             .collect();
-        assert_eq!(lines(&Reading::Read(many), saturday_morning()).len(), UPCOMING);
+        let month = CalendarSettings { ahead: "month".to_string(), all_day: true };
+        let state = calendar(&state_at(&Reading::Read(many), saturday_morning(), SAO_PAULO, &month));
+        assert_eq!(state.upcoming.len(), UPCOMING);
     }
 
     /// Against the calendars on this machine, through the EDS really

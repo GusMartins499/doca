@@ -33,6 +33,11 @@ pub enum Wrote {
         key: &'static str,
         count: u32,
     },
+    Flag {
+        widget: &'static str,
+        key: &'static str,
+        flag: bool,
+    },
 }
 
 pub type Put = Rc<dyn Fn(Wrote)>;
@@ -153,6 +158,8 @@ pub struct Tab {
     note: gtk::TextView,
     save_note: gtk::Button,
     note_colour: gtk::ComboBoxText,
+    ahead: gtk::ComboBoxText,
+    all_day: gtk::CheckButton,
     minutes: gtk::Adjustment,
     goal: gtk::Adjustment,
     bottle: gtk::Adjustment,
@@ -287,6 +294,30 @@ impl Tab {
         );
         pages.add_named(&water, key::WATER);
 
+        let ahead = gtk::ComboBoxText::new();
+        for (choice, words) in [
+            (doca_ipc::calendar_ahead::TODAY, "Today"),
+            (doca_ipc::calendar_ahead::THREE_DAYS, "Three days"),
+            (doca_ipc::calendar_ahead::WEEK, "A week"),
+            (doca_ipc::calendar_ahead::MONTH, "A month"),
+        ] {
+            ahead.append(Some(choice), words);
+        }
+        let all_day = gtk::CheckButton::with_label("List all-day events");
+        let calendar = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        calendar.pack_start(&titled("Look ahead", &ahead), false, false, 0);
+        calendar.pack_start(&all_day, false, false, 0);
+        calendar.pack_start(
+            &hint(
+                "Events come from GNOME's calendars. Which calendars are included is \
+                 chosen there: a calendar unticked in GNOME Calendar is left out here too.",
+            ),
+            false,
+            false,
+            0,
+        );
+        pages.add_named(&calendar, key::CALENDAR);
+
         let nothing = hint("This widget takes no settings — it shows what it reads.");
         nothing.set_valign(gtk::Align::Start);
         pages.add_named(&nothing, NOTHING);
@@ -319,6 +350,8 @@ impl Tab {
             goal,
             bottle,
             note_colour,
+            ahead,
+            all_day,
             trouble,
             state: Rc::new(State::default()),
         };
@@ -468,6 +501,36 @@ impl Tab {
             });
         });
 
+        // Both write the moment they change, for the reason the paper does:
+        // one click, and the tile shows what it did.
+        let writing = put.clone();
+        let filling = self.state.filling.clone();
+        self.ahead.connect_changed(move |chooser| {
+            if filling.is_filling() {
+                return;
+            }
+            let Some(choice) = chooser.active_id() else {
+                return;
+            };
+            writing(Wrote::Text {
+                widget: key::CALENDAR,
+                key: key::AHEAD,
+                text: choice.to_string(),
+            });
+        });
+        let writing = put.clone();
+        let filling = self.state.filling.clone();
+        self.all_day.connect_toggled(move |check| {
+            if filling.is_filling() {
+                return;
+            }
+            writing(Wrote::Flag {
+                widget: key::CALENDAR,
+                key: key::ALL_DAY,
+                flag: check.is_active(),
+            });
+        });
+
         for (adjustment, widget, name) in [
             (&self.minutes, key::TIMER, key::MINUTES),
             (&self.goal, key::WATER, key::GOAL),
@@ -514,6 +577,9 @@ impl Tab {
                 .set_active_id(Some(doca_ipc::note_colour::resolve(&settings.note_colour)));
             self.goal.set_value(settings.water_goal as f64);
             self.bottle.set_value(settings.water_bottle as f64);
+            self.ahead
+                .set_active_id(Some(doca_ipc::calendar_ahead::resolve(&settings.calendar_ahead)));
+            self.all_day.set_active(settings.calendar_all_day);
         });
         self.trouble.set_text("");
     }
@@ -595,6 +661,8 @@ pub mod on_a_display {
             water_goal: 2000,
             water_bottle: 500,
             note_colour: "yellow".to_string(),
+            calendar_ahead: "week".to_string(),
+            calendar_all_day: true,
         }
     }
 
@@ -634,6 +702,8 @@ pub mod on_a_display {
             water_goal: 2500,
             water_bottle: 750,
             note_colour: "pink".to_string(),
+            calendar_ahead: "month".to_string(),
+            calendar_all_day: false,
             ..settings()
         });
 
@@ -810,6 +880,24 @@ pub mod on_a_display {
                 key: "colour",
                 text: "green".to_string()
             }]
+        );
+    }
+
+    /// The calendar's two choices write what was chosen, each under its own
+    /// key, and the switch as a flag rather than as the word for one.
+    pub fn choosing_how_far_the_calendar_looks_writes_that() {
+        let (tab, written) = watched();
+        tab.show(&settings());
+
+        tab.ahead.set_active_id(Some("month"));
+        tab.all_day.set_active(false);
+
+        assert_eq!(
+            *written.borrow(),
+            vec![
+                Wrote::Text { widget: "calendar", key: "ahead", text: "month".to_string() },
+                Wrote::Flag { widget: "calendar", key: "all_day", flag: false },
+            ]
         );
     }
 
@@ -1023,14 +1111,14 @@ mod tests {
     }
 
     #[test]
-    fn the_four_widgets_with_settings_are_the_four_the_contract_names() {
+    fn the_widgets_with_settings_are_the_ones_the_contract_names() {
         let with: Vec<&str> = doca_ipc::WIDGETS
             .iter()
             .copied()
             .filter(|id| takes_settings(id))
             .collect();
 
-        assert_eq!(with, vec!["timer", "countdown", "water", "note"]);
+        assert_eq!(with, vec!["calendar", "timer", "countdown", "water", "note"]);
     }
 
     #[test]

@@ -231,7 +231,14 @@ minutes = 15
 
 [widgets.water]
 goal = 8
+
+[widgets.calendar]
+ahead = "week"      # today, 3-days, week or month
+all_day = true      # list all-day events
 ```
+
+Which calendars the calendar widget reads is chosen in GNOME Calendar: a
+calendar unticked there is left out here too.
 
 A poll is not an update: the scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read

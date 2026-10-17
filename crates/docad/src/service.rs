@@ -639,6 +639,8 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         timer_minutes: settings.timer.minutes,
         water_goal: settings.water.goal,
         water_bottle: settings.water.bottle,
+        calendar_ahead: settings.calendar.ahead,
+        calendar_all_day: settings.calendar.all_day,
     }
 }
 
