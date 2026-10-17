@@ -14,6 +14,9 @@ pub struct WindowInfo {
     pub app_id: String,
     pub workspace: i32,
     pub active: bool,
+    /// Covering its whole monitor, the way a video or a game does. The bar
+    /// gets out of the way of one that is active (#18, item 12).
+    pub fullscreen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

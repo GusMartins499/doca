@@ -135,6 +135,7 @@ mod tests {
             app_id: app_id.to_string(),
             workspace,
             active: false,
+            fullscreen: false,
         }
     }
 

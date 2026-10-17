@@ -18,6 +18,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_STATE_HIDDEN,
+        _NET_WM_STATE_FULLSCREEN,
         _NET_CLOSE_WINDOW,
         WM_CHANGE_STATE,
         _NET_WM_WINDOW_TYPE,
@@ -120,12 +121,17 @@ impl X11Backend {
                 .and_then(|v| v.first().copied())
                 .map(|w| w as i32)
                 .unwrap_or(-1);
+            let fullscreen = self
+                .prop_u32(id, self.atoms._NET_WM_STATE)
+                .map(|states| states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN))
+                .unwrap_or(false);
             out.push(WindowInfo {
                 id,
                 title: self.title(id).unwrap_or_default(),
                 app_id: self.app_id(id).unwrap_or_default(),
                 workspace,
                 active: id == active,
+                fullscreen,
             });
         }
         Ok(out)
@@ -201,19 +207,46 @@ pub fn watch_root(on_change: impl Fn(RootChange) + Send + 'static) -> Result<()>
     Ok(())
 }
 
+/// Hear property changes on every client window, not only the root.
+///
+/// The root says which windows exist and which is active; it does not say a
+/// window went fullscreen. F11 in the window that already has the focus
+/// changes that window's own `_NET_WM_STATE` and nothing on the root, so the
+/// bar would never hear of it. Selecting the same mask twice is harmless,
+/// so this runs again whenever the client list moves.
+fn hear_clients(backend: &X11Backend) -> Result<()> {
+    let listening = ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE);
+    for id in backend.prop_u32(backend.root, backend.atoms._NET_CLIENT_LIST)? {
+        // A window that closed between the list and here is not an error.
+        let _ = backend.conn.change_window_attributes(id, &listening);
+    }
+    backend.conn.flush()?;
+    Ok(())
+}
+
 fn watch_loop(backend: &X11Backend, on_change: &impl Fn(RootChange)) -> Result<()> {
     backend.conn.change_window_attributes(
         backend.root,
         &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
     )?;
     backend.conn.flush()?;
+    hear_clients(backend)?;
 
     loop {
         let event = backend.conn.wait_for_event()?;
         let Event::PropertyNotify(e) = event else {
             continue;
         };
+        if e.window != backend.root {
+            if e.atom == backend.atoms._NET_WM_STATE {
+                on_change(RootChange::Windows);
+            }
+            continue;
+        }
         if e.atom == backend.atoms._NET_CLIENT_LIST || e.atom == backend.atoms._NET_ACTIVE_WINDOW {
+            if e.atom == backend.atoms._NET_CLIENT_LIST {
+                hear_clients(backend)?;
+            }
             on_change(RootChange::Windows);
         } else if e.atom == backend.atoms._NET_CURRENT_DESKTOP
             || e.atom == backend.atoms._NET_NUMBER_OF_DESKTOPS

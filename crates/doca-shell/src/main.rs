@@ -842,6 +842,7 @@ async fn rebuild(
         .unwrap_or(magnify::DEFAULT_SCALE);
 
     let entries = proxy.list_items().await.unwrap_or_default();
+    let covered = dock::covered_by_fullscreen(&proxy.list_windows().await.unwrap_or_default());
     let widgets = proxy.list_widgets().await.unwrap_or_default();
 
     // The size the tiles are drawn at: what the config asked for, clamped,
@@ -1010,6 +1011,21 @@ async fn rebuild(
     let window_width = width + margin * 2;
     window.set_size_request(window_width, height);
     window.resize(window_width, height);
+
+    // Out of the way of a fullscreen window, and back when it is not one.
+    // Taken off the screen rather than slid away: a video or a game owns the
+    // whole of it, peek included, and the strut goes with the window — an
+    // unmapped dock reserves nothing, so there is nothing left to fight.
+    if covered {
+        if window.is_visible() {
+            tracing::info!("a fullscreen window is active; the dock steps aside");
+            window.hide();
+        }
+        return;
+    }
+    if !window.is_visible() {
+        window.show();
+    }
 
     let x = screen.x() + (screen.width() - window_width) / 2;
     let y = screen.y() + screen.height() - height;
