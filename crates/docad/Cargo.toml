@@ -39,6 +39,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 chrono-tz = "0.10"
 rrule = "0.14"
 
+# Claude Code's usage (#32) is JSON Lines. Only four fields of each line are
+# kept; the rest — which is the conversation — is parsed past and dropped.
+serde_json = "1"
+
 [dev-dependencies]
 futures-lite = "2"
 # A paused clock, so the debounce is tested without waiting on a real one.

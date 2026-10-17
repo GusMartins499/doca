@@ -1,6 +1,7 @@
 pub mod agenda;
 pub mod battery;
 pub mod calendar;
+pub mod claude;
 pub mod clock;
 pub mod countdown;
 pub mod cover;
@@ -13,6 +14,7 @@ pub mod network;
 pub mod pomodoro;
 pub mod stopwatch;
 pub mod time_progress;
+pub mod usage;
 
 use std::time::{Duration, Instant};
 
@@ -389,6 +391,7 @@ pub fn build(
                 Some(Box::new(water::Water::new(settings.water.clone())) as Box<dyn Widget>)
             }
             "clock" => Some(Box::new(clock::Clock::new()) as Box<dyn Widget>),
+            "claude" => Some(Box::new(claude::Claude::new(settings.claude.clone())) as Box<dyn Widget>),
             "calendar" => Some(Box::new(calendar::Calendar::new(
                 settings.calendar.clone(),
             )) as Box<dyn Widget>),

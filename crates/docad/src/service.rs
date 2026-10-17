@@ -641,6 +641,9 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         water_bottle: settings.water.bottle,
         calendar_ahead: settings.calendar.ahead,
         calendar_all_day: settings.calendar.all_day,
+        claude_mode: settings.claude.mode,
+        claude_window: settings.claude.window,
+        claude_budget: settings.claude.budget,
     }
 }
 
