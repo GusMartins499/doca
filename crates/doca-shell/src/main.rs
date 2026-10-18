@@ -1338,6 +1338,7 @@ fn on_a_display() {
     gtk::init().expect("no X display");
 
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
+    hide_tests::a_bar_turned_round_mid_slide_never_jumps();
     hide_tests::a_pointer_that_stays_is_an_arrival();
     hide_tests::a_hand_that_overshoots_and_comes_back_keeps_the_bar();
     hide_tests::an_open_menu_keeps_the_bar_where_it_is();
@@ -1495,6 +1496,76 @@ pub mod hide_tests {
         hide.settle();
         assert!(!hide.shown.get(), "the bar did not go away when asked");
         (window, hide)
+    }
+
+    /// The widest step one frame of a slide can take, in pixels, for a frame
+    /// of this length — measured off the curve itself, so the bound is the
+    /// motion's own and not a number chosen to pass.
+    fn widest_step(frame: std::time::Duration, shown_y: i32, hidden_y: i32) -> i32 {
+        let mut widest = 0;
+        for showing in [true, false] {
+            let mut at = std::time::Duration::ZERO;
+            while at < motion::SLIDE {
+                let here = motion::slide_y(motion::slide_progress(at, showing), shown_y, hidden_y);
+                let next = motion::slide_y(motion::slide_progress(at + frame, showing), shown_y, hidden_y);
+                widest = widest.max((next - here).abs());
+                at += std::time::Duration::from_millis(1);
+            }
+        }
+        widest
+    }
+
+    /// #18, P0 item 1, the box left open: a bar turned round part-way down
+    /// never jumps further than a frame of its own travel.
+    ///
+    /// The motion functions have a test of their own for this; this one
+    /// watches the *bar* — the `Hide` the dock really runs, on the window's
+    /// frame clock — and measures every frame it draws, through the turn.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_bar_turned_round_mid_slide_never_jumps() {
+        let (shown_y, height) = (500, 60);
+        let hidden_y = motion::hidden_y(shown_y, height);
+
+        for share in [10u32, 50, 90] {
+            let window = gtk::Window::new(gtk::WindowType::Toplevel);
+            window.set_default_size(400, height);
+            window.show_all();
+            let hide = Hide::default();
+            // On, and on screen: switching it on starts the slide away.
+            hide.place(&window, 0, shown_y, height, false);
+            hide.place(&window, 0, shown_y, height, true);
+            assert!(hide.ticking.get(), "switching auto-hide on did not start a slide");
+
+            // Every frame the clock draws: when, and where the bar was put.
+            let frames: Rc<RefCell<Vec<(i64, i32)>>> = Rc::default();
+            let recording = frames.clone();
+            let watching = hide.clone();
+            window.add_tick_callback(move |_, clock| {
+                recording.borrow_mut().push((clock.frame_time(), watching.y()));
+                glib::ControlFlow::Continue
+            });
+
+            waiting(motion::SLIDE * share / 100);
+            hide.slide(&window, true);
+            waiting(motion::SLIDE * 2);
+
+            let frames = frames.borrow();
+            assert!(frames.len() > 4, "the frame clock barely ran: {} frames", frames.len());
+            assert_eq!(frames.last().map(|(_, y)| *y), Some(shown_y), "turned round at {share}% and never came back");
+            for pair in frames.windows(2) {
+                let ((t0, y0), (t1, y1)) = (pair[0], pair[1]);
+                let frame = std::time::Duration::from_micros((t1 - t0).max(0) as u64);
+                let allowed = widest_step(frame.max(motion::FRAME), shown_y, hidden_y) + 1;
+                assert!(
+                    (y1 - y0).abs() <= allowed,
+                    "turned round at {share}%: the bar jumped {} px in one frame of {frame:?}, where the slide moves at most {allowed}",
+                    (y1 - y0).abs()
+                );
+            }
+            window.close();
+            waiting(std::time::Duration::from_millis(20));
+        }
     }
 
     /// The whole of the item: a pointer that crosses the edge and keeps going
