@@ -64,6 +64,29 @@ pub const ENTRY_FROM: f64 = 0.55;
 /// brisk sweep already is.
 pub const AIM_SPEED: f64 = 3000.0;
 
+thread_local! {
+    /// Whether the desktop asked for no animation. The bar is drawn on one
+    /// thread, so this is that thread's; a test thread starts moving.
+    static STILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Stop animating, or start again — #18, item 9: "respect
+/// `gtk-enable-animations = false`".
+///
+/// One switch, read by every curve below, rather than a check at each place
+/// something moves: a slide, a lens, an icon arriving or bouncing all go
+/// through here, so a new animation that forgot to ask would still hold
+/// still. GNOME's Accessibility → "Reduce animation" is this setting, so it
+/// is also the desktop's way of saying *prefers reduced motion*.
+pub fn hold_still(still: bool) {
+    STILL.with(|flag| flag.set(still));
+}
+
+/// Whether the desktop asked for no animation.
+pub fn still() -> bool {
+    STILL.with(|flag| flag.get())
+}
+
 /// How far onto the bar a thing has got, and which way it is going.
 ///
 /// One instant and one direction, read afresh every frame — the same shape
@@ -140,7 +163,7 @@ pub fn ease_in(t: f64) -> f64 {
 /// It opens quickly and settles, and closes the other way round — the shape
 /// Plank uses. Reversing mid-way is the caller's job: see `Row::hover`.
 pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
-    if elapsed >= ZOOM {
+    if elapsed >= ZOOM || still() {
         return if opening { 1.0 } else { 0.0 };
     }
     let t = elapsed.as_secs_f64() / ZOOM.as_secs_f64();
@@ -159,7 +182,7 @@ pub fn zoom_progress(elapsed: Duration, opening: bool) -> f64 {
 /// and closes again before its icon finished arriving leaves from where it
 /// had got to, rather than from full size.
 pub fn entry_progress(elapsed: Duration, arriving: bool) -> f64 {
-    if elapsed >= ENTRY {
+    if elapsed >= ENTRY || still() {
         return if arriving { 1.0 } else { 0.0 };
     }
     let t = elapsed.as_secs_f64() / ENTRY.as_secs_f64();
@@ -188,6 +211,9 @@ pub fn entry_scale(progress: f64) -> f64 {
 /// is and nothing is interpolated at all, and only over it does the lens
 /// trail, for as long as it takes to catch up.
 pub fn aimed(lens: f64, pointer: f64, step: Duration) -> f64 {
+    if still() {
+        return pointer;
+    }
     let reach = AIM_SPEED * step.as_secs_f64();
     let gap = pointer - lens;
     if gap.abs() <= reach {
@@ -217,7 +243,7 @@ pub fn reversed_start(elapsed: Duration, span: Duration) -> Duration {
 /// eases in — the same mirrored pair the lens uses, so `reversed_start` can
 /// turn one into the other mid-flight.
 pub fn slide_progress(elapsed: Duration, showing: bool) -> f64 {
-    if elapsed >= SLIDE {
+    if elapsed >= SLIDE || still() {
         return if showing { 1.0 } else { 0.0 };
     }
     let t = elapsed.as_secs_f64() / SLIDE.as_secs_f64();
@@ -242,7 +268,7 @@ pub fn hidden_y(shown_y: i32, height: i32) -> i32 {
 }
 
 pub fn launch_scale(elapsed: Duration) -> f64 {
-    if elapsed >= LAUNCH {
+    if elapsed >= LAUNCH || still() {
         return 1.0;
     }
     let t = elapsed.as_secs_f64() / LAUNCH.as_secs_f64();
@@ -251,7 +277,7 @@ pub fn launch_scale(elapsed: Duration) -> f64 {
 }
 
 pub fn is_launching(elapsed: Duration) -> bool {
-    elapsed < LAUNCH
+    elapsed < LAUNCH && !still()
 }
 
 pub fn is_launching_since(started: std::time::Instant) -> bool {
@@ -260,6 +286,25 @@ pub fn is_launching_since(started: std::time::Instant) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Asked for no animation, every curve is already where it was going:
+    /// a slide, a lens, an icon arriving or leaving, a bounce, an aim.
+    #[test]
+    fn held_still_everything_is_already_where_it_was_going() {
+        hold_still(true);
+        let start = Duration::ZERO;
+        assert_eq!(slide_progress(start, true), 1.0);
+        assert_eq!(slide_progress(start, false), 0.0);
+        assert_eq!(zoom_progress(start, true), 1.0);
+        assert_eq!(zoom_progress(start, false), 0.0);
+        assert_eq!(entry_progress(start, true), 1.0);
+        assert_eq!(entry_progress(start, false), 0.0);
+        assert_eq!(launch_scale(LAUNCH / 4), 1.0, "a bounce held still is no bounce");
+        assert!(!is_launching(start));
+        assert_eq!(aimed(0.0, 500.0, FRAME), 500.0, "the lens does not travel");
+        hold_still(false);
+        assert!(slide_progress(start, true) < 1.0, "and moving again, it moves");
+    }
+
     use super::*;
 
     const SHOWN: i32 = 900;
