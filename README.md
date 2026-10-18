@@ -308,6 +308,9 @@ the script is the same thing for automation, and writes the same slots:
 ./scripts/bind-key.sh --item 3           # <Super>3 chooses the third icon
 ./scripts/bind-key.sh --items --take     # <Super>1..9, taken from GNOME's dash
 ./scripts/bind-key.sh --remove --items
+./scripts/bind-key.sh --back                       # <Shift><Super>e, the other way
+./scripts/bind-key.sh --auto-hide '<Super><Alt>h'  # auto-hide on and off
+./scripts/bind-key.sh --widget water '<Super><Alt>w'   # one widget on and off
 ```
 
 GNOME binds `<Super>1..9` to its own dash out of the box
@@ -324,6 +327,9 @@ Every action a key can call, for binding by hand:
 | method | arguments | does |
 |---|---|---|
 | `CycleEnvironment` | — | the next dock, wrapping round |
+| `CycleEnvironmentBack` | — | the dock before, wrapping round |
+| `ToggleAutoHide` | — | auto-hide on or off; answers which |
+| `ToggleWidget` | `id` | that widget on or off the dock showing; answers which |
 | `SetEnvironment` | `name` | that dock |
 | `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
 | `ActivateItem` | `id` | that item, as a click would |

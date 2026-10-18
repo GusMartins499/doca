@@ -15,6 +15,9 @@
 #   ./scripts/bind-key.sh --item 3 '<Alt>3'  the same, your key
 #   ./scripts/bind-key.sh --items            <Super>1 to <Super>9, all nine
 #   ./scripts/bind-key.sh --remove --items   and gone again
+#   ./scripts/bind-key.sh --back             <Shift><Super>e cycles the other way
+#   ./scripts/bind-key.sh --auto-hide '<Super><Alt>h'
+#   ./scripts/bind-key.sh --widget water '<Super><Alt>w'   that widget on or off
 #
 # GNOME binds <Super>1..9 itself, to its own dash (switch-to-application-N).
 # Two bindings on one key is a coin toss, so --item and --items refuse a key
@@ -117,6 +120,8 @@ fi
 
 REMOVE=0
 TAKE=0
+ACTION=""
+WIDGET=""
 ITEM=""
 ALL_ITEMS=0
 ARGS=()
@@ -126,9 +131,14 @@ for arg in "$@"; do
     --take) TAKE=1 ;;
     --items) ALL_ITEMS=1 ;;
     --item) ITEM=next ;;
+    --back) ACTION=back ;;
+    --auto-hide) ACTION=auto-hide ;;
+    --widget) ACTION=widget WIDGET=next ;;
     *)
         if [ "$ITEM" = "next" ]; then
             ITEM=$arg
+        elif [ "${WIDGET:-}" = "next" ]; then
+            WIDGET=$arg
         else
             ARGS+=("$arg")
         fi
@@ -223,7 +233,31 @@ set -- "${ARGS[@]:-}"
 KEY="${1:-<Super>e}"
 ENVIRONMENT="${2:-}"
 
-if [ -n "$ENVIRONMENT" ]; then
+if [ "$ACTION" = "back" ]; then
+    KEY="${1:-<Shift><Super>e}"
+    SLOT="$SLOT_ROOT/doca-cycle-back/"
+    LABEL="Doca: cycle environment back"
+    COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.CycleEnvironmentBack"
+elif [ "$ACTION" = "auto-hide" ] || [ "$ACTION" = "widget" ]; then
+    if [ "$ACTION" = "widget" ] && { [ -z "$WIDGET" ] || [ "$WIDGET" = "next" ]; }; then
+        echo "--widget needs a widget id, e.g. --widget water '<Super><Alt>w'" >&2
+        exit 1
+    fi
+    # No default key for these: there is none that is obviously free.
+    [ "$REMOVE" = "1" ] || [ -n "${1:-}" ] || {
+        echo "--$ACTION needs a key, e.g. '<Super><Alt>h'" >&2
+        exit 1
+    }
+    if [ "$ACTION" = "auto-hide" ]; then
+        SLOT="$SLOT_ROOT/doca-auto-hide/"
+        LABEL="Doca: toggle auto-hide"
+        COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ToggleAutoHide"
+    else
+        SLOT="$SLOT_ROOT/doca-widget-$(slug "$WIDGET")/"
+        LABEL="Doca: toggle $WIDGET"
+        COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ToggleWidget \"$WIDGET\""
+    fi
+elif [ -n "$ENVIRONMENT" ]; then
     SLOT="$SLOT_ROOT/doca-$(slug "$ENVIRONMENT")/"
     LABEL="Doca: $ENVIRONMENT"
     COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.SetEnvironment \"$ENVIRONMENT\""
