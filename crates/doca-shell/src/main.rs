@@ -987,6 +987,7 @@ async fn rebuild(
     };
 
     let entries = proxy.list_items().await.unwrap_or_default();
+    let covered = dock::covered_by_fullscreen(&proxy.list_windows().await.unwrap_or_default());
     let widgets = proxy.list_widgets().await.unwrap_or_default();
 
     // The size the tiles are drawn at: what the config asked for, clamped,
@@ -1135,7 +1136,11 @@ async fn rebuild(
     // tile had hidden for having no progress to report.
     tiles.refresh(&widgets);
 
-    let width = seat(window, bar, screen, row, &tiles, hide, auto_hide);
+    let width = if covered {
+        step_aside(window)
+    } else {
+        seat(window, bar, screen, row, &tiles, hide, auto_hide)
+    };
 
     // A dock switched for another, or an app opened or closed, is still
     // moving when the rebuild is over: the bar was seated wide enough for
@@ -1157,12 +1162,29 @@ async fn rebuild(
             clearing.replace(None);
             row.settle();
             tiles.settle();
-            seat(&window, &bar, &screen, &row, &tiles, &hide, auto_hide);
+            if !covered {
+                seat(&window, &bar, &screen, &row, &tiles, &hide, auto_hide);
+            }
         });
         settling.replace(Some(waiting));
     }
 
     tracing::debug!(items = entries.len(), width, "rebuilt");
+}
+
+/// Out of the way of a fullscreen window, until a rebuild finds it is not
+/// one any more and `seat` puts the dock back. Answers with no width: there
+/// is no bar on the screen.
+///
+/// Taken off the screen rather than slid away: a video or a game owns the
+/// whole of it, peek included, and the strut goes with the window — an
+/// unmapped dock reserves nothing, so there is nothing left to fight.
+fn step_aside(window: &gtk::Window) -> i32 {
+    if window.is_visible() {
+        tracing::info!("a fullscreen window is active; the dock steps aside");
+        window.hide();
+    }
+    0
 }
 
 /// Size the window to what is on the bar, put it on the screen, and reserve
@@ -1217,6 +1239,11 @@ fn seat(
     let window_width = width + margin * 2;
     window.set_size_request(window_width, height);
     window.resize(window_width, height);
+
+    // Back from stepping aside, if it had: see `step_aside`.
+    if !window.is_visible() {
+        window.show();
+    }
 
     let x = screen.x() + (screen.width() - window_width) / 2;
     let y = screen.y() + screen.height() - height;
