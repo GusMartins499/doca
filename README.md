@@ -185,6 +185,7 @@ labels for all of them.
 | id | shows | tile | poll | panel offers |
 |---|---|---|---|---|
 | `clock` | time and date | wide | 1s | — |
+| `calendar` | the day and what is next, from GNOME's calendars (Evolution Data Server, read only) | wide | 15s | — |
 | `battery` | charge and time to full or empty | wide | 30s | — |
 | `cpu` | busy share since the last sample | wide | 2s | — |
 | `network` | up and down rates | wide | 2s | — |

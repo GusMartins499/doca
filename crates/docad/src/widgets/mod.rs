@@ -1,4 +1,6 @@
+pub mod agenda;
 pub mod battery;
+pub mod calendar;
 pub mod clock;
 pub mod countdown;
 pub mod cover;
@@ -387,6 +389,7 @@ pub fn build(
                 Some(Box::new(water::Water::new(settings.water.clone())) as Box<dyn Widget>)
             }
             "clock" => Some(Box::new(clock::Clock::new()) as Box<dyn Widget>),
+            "calendar" => Some(Box::new(calendar::Calendar::new()) as Box<dyn Widget>),
             "battery" => Some(Box::new(battery::Battery::new()) as Box<dyn Widget>),
             "cpu" => Some(Box::new(cpu::Cpu::new()) as Box<dyn Widget>),
             "music" => Some(Box::new(music::Music::new()) as Box<dyn Widget>),
