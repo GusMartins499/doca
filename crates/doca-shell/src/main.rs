@@ -1415,6 +1415,7 @@ fn on_a_display() {
     widget_tile::tests::the_divider_that_comes_back_is_the_one_that_left();
     widget_tile::tests::the_shelf_knows_what_is_its_own();
     widget_tile::tests::a_state_for_a_widget_with_no_tile_is_not_claimed();
+    widget_tile::tests::a_tile_tells_a_screen_reader_what_it_shows();
     widget_tile::tests::a_tile_is_the_size_the_widget_declared();
     widget_tile::tests::a_tile_follows_the_icon_size_without_being_rebuilt();
     widget_tile::tests::a_tile_coming_or_going_does_not_resize_its_neighbours();

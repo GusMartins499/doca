@@ -119,7 +119,22 @@ impl WidgetTile {
         };
         tile.resize();
         tile.mark();
+        tile.speak();
         tile
+    }
+
+    /// Tell a screen reader what this tile says, and that it opens something.
+    ///
+    /// A tile is a drawing, and a drawing says nothing to anyone who cannot
+    /// see it. The name is the tile's state in words — the same words the
+    /// panel's heading uses — and the role is a button, because choosing it
+    /// opens the panel.
+    fn speak(&self) {
+        if let Some(accessible) = self.root.accessible() {
+            use atk::prelude::*;
+            accessible.set_role(atk::Role::PushButton);
+            accessible.set_name(&spoken(&self.shown.borrow()));
+        }
     }
 
     /// Start from nothing and grow onto the bar.
@@ -209,6 +224,7 @@ impl WidgetTile {
             self.resize();
         }
         self.mark();
+        self.speak();
         self.area.queue_draw();
     }
 
@@ -330,6 +346,45 @@ fn draw_in(
             let (_, logical) = layout.pixel_extents();
             paint(cr, &layout, 0.0, (height - logical.height() as f64) / 2.0, look.palette.detail);
         }
+    }
+}
+
+/// A tile's state in words, for a screen reader.
+///
+/// The widget's name first, so a list of tiles read aloud says which is
+/// which, then what it is showing.
+pub fn spoken(state: &WidgetState) -> String {
+    let name = crate::panel::name_of(&state.id);
+    match state.body() {
+        Ok(Body::Simple(simple)) => match (simple.label.is_empty(), simple.detail.is_empty()) {
+            (false, false) => format!("{name}: {}, {}", simple.label, simple.detail),
+            (false, true) => format!("{name}: {}", simple.label),
+            (true, false) => format!("{name}: {}", simple.detail),
+            (true, true) => name,
+        },
+        Ok(Body::Water(water)) => format!("{name}: {} of {} ml", water.drunk, water.goal),
+        Ok(Body::Music(music)) if music.title.is_empty() => format!("{name}: nothing playing"),
+        Ok(Body::Music(music)) if music.artist.is_empty() => format!("{name}: {}", music.title),
+        Ok(Body::Music(music)) => format!("{name}: {} by {}", music.title, music.artist),
+        Ok(Body::Note(note)) => match note.text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            Some(line) => format!("{name}: {line}"),
+            None => format!("{name}: empty"),
+        },
+        // The date and what comes first, which is what the tile shows.
+        Ok(Body::Calendar(calendar)) if !calendar.missing.is_empty() => {
+            format!("{name}: {} {}, {}", calendar.weekday, calendar.day, calendar.missing)
+        }
+        Ok(Body::Calendar(calendar)) => match calendar.upcoming.first() {
+            Some(next) => format!("{name}: {} {}, {} {}", calendar.weekday, calendar.day, next.when, next.title),
+            None => format!("{name}: {} {}, nothing ahead", calendar.weekday, calendar.day),
+        },
+        Ok(Body::Claude(claude)) => match (claude.label.is_empty(), claude.detail.is_empty()) {
+            (false, false) => format!("{name}: {}, {}", claude.label, claude.detail),
+            (false, true) => format!("{name}: {}", claude.label),
+            (true, false) => format!("{name}: {}", claude.detail),
+            (true, true) => name,
+        },
+        Err(_) => name,
     }
 }
 
@@ -1215,6 +1270,58 @@ impl Shelf {
 pub mod tests {
     use super::*;
 
+    #[test]
+    fn every_kind_of_tile_is_said_in_words() {
+        let clock = WidgetState::new(
+            "time-progress",
+            Body::Simple(Simple { label: "63%".to_string(), detail: "of today".to_string(), progress: 0.63, active: false }),
+        );
+        assert_eq!(spoken(&clock), "Time progress: 63%, of today");
+        assert_eq!(spoken(&water(750, 2000)), "Water: 750 of 2000 ml");
+        let music = |title: &str, artist: &str| {
+            WidgetState::new(
+                "music",
+                Body::Music(doca_ipc::Music {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    player: "rhythmbox".to_string(),
+                    playing: true,
+                    art: String::new(),
+                }),
+            )
+        };
+        assert_eq!(spoken(&music("Girl from Ipanema", "João Gilberto")), "Music: Girl from Ipanema by João Gilberto");
+        assert_eq!(spoken(&music("", "")), "Music: nothing playing");
+        let note = |text: &str| {
+            WidgetState::new(
+                "note",
+                Body::Note(doca_ipc::Note { text: text.to_string(), colour: "yellow".to_string() }),
+            )
+        };
+        assert_eq!(spoken(&note("\n  milk\nbread")), "Note: milk", "the first line that says something");
+        assert_eq!(spoken(&note("")), "Note: empty");
+        let calendar = |upcoming: Vec<doca_ipc::Upcoming>, missing: &str| {
+            WidgetState::new(
+                "calendar",
+                Body::Calendar(doca_ipc::Calendar {
+                    weekday: "Sat".to_string(),
+                    day: 17,
+                    upcoming,
+                    missing: missing.to_string(),
+                }),
+            )
+        };
+        let dentist = doca_ipc::Upcoming { when: "19:00".to_string(), title: "Dentist".to_string(), now: false };
+        let named = crate::panel::name_of("calendar");
+        assert_eq!(spoken(&calendar(vec![dentist], "")), format!("{named}: Sat 17, 19:00 Dentist"));
+        assert_eq!(spoken(&calendar(Vec::new(), "")), format!("{named}: Sat 17, nothing ahead"));
+        assert_eq!(
+            spoken(&calendar(Vec::new(), "no calendar service")),
+            format!("{named}: Sat 17, no calendar service"),
+            "what is missing, never an empty day"
+        );
+    }
+
     pub fn simple(id: &str) -> WidgetState {
         WidgetState::new(
             id,
@@ -1872,6 +1979,21 @@ pub mod tests {
     /// a wide one is two and a half, side by side.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    /// A tile says what it shows to a screen reader, and says it again when
+    /// it changes — it is a drawing, and otherwise says nothing at all.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_tile_tells_a_screen_reader_what_it_shows() {
+        use atk::prelude::*;
+        let tile = WidgetTile::new(&water(500, 2000), look(ICON), Rc::new(|_: &str, _: &gtk::Widget| {}));
+        let accessible = tile.root.accessible().expect("a widget has an accessible");
+        assert_eq!(accessible.name().as_deref(), Some("Water: 500 of 2000 ml"));
+        assert_eq!(accessible.role(), atk::Role::PushButton, "choosing it opens a panel");
+
+        tile.update(&water(750, 2000));
+        assert_eq!(accessible.name().as_deref(), Some("Water: 750 of 2000 ml"), "it said the old amount");
+    }
+
     pub fn a_tile_is_the_size_the_widget_declared() {
         let (items, _, shelf, expand) = bar();
 
