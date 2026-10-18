@@ -311,6 +311,7 @@ fn draw_in(
         Ok(Body::Water(water)) => draw_water(&water, look, area, cr, width, height),
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
+        Ok(Body::Calendar(calendar)) => draw_calendar(&calendar, look, area, cr, width, height),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();
@@ -541,6 +542,125 @@ fn draw_note(
     let y = ((height - logical.height() as f64) / 2.0).max(3.0);
     paint(cr, &layout, 2.0, y, note_ink());
 }
+
+/// The calendar: the date as a leaf off a desk calendar, and what is next
+/// beside it.
+///
+/// The date is the one thing that is always true, so it is what a crowded
+/// bar keeps. Then the next thing's time, which is the glance; then the
+/// list, which is the reading.
+fn draw_calendar(
+    calendar: &doca_ipc::Calendar,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let icon = look.icon_size as f64;
+    let column = if look.level == Level::Minimal {
+        width
+    } else {
+        (icon * 0.72).min(width * 0.45)
+    };
+
+    // The day of the week in the accent, the number under it in the label
+    // ink: the leaf of a desk calendar, which is the oldest way there is of
+    // saying "today" at a glance.
+    let weekday = line(area, &calendar.weekday.to_uppercase(), text_size(look.icon_size, 0.18), true, column);
+    let day = line(area, &calendar.day.to_string(), text_size(look.icon_size, 0.40), true, column);
+    let weekday_height = weekday.pixel_extents().1.height() as f64;
+    let day_height = day.pixel_extents().1.height() as f64;
+    let y = ((height - weekday_height - day_height) / 2.0).max(0.0);
+    paint(cr, &weekday, 0.0, y, look.palette.fill);
+    paint(cr, &day, 0.0, y + weekday_height, look.palette.label);
+
+    if look.level == Level::Minimal {
+        return;
+    }
+
+    let gap = (icon * 0.10).max(3.0);
+    // A hairline between the leaf and the list, in the groove colour.
+    let track = look.palette.track;
+    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
+    cr.rectangle(column + gap / 2.0, height * 0.18, 1.0, height * 0.64);
+    let _ = cr.fill();
+
+    let left = column + gap;
+    let room = (width - left).max(0.0);
+    if room <= 0.0 {
+        return;
+    }
+    let size = text_size(look.icon_size, 0.19);
+
+    // Nothing to list is said, in the quieter ink, and so is a calendar that
+    // could not be read — in its own words, because "nothing ahead" over a
+    // calendar nobody could open would be a lie.
+    let quiet = if !calendar.missing.is_empty() {
+        Some(calendar.missing.as_str())
+    } else if calendar.upcoming.is_empty() {
+        Some("nothing ahead")
+    } else {
+        None
+    };
+    if let Some(words) = quiet {
+        let layout = line(area, words, size, false, room);
+        layout.set_alignment(pango::Alignment::Left);
+        layout.set_wrap(pango::WrapMode::WordChar);
+        layout.set_single_paragraph_mode(false);
+        layout.set_height((height as i32) * pango::SCALE);
+        let text_height = layout.pixel_extents().1.height() as f64;
+        paint(cr, &layout, left, ((height - text_height) / 2.0).max(0.0), look.palette.detail);
+        return;
+    }
+
+    // Compact keeps the next thing's time and nothing else: at 1.6 icons
+    // there is room for "19:00" and not for what happens at it.
+    let shown: Vec<pango::Layout> = if look.level == Level::Compact {
+        let next = &calendar.upcoming[0];
+        let layout = line(area, &next.when, text_size(look.icon_size, 0.24), true, room);
+        layout.set_alignment(pango::Alignment::Left);
+        vec![layout]
+    } else {
+        let probe = line(area, "0", size, false, room);
+        let line_height = probe.pixel_extents().1.height().max(1) as f64;
+        let fits = ((height * 0.9) / line_height).floor().max(1.0) as usize;
+        calendar
+            .upcoming
+            .iter()
+            .take(fits.min(UPCOMING_LINES))
+            .map(|up| {
+                let layout = line(area, "", size, false, room);
+                layout.set_alignment(pango::Alignment::Left);
+                layout.set_markup(&format!(
+                    "<b>{}</b> {}",
+                    glib::markup_escape_text(&up.when),
+                    glib::markup_escape_text(&up.title)
+                ));
+                layout
+            })
+            .collect()
+    };
+
+    let heights: Vec<f64> = shown.iter().map(|l| l.pixel_extents().1.height() as f64).collect();
+    let mut y = ((height - heights.iter().sum::<f64>()) / 2.0).max(0.0);
+    for (index, (layout, line_height)) in shown.iter().zip(heights).enumerate() {
+        // What is happening now is in the accent; what is still to come in
+        // the label ink, the first of it brightest.
+        let ink = if calendar.upcoming[index].now {
+            look.palette.fill
+        } else if index == 0 {
+            look.palette.label
+        } else {
+            look.palette.detail
+        };
+        paint(cr, layout, left, y, ink);
+        y += line_height;
+    }
+}
+
+/// The most things a calendar tile lists, however tall it is.
+const UPCOMING_LINES: usize = 3;
 
 /// The ink a note is written in, on any of its papers.
 fn note_ink() -> gdk::RGBA {
@@ -1430,6 +1550,89 @@ pub mod tests {
             full > empty * 2,
             "a full bottle is barely fuller than an empty one: {empty} against {full}"
         );
+    }
+
+    /// The calendar draws its date always, its list only when there is room,
+    /// and what is happening now in the accent.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_calendar_tile_keeps_its_date_and_gives_up_its_list() {
+        let up = |when: &str, title: &str, now: bool| doca_ipc::Upcoming {
+            when: when.to_string(),
+            title: title.to_string(),
+            now,
+        };
+        let calendar = |upcoming: Vec<doca_ipc::Upcoming>| doca_ipc::Calendar {
+            weekday: "Sat".to_string(),
+            day: 17,
+            upcoming,
+            missing: String::new(),
+        };
+        // Every pixel's alpha, and how many right of the leaf are painted and
+        // how many of those in the accent — at the width the bar really gives
+        // a calendar at that level.
+        let drawn = |calendar: &doca_ipc::Calendar, level: Level| {
+            let height = ICON;
+            let width = level.width(Tile::Wide, ICON);
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height).expect("no surface");
+            let mut tile_look = look(ICON);
+            tile_look.level = level;
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let area = gtk::DrawingArea::new();
+                area.set_size_request(width, height);
+                draw_calendar(calendar, tile_look, &area, &cr, width as f64, height as f64);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+            let fill = tile_look.palette.fill;
+            let leaf = (ICON as f64 * 0.72) as usize + 2;
+            let (mut alphas, mut list, mut accent) = (Vec::new(), 0usize, 0usize);
+            for row in 0..height as usize {
+                for column in 0..width as usize {
+                    let at = row * stride + column * 4;
+                    alphas.push(data[at + 3]);
+                    if data[at + 3] == 0 || column < leaf {
+                        continue;
+                    }
+                    list += 1;
+                    // ARGB32 is premultiplied BGRA in memory. Text over
+                    // nothing keeps its ink's colour at every coverage,
+                    // so un-premultiplied it is the accent or it is not.
+                    let alpha = data[at + 3] as f64;
+                    let channel = |offset: usize| data[at + offset] as f64 * 255.0 / alpha;
+                    if (channel(2) - fill.red() * 255.0).abs() < 12.0
+                        && (channel(1) - fill.green() * 255.0).abs() < 12.0
+                        && (channel(0) - fill.blue() * 255.0).abs() < 12.0
+                    {
+                        accent += 1;
+                    }
+                }
+            }
+            (alphas, list, accent)
+        };
+
+        let busy = calendar(vec![up("19:00", "Dinner", false), up("Sun 09:00", "Mass", false)]);
+        let (full, list, _) = drawn(&busy, Level::Full);
+        assert!(full.iter().any(|a| *a > 0), "nothing was drawn");
+        assert!(list > 0, "the list was not drawn");
+
+        let (minimal, _, _) = drawn(&busy, Level::Minimal);
+        let (minimal_empty, _, _) = drawn(&calendar(vec![]), Level::Minimal);
+        assert!(minimal.iter().any(|a| *a > 0), "a crowded bar lost the date, which is the one thing it keeps");
+        assert_eq!(minimal, minimal_empty, "the narrowest tile still drew part of a list it has no room for");
+
+        let (_, compact_list, _) = drawn(&busy, Level::Compact);
+        assert!(compact_list > 0 && compact_list < list, "compact keeps the next time and only that");
+
+        let (_, _, calm) = drawn(&calendar(vec![up("19:00", "Dinner", false)]), Level::Full);
+        let (_, _, lit) = drawn(&calendar(vec![up("now", "Dinner", true)]), Level::Full);
+        assert!(lit > calm, "something under way is not drawn apart: {calm} accent pixels against {lit}");
+
+        let (_, nothing, _) = drawn(&calendar(vec![]), Level::Full);
+        assert!(nothing > 0, "nothing ahead drew nothing, which reads as a broken tile");
     }
 
     /// The one that matters. Everything else here is about this holding under

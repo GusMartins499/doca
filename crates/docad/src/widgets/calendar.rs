@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Duration as Span, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
-use doca_ipc::{Body, Simple, WidgetState, NO_PROGRESS};
+use doca_ipc::{Body, Upcoming, WidgetState};
 
 use super::agenda::{self, Occurrence};
 use super::Widget;
@@ -128,65 +128,77 @@ impl Widget for Calendar {
     }
 }
 
+/// How many of what is coming up are sent. The tile draws three at most and
+/// the panel will want a few more; more than this is a list nobody reads on
+/// a dock.
+const UPCOMING: usize = 8;
+
 /// What the tile shows at `now`, given what was read.
 pub fn state_at(reading: &Reading, now: DateTime<Utc>, zone: Tz) -> WidgetState {
     let today = now.with_timezone(&zone);
-    let label = format!("{} {}", weekday(today.weekday()), today.day());
-
-    let (detail, active) = match reading {
-        Reading::Waiting => (String::new(), false),
-        Reading::NoService => ("no calendar service".to_string(), false),
-        Reading::NoCalendars => ("no calendars".to_string(), false),
+    let (upcoming, missing) = match reading {
+        Reading::Waiting => (Vec::new(), String::new()),
+        Reading::NoService => (Vec::new(), "no calendar service".to_string()),
+        Reading::NoCalendars => (Vec::new(), "no calendars".to_string()),
         Reading::Read(objects) => {
             let from = midnight_of(now, zone);
             let found = agenda::between(objects, from, from + Span::days(AHEAD + 1), zone);
-            match next(&found, now, zone) {
-                Some(event) => (describe(event, now, zone), event.is_on(now)),
-                None => ("nothing ahead".to_string(), false),
-            }
+            let upcoming = in_order(&found, now, zone)
+                .into_iter()
+                .take(UPCOMING)
+                .map(|event| Upcoming {
+                    when: when(event, now, zone),
+                    title: if event.title.is_empty() { "(no title)".to_string() } else { event.title.clone() },
+                    now: event.is_on(now) && !event.all_day,
+                })
+                .collect();
+            (upcoming, String::new())
         }
     };
 
     WidgetState::new(
         "calendar",
-        Body::Simple(Simple { label, detail, progress: NO_PROGRESS, active }),
+        Body::Calendar(doca_ipc::Calendar {
+            weekday: weekday(today.weekday()).to_string(),
+            day: today.day(),
+            upcoming,
+            missing,
+        }),
     )
 }
 
-/// The one occurrence the tile is about.
+/// What has not ended, in the order it is worth reading.
 ///
-/// What has not ended, soonest first — except that an all-day event does
-/// not hide a meeting later the same day. A birthday frames the day; the
-/// 14:00 is the thing you need to know about. All-day is shown when nothing
-/// timed is left today.
-fn next(found: &[Occurrence], now: DateTime<Utc>, zone: Tz) -> Option<&Occurrence> {
-    let open: Vec<&Occurrence> = found.iter().filter(|o| o.end > now || (o.start == o.end && o.start >= now)).collect();
+/// Soonest first — except that today's all-day events go after today's
+/// timed ones. A birthday frames the day; the 14:00 is the thing you need to
+/// know about, and when the bar is crowded the tile keeps only the first
+/// line, so the first line has to be the one that matters.
+fn in_order(found: &[Occurrence], now: DateTime<Utc>, zone: Tz) -> Vec<&Occurrence> {
     let tomorrow = midnight_of(now, zone) + Span::days(1);
-    open.iter()
-        .find(|o| !o.all_day && o.start < tomorrow)
-        .or_else(|| open.first())
-        .copied()
+    let mut open: Vec<&Occurrence> = found
+        .iter()
+        .filter(|o| o.end > now || (o.start == o.end && o.start >= now))
+        .collect();
+    // Stable, so everything else keeps the agenda's own order.
+    open.sort_by_key(|o| {
+        let framing_today = o.all_day && o.start < tomorrow;
+        let day = if o.start < tomorrow { 0 } else { 1 };
+        (day, framing_today, if o.start < tomorrow { now } else { o.start })
+    });
+    open
 }
 
-/// One line for the tile: when, then what.
-fn describe(event: &Occurrence, now: DateTime<Utc>, zone: Tz) -> String {
-    let title = if event.title.is_empty() { "(no title)" } else { event.title.as_str() };
-    if event.is_on(now) && !event.all_day {
-        return format!("now · {title}");
-    }
+/// When, in as few characters as a tile has: `now`, `19:00`, `today`,
+/// `Tue 14:00`, `Tue`.
+fn when(event: &Occurrence, now: DateTime<Utc>, zone: Tz) -> String {
     let start = event.start.with_timezone(&zone);
-    let today = midnight_of(now, zone);
-    let day = if event.start < today + Span::days(1) {
-        String::new()
-    } else if event.start < today + Span::days(2) {
-        "tomorrow ".to_string()
-    } else {
-        format!("{} ", weekday(start.weekday()))
-    };
-    if event.all_day {
-        format!("{day}{title}").trim_start().to_string()
-    } else {
-        format!("{day}{} {title}", start.format("%H:%M"))
+    let tomorrow = midnight_of(now, zone) + Span::days(1);
+    match (event.all_day, event.start < tomorrow) {
+        (false, _) if event.is_on(now) => "now".to_string(),
+        (true, true) => "today".to_string(),
+        (false, true) => start.format("%H:%M").to_string(),
+        (true, false) => weekday(start.weekday()).to_string(),
+        (false, false) => format!("{} {}", weekday(start.weekday()), start.format("%H:%M")),
     }
 }
 
@@ -362,7 +374,6 @@ pub fn is_shown_calendar(data: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Drawn;
     use super::*;
 
     const SAO_PAULO: Tz = chrono_tz::America::Sao_Paulo;
@@ -384,21 +395,40 @@ mod tests {
         utc(2026, 10, 17, 13, 0)
     }
 
+    fn calendar(state: &WidgetState) -> doca_ipc::Calendar {
+        match state.body().expect("a body that reads back") {
+            Body::Calendar(calendar) => calendar,
+            other => panic!("a calendar drew {other:?}"),
+        }
+    }
+
+    /// Each upcoming thing as the tile would put it on one line.
+    fn lines(reading: &Reading, at: DateTime<Utc>) -> Vec<String> {
+        calendar(&state_at(reading, at, SAO_PAULO))
+            .upcoming
+            .iter()
+            .map(|up| format!("{} {}", up.when, up.title))
+            .collect()
+    }
+
     #[test]
     fn the_tile_says_the_day_and_what_is_next_with_its_time() {
         let reading = Reading::Read(vec![event("Lunch", "20261017T150000Z", "20261017T160000Z")]);
-        let state = state_at(&reading, saturday_morning(), SAO_PAULO);
-        assert_eq!(state.label(), "Sat 17");
-        assert_eq!(state.detail(), "12:00 Lunch", "the time is the local one");
-        assert!(!state.active());
+        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO));
+        assert_eq!((state.weekday.as_str(), state.day), ("Sat", 17));
+        assert_eq!(lines(&reading, saturday_morning()), vec!["12:00 Lunch"], "the time is the local one");
+        assert!(!state.upcoming[0].now);
     }
 
     #[test]
     fn something_happening_now_is_told_apart_from_something_to_come() {
-        let reading = Reading::Read(vec![event("Call", "20261017T124500Z", "20261017T133000Z")]);
-        let state = state_at(&reading, saturday_morning(), SAO_PAULO);
-        assert_eq!(state.detail(), "now · Call");
-        assert!(state.active(), "an event under way is not drawn like one to come");
+        let reading = Reading::Read(vec![
+            event("Call", "20261017T124500Z", "20261017T133000Z"),
+            event("Lunch", "20261017T150000Z", "20261017T160000Z"),
+        ]);
+        let state = calendar(&state_at(&reading, saturday_morning(), SAO_PAULO));
+        assert_eq!(lines(&reading, saturday_morning()), vec!["now Call", "12:00 Lunch"]);
+        assert_eq!(state.upcoming.iter().map(|up| up.now).collect::<Vec<_>>(), vec![true, false]);
     }
 
     #[test]
@@ -406,41 +436,51 @@ mod tests {
         let reading = Reading::Read(vec![
             all_day("Birthday", "20261017"),
             event("Dinner", "20261017T220000Z", "20261017T233000Z"),
-        ]);
-        assert_eq!(state_at(&reading, saturday_morning(), SAO_PAULO).detail(), "19:00 Dinner");
-
-        let only = Reading::Read(vec![all_day("Birthday", "20261017")]);
-        assert_eq!(state_at(&only, saturday_morning(), SAO_PAULO).detail(), "Birthday");
-    }
-
-    #[test]
-    fn what_is_past_is_not_next_and_later_days_say_which() {
-        let reading = Reading::Read(vec![
-            event("Breakfast", "20261017T100000Z", "20261017T110000Z"),
             event("Mass", "20261018T120000Z", "20261018T130000Z"),
         ]);
-        assert_eq!(state_at(&reading, saturday_morning(), SAO_PAULO).detail(), "tomorrow 09:00 Mass");
-
-        let later = Reading::Read(vec![event("Dentist", "20261020T170000Z", "20261020T180000Z")]);
-        assert_eq!(state_at(&later, saturday_morning(), SAO_PAULO).detail(), "Tue 14:00 Dentist");
+        assert_eq!(
+            lines(&reading, saturday_morning()),
+            vec!["19:00 Dinner", "today Birthday", "Sun 09:00 Mass"],
+            "the first line is the one a crowded bar keeps, so it is the next timed thing"
+        );
     }
 
     #[test]
-    fn nothing_ahead_and_nothing_to_read_say_so_rather_than_drawing_nothing() {
+    fn what_is_past_is_not_listed_and_later_days_say_which() {
+        let reading = Reading::Read(vec![
+            event("Breakfast", "20261017T100000Z", "20261017T110000Z"),
+            event("Dentist", "20261020T170000Z", "20261020T180000Z"),
+            all_day("Holiday", "20261022"),
+        ]);
+        assert_eq!(lines(&reading, saturday_morning()), vec!["Tue 14:00 Dentist", "Thu Holiday"]);
+    }
+
+    #[test]
+    fn nothing_ahead_and_nothing_to_read_are_not_the_same_thing() {
         let at = saturday_morning();
-        assert_eq!(state_at(&Reading::Read(vec![]), at, SAO_PAULO).detail(), "nothing ahead");
-        assert_eq!(state_at(&Reading::NoService, at, SAO_PAULO).detail(), "no calendar service");
-        assert_eq!(state_at(&Reading::NoCalendars, at, SAO_PAULO).detail(), "no calendars");
+        let read = calendar(&state_at(&Reading::Read(vec![]), at, SAO_PAULO));
+        assert!(read.upcoming.is_empty() && read.missing.is_empty(), "read, and nothing ahead");
+        assert_eq!(calendar(&state_at(&Reading::NoService, at, SAO_PAULO)).missing, "no calendar service");
+        assert_eq!(calendar(&state_at(&Reading::NoCalendars, at, SAO_PAULO)).missing, "no calendars");
         // The date does not wait on any of it.
-        assert_eq!(state_at(&Reading::Waiting, at, SAO_PAULO).label(), "Sat 17");
+        assert_eq!(calendar(&state_at(&Reading::Waiting, at, SAO_PAULO)).day, 17);
     }
 
     #[test]
     fn the_date_turns_at_local_midnight_not_utc_midnight() {
         // 02:59 UTC on the 18th is still 23:59 on the 17th in São Paulo.
-        let before = state_at(&Reading::Waiting, utc(2026, 10, 18, 2, 59), SAO_PAULO);
-        let after = state_at(&Reading::Waiting, utc(2026, 10, 18, 3, 0), SAO_PAULO);
-        assert_eq!((before.label().as_str(), after.label().as_str()), ("Sat 17", "Sun 18"));
+        let before = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 2, 59), SAO_PAULO));
+        let after = calendar(&state_at(&Reading::Waiting, utc(2026, 10, 18, 3, 0), SAO_PAULO));
+        assert_eq!((before.weekday.as_str(), before.day), ("Sat", 17));
+        assert_eq!((after.weekday.as_str(), after.day), ("Sun", 18));
+    }
+
+    #[test]
+    fn a_week_full_of_things_sends_only_what_could_be_shown() {
+        let many: Vec<String> = (10..30)
+            .map(|day| event(&format!("e{day}"), &format!("202610{day}T150000Z"), &format!("202610{day}T160000Z")))
+            .collect();
+        assert_eq!(lines(&Reading::Read(many), saturday_morning()).len(), UPCOMING);
     }
 
     /// Against the calendars on this machine, through the EDS really

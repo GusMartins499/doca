@@ -1349,6 +1349,7 @@ fn on_a_display() {
     widget_tile::tests::a_cover_of_any_colour_is_made_dark_enough_to_write_on();
     widget_tile::tests::words_on_a_cover_are_white_whatever_the_theme_is();
     widget_tile::tests::the_bottle_holds_as_much_as_the_day_has_in_it();
+    widget_tile::tests::a_calendar_tile_keeps_its_date_and_gives_up_its_list();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
     widget_tile::tests::a_widget_that_joined_grows_onto_the_bar_rather_than_appearing();
