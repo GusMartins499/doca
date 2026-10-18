@@ -867,6 +867,11 @@ pub trait Doca {
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
     fn activate_position(&self, position: u32) -> zbus::Result<String>;
+
+    /// Hand the keyboard to the dock: the bar comes up, auto-hide or not,
+    /// with the first item focused, and stays up until `Esc` gives the
+    /// keyboard back. Answered by `FocusRequested`, which the bar acts on.
+    fn focus_dock(&self) -> zbus::Result<()>;
     fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
     fn list_folder(&self, id: &str) -> zbus::Result<Vec<FolderEntry>>;
     fn open_path(&self, path: &str) -> zbus::Result<()>;
@@ -901,6 +906,10 @@ pub trait Doca {
 
     #[zbus(signal)]
     fn item_activated(&self, id: &str, starting: bool) -> zbus::Result<()>;
+
+    /// Something asked for the keyboard to go to the dock — `FocusDock`.
+    #[zbus(signal)]
+    fn focus_requested(&self) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn windows_changed(&self) -> zbus::Result<()>;
