@@ -58,7 +58,7 @@ pub fn appearance<'a>(
 pub fn setting(value: &Value<'_>) -> Result<Setting> {
     match value {
         Value::Str(text) => Ok(Setting::Text(text.to_string())),
-        Value::Bool(_) => bail!("a widget setting is text or a whole number, not a flag"),
+        Value::Bool(flag) => Ok(Setting::Flag(*flag)),
         _ => Ok(Setting::Count(count(value)?)),
     }
 }
@@ -277,8 +277,10 @@ mod tests {
         assert_eq!(setting(&Value::from(25u32)).unwrap(), Setting::Count(25));
     }
 
+    /// The calendar's all-day switch (#31) is the first widget setting that
+    /// is on or off, and it arrives as what it is.
     #[test]
-    fn a_flag_is_not_a_widget_setting() {
-        assert!(setting(&Value::from(true)).is_err());
+    fn a_flag_arrives_as_a_flag() {
+        assert_eq!(setting(&Value::from(false)).unwrap(), Setting::Flag(false));
     }
 }

@@ -464,6 +464,42 @@ pub struct WidgetSettings {
     pub water_bottle: u32,
     /// One of [`note_colour::ALL`].
     pub note_colour: String,
+    /// One of [`calendar_ahead::ALL`].
+    pub calendar_ahead: String,
+    /// Whether all-day events are listed.
+    pub calendar_all_day: bool,
+}
+
+/// How far ahead the calendar looks, as the issue lists them: today, three
+/// days, a week, a month.
+pub mod calendar_ahead {
+    pub const TODAY: &str = "today";
+    pub const THREE_DAYS: &str = "3-days";
+    pub const WEEK: &str = "week";
+    pub const MONTH: &str = "month";
+
+    pub const ALL: [&str; 4] = [TODAY, THREE_DAYS, WEEK, MONTH];
+
+    /// A week: a dock is for the next few things, and a week holds them
+    /// without scrolling past what matters today.
+    pub const DEFAULT: &str = WEEK;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+
+    /// Whole days after today that are looked at: today alone is zero.
+    pub fn days_after_today(name: &str) -> i64 {
+        match resolve(name) {
+            TODAY => 0,
+            THREE_DAYS => 2,
+            MONTH => 30,
+            _ => 6,
+        }
+    }
+
+    /// The most days any choice looks ahead, which is what is read.
+    pub const FURTHEST: i64 = 30;
 }
 
 /// The widgets that take a setting, and what `SetWidgetSetting` calls each.
@@ -472,6 +508,7 @@ pub struct WidgetSettings {
 /// against; the daemon's own `match` is the other half of this and `docad`
 /// has a test that no pair here is refused.
 pub mod widget_key {
+    pub const CALENDAR: &str = "calendar";
     pub const COUNTDOWN: &str = "countdown";
     pub const NOTE: &str = "note";
     pub const TIMER: &str = "timer";
@@ -484,9 +521,13 @@ pub mod widget_key {
     pub const GOAL: &str = "goal";
     pub const BOTTLE: &str = "bottle";
     pub const COLOUR: &str = "colour";
+    pub const AHEAD: &str = "ahead";
+    pub const ALL_DAY: &str = "all_day";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 7] = [
+    pub const ALL: [(&str, &str); 9] = [
+        (CALENDAR, AHEAD),
+        (CALENDAR, ALL_DAY),
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),

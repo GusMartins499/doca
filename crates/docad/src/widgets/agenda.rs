@@ -297,10 +297,21 @@ fn expand(event: &Event, rule: &str, from: DateTime<Utc>, to: DateTime<Utc>, loc
         Length::Days(days) => Duration::days(days + 1),
         Length::Exactly(length) => length,
     };
-    set.after((from - reach).with_timezone(&rrule::Tz::UTC))
-        .before(to.with_timezone(&rrule::Tz::UTC))
-        .all(PER_SERIES)
-        .dates
+    let after = (from - reach).with_timezone(&rrule::Tz::UTC);
+    let before = to.with_timezone(&rrule::Tz::UTC);
+    let mut starts = set.after(after).before(before).all(PER_SERIES).dates;
+    // RFC 5545: "The DTSTART property value always counts as the first
+    // occurrence", even when the rule would not land on it — a weekly
+    // Monday-Wednesday-Friday series first put on a Sunday happens that
+    // Sunday too. rrule follows dateutil, which leaves it out; GNOME
+    // Calendar and Evolution show it, so this does. With COUNT that leaves
+    // the series one occurrence long at its far end, because rrule counted
+    // without this day; a COUNT series first put off its own rule is rare
+    // enough to accept.
+    if (after..=before).contains(&first) && !starts.contains(&first) {
+        starts.insert(0, first);
+    }
+    starts
         .into_iter()
         .map(|start| match &event.start {
             Stamp::Date(_) => Stamp::Date(start.date_naive()),
@@ -771,6 +782,28 @@ mod tests {
             SAO_PAULO,
         );
         assert_eq!(all_day.len(), 3);
+    }
+
+    #[test]
+    fn the_first_day_of_a_series_counts_even_off_its_rule() {
+        // Sunday the 18th, for a series that recurs on Mondays, Wednesdays
+        // and Fridays.
+        let found = between(
+            &[event(&[
+                "UID:g",
+                "SUMMARY:Gym",
+                "DTSTART;TZID=America/Sao_Paulo:20261018T100000",
+                "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR",
+            ])],
+            utc(2026, 10, 18, 0, 0),
+            utc(2026, 10, 22, 0, 0),
+            SAO_PAULO,
+        );
+        let days: Vec<u32> = found
+            .iter()
+            .map(|o| chrono::Datelike::day(&o.start.with_timezone(&SAO_PAULO)))
+            .collect();
+        assert_eq!(days, vec![18, 19, 21], "the Sunday it was put on, then the rule");
     }
 
     #[test]

@@ -215,8 +215,35 @@ impl WaterSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalendarSettings {
+    /// How far ahead to look, one of `doca_ipc::calendar_ahead::ALL`.
+    #[serde(default = "default_calendar_ahead")]
+    pub ahead: String,
+    /// Whether all-day events are listed. On by default: a birthday is
+    /// worth knowing about, and turning it off is one click.
+    #[serde(default = "default_true")]
+    pub all_day: bool,
+}
+
+fn default_calendar_ahead() -> String {
+    doca_ipc::calendar_ahead::DEFAULT.to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self { ahead: default_calendar_ahead(), all_day: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidgetSettings {
+    #[serde(default)]
+    pub calendar: CalendarSettings,
     #[serde(default)]
     pub countdown: CountdownSettings,
     #[serde(default)]
@@ -255,6 +282,10 @@ impl WidgetSettings {
 
     pub fn sanitised(&self) -> Self {
         Self {
+            calendar: CalendarSettings {
+                ahead: doca_ipc::calendar_ahead::resolve(self.calendar.ahead.trim()).to_string(),
+                all_day: self.calendar.all_day,
+            },
             countdown: CountdownSettings {
                 date: self.countdown.date.trim().to_string(),
                 label: self.countdown.label.trim().to_string(),
@@ -285,6 +316,8 @@ impl WidgetSettings {
         use doca_ipc::widget_key as k;
 
         match (widget, key) {
+            (k::CALENDAR, k::AHEAD) => self.calendar.ahead = value.into_text()?,
+            (k::CALENDAR, k::ALL_DAY) => self.calendar.all_day = value.into_flag()?,
             (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
             (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
@@ -304,6 +337,9 @@ impl WidgetSettings {
 pub enum Setting {
     Text(String),
     Count(u32),
+    /// On or off. Added for the calendar's all-day switch (#31): writing
+    /// `all_day = "false"` would put a string where the file means a flag.
+    Flag(bool),
 }
 
 impl Setting {
@@ -311,6 +347,7 @@ impl Setting {
         match self {
             Setting::Text(text) => Ok(text),
             Setting::Count(count) => Ok(count.to_string()),
+            Setting::Flag(flag) => Ok(flag.to_string()),
         }
     }
 
@@ -321,6 +358,19 @@ impl Setting {
                 .trim()
                 .parse()
                 .with_context(|| format!("{text:?} is not a whole number")),
+            Setting::Flag(_) => anyhow::bail!("a count cannot be on or off"),
+        }
+    }
+
+    fn into_flag(self) -> Result<bool> {
+        match self {
+            Setting::Flag(flag) => Ok(flag),
+            Setting::Text(text) => match text.trim().to_lowercase().as_str() {
+                "true" | "on" | "yes" | "1" => Ok(true),
+                "false" | "off" | "no" | "0" => Ok(false),
+                other => anyhow::bail!("{other:?} is not true or false"),
+            },
+            Setting::Count(count) => Ok(count != 0),
         }
     }
 }
@@ -949,6 +999,25 @@ mod tests {
     /// The unit changed under people who already had a goal, so the goal has
     /// to change with it rather than be clamped into nonsense — a saved `8`
     /// read as millilitres would be a goal of eight millilitres.
+    #[test]
+    fn the_calendar_settings_read_write_and_fall_back() {
+        assert_eq!(config("").widgets.calendar, CalendarSettings::default());
+
+        let mut settings = config("[widgets.calendar]\nahead = \"month\"\nall_day = false\n").widgets;
+        assert_eq!((settings.calendar.ahead.as_str(), settings.calendar.all_day), ("month", false));
+
+        settings.set("calendar", "ahead", Setting::Text("fortnight".to_string())).unwrap();
+        assert_eq!(settings.calendar.ahead, "week", "a choice nobody offers is the default");
+
+        settings.set("calendar", "all_day", Setting::Text("on".to_string())).unwrap();
+        assert!(settings.calendar.all_day);
+        assert!(settings.set("calendar", "all_day", Setting::Text("maybe".to_string())).is_err());
+
+        settings.set("calendar", "all_day", Setting::Flag(false)).unwrap();
+        let written = toml::to_string(&settings).unwrap();
+        assert!(written.contains("all_day = false"), "written as a flag, not a string: {written}");
+    }
+
     #[test]
     fn a_goal_written_in_glasses_is_read_as_the_millilitres_it_meant() {
         let carried = config("[widgets.water]\ngoal = 8\n").widgets;
