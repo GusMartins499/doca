@@ -468,6 +468,46 @@ pub struct WidgetSettings {
     pub calendar_ahead: String,
     /// Whether all-day events are listed.
     pub calendar_all_day: bool,
+    /// One of [`claude_mode::ALL`].
+    pub claude_mode: String,
+    /// One of [`claude_window::ALL`]; read in the tokens mode only.
+    pub claude_window: String,
+    /// Tokens the user means to stay under; 0 for none.
+    pub claude_budget: u32,
+}
+
+/// The three views of Claude Code's usage (#32).
+pub mod claude_mode {
+    /// The five-hour session open now.
+    pub const FIVE_HOURS: &str = "five-hours";
+    /// The last seven days.
+    pub const WEEK: &str = "week";
+    /// Tokens over a window of the user's choosing.
+    pub const TOKENS: &str = "tokens";
+
+    pub const ALL: [&str; 3] = [FIVE_HOURS, WEEK, TOKENS];
+
+    /// The session: it is the limit people actually run into in a day.
+    pub const DEFAULT: &str = FIVE_HOURS;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+}
+
+/// The windows the tokens mode counts over.
+pub mod claude_window {
+    pub const FIVE_HOURS: &str = "5h";
+    pub const TODAY: &str = "today";
+    pub const WEEK: &str = "7-days";
+
+    pub const ALL: [&str; 3] = [FIVE_HOURS, TODAY, WEEK];
+
+    pub const DEFAULT: &str = TODAY;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
 }
 
 /// How far ahead the calendar looks, as the issue lists them: today, three
@@ -509,6 +549,7 @@ pub mod calendar_ahead {
 /// has a test that no pair here is refused.
 pub mod widget_key {
     pub const CALENDAR: &str = "calendar";
+    pub const CLAUDE: &str = "claude";
     pub const COUNTDOWN: &str = "countdown";
     pub const NOTE: &str = "note";
     pub const TIMER: &str = "timer";
@@ -523,11 +564,17 @@ pub mod widget_key {
     pub const COLOUR: &str = "colour";
     pub const AHEAD: &str = "ahead";
     pub const ALL_DAY: &str = "all_day";
+    pub const MODE: &str = "mode";
+    pub const WINDOW: &str = "window";
+    pub const BUDGET: &str = "budget";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 9] = [
+    pub const ALL: [(&str, &str); 12] = [
         (CALENDAR, AHEAD),
         (CALENDAR, ALL_DAY),
+        (CLAUDE, MODE),
+        (CLAUDE, WINDOW),
+        (CLAUDE, BUDGET),
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),
@@ -615,7 +662,7 @@ pub const THEMES: [&str; 4] = ["system", "native", "midnight", "paper"];
 /// to offer the list without writing it out by hand. `docad` has a test that
 /// every id here builds into a real widget, so a name that goes stale fails
 /// the suite rather than logging "ignoring unknown widget" at someone.
-pub const WIDGETS: [&str; 13] = [
+pub const WIDGETS: [&str; 14] = [
     "clock",
     "calendar",
     "battery",
@@ -629,6 +676,7 @@ pub const WIDGETS: [&str; 13] = [
     "countdown",
     "water",
     "note",
+    "claude",
 ];
 
 /// The theme a config that never mentioned one gets.

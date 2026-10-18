@@ -197,6 +197,7 @@ labels for all of them.
 | `countdown` | days to a date | wide | 60s | — |
 | `water` | glasses counted, in a ring of the goal | square | 60s | one more, take one back, start over |
 | `note` | a line you leave yourself | wide | — | — |
+| `claude` | Claude Code's tokens: the open five-hour session, the last seven days, or a window you pick | wide | 15s | — |
 
 A **square** tile is about one icon wide and a **wide** one about two and a
 half, so a tile follows the `icon_size` the config asks for instead of being
@@ -239,6 +240,22 @@ all_day = true      # list all-day events
 
 Which calendars the calendar widget reads is chosen in GNOME Calendar: a
 calendar unticked there is left out here too.
+
+```toml
+[widgets.claude]
+mode = "five-hours"   # five-hours, week or tokens
+window = "today"      # for tokens: 5h, today or 7-days
+budget = 0            # tokens you mean to stay under; 0 for none
+```
+
+**The `claude` widget reads personal data from your disk.** It counts the
+`usage` Claude Code writes into its own transcripts under
+`$CLAUDE_CONFIG_DIR` (or `~/.claude`). Only the counts are kept — never what
+was said — nothing is logged, and nothing leaves the machine. There is no
+network call and no token. Your plan's limit is not in those files, so the
+tile shows a percentage only against a `budget` you set yourself, and says
+so. The format is Claude Code's own and may change; when it does, the tile
+says it could not understand it rather than showing zero.
 
 A poll is not an update: the scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read

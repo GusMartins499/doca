@@ -240,10 +240,40 @@ impl Default for CalendarSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeSettings {
+    /// One of `doca_ipc::claude_mode::ALL`.
+    #[serde(default = "default_claude_mode")]
+    pub mode: String,
+    /// One of `doca_ipc::claude_window::ALL`, for the tokens mode.
+    #[serde(default = "default_claude_window")]
+    pub window: String,
+    /// Tokens the user means to stay under. Zero is none, and none is the
+    /// default: the plan's own limit is not on disk to be read.
+    #[serde(default)]
+    pub budget: u32,
+}
+
+fn default_claude_mode() -> String {
+    doca_ipc::claude_mode::DEFAULT.to_string()
+}
+
+fn default_claude_window() -> String {
+    doca_ipc::claude_window::DEFAULT.to_string()
+}
+
+impl Default for ClaudeSettings {
+    fn default() -> Self {
+        Self { mode: default_claude_mode(), window: default_claude_window(), budget: 0 }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidgetSettings {
     #[serde(default)]
     pub calendar: CalendarSettings,
+    #[serde(default)]
+    pub claude: ClaudeSettings,
     #[serde(default)]
     pub countdown: CountdownSettings,
     #[serde(default)]
@@ -286,6 +316,11 @@ impl WidgetSettings {
                 ahead: doca_ipc::calendar_ahead::resolve(self.calendar.ahead.trim()).to_string(),
                 all_day: self.calendar.all_day,
             },
+            claude: ClaudeSettings {
+                mode: doca_ipc::claude_mode::resolve(self.claude.mode.trim()).to_string(),
+                window: doca_ipc::claude_window::resolve(self.claude.window.trim()).to_string(),
+                budget: self.claude.budget,
+            },
             countdown: CountdownSettings {
                 date: self.countdown.date.trim().to_string(),
                 label: self.countdown.label.trim().to_string(),
@@ -318,6 +353,9 @@ impl WidgetSettings {
         match (widget, key) {
             (k::CALENDAR, k::AHEAD) => self.calendar.ahead = value.into_text()?,
             (k::CALENDAR, k::ALL_DAY) => self.calendar.all_day = value.into_flag()?,
+            (k::CLAUDE, k::MODE) => self.claude.mode = value.into_text()?,
+            (k::CLAUDE, k::WINDOW) => self.claude.window = value.into_text()?,
+            (k::CLAUDE, k::BUDGET) => self.claude.budget = value.into_count()?,
             (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
             (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
