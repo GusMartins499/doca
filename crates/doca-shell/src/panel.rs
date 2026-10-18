@@ -583,7 +583,17 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, 
             // Something to read, not to choose — insensitive, like the week,
             // so the keyboard does not stop on every appointment.
             row.set_sensitive(false);
-            row
+            // An appointment that started while the panel is up turns bold
+            // in place, like any other row that has news.
+            let update: Update = Box::new(move |row| {
+                if let Row::Event { when, title, now } = row {
+                    at.set_text(when);
+                    what.set_text(title);
+                    let weight = if *now { pango::Weight::Bold } else { pango::Weight::Normal };
+                    what.set_attributes(Some(&weighted(weight, 0.9)));
+                }
+            });
+            (row, Some(update))
         }
         Row::Week { days, goal } => {
             let area = gtk::DrawingArea::new();
