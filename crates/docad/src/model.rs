@@ -102,8 +102,55 @@ fn display_name(window: &WindowInfo) -> String {
     }
 }
 
+/// The item at this place in the dock, counted from one as the eye counts —
+/// the first icon is `1`, which is the key it is bound to.
+///
+/// Everything the bar shows counts, in the order it shows it: pinned apps,
+/// apps running beside them, folders, the trash. `Super+4` is whatever is
+/// fourth on screen, not fourth in some list the screen does not show.
+pub fn at_position(items: &[DockItem], position: u32) -> Option<&DockItem> {
+    let index = usize::try_from(position).ok()?.checked_sub(1)?;
+    items.get(index)
+}
+
+/// Whether choosing this item starts something rather than bringing back
+/// what is already open — which is when the bar bounces it, on a click or a
+/// key alike.
+pub fn starts_something(item: &DockItem) -> bool {
+    item.windows.is_empty()
+        && crate::folder::path_of(&item.id).is_none()
+        && item.id != crate::trash::ID
+}
+
 #[cfg(test)]
 mod tests {
+    fn item(id: &str, windows: &[u32]) -> DockItem {
+        DockItem {
+            id: id.to_string(),
+            name: id.to_string(),
+            icon: String::new(),
+            pinned: true,
+            windows: windows.to_vec(),
+            active: false,
+        }
+    }
+
+    #[test]
+    fn a_position_is_counted_from_one_as_the_keys_are() {
+        let items = vec![item("files", &[]), item("firefox", &[7]), item("code", &[])];
+        assert_eq!(at_position(&items, 1).map(|i| i.id.as_str()), Some("files"));
+        assert_eq!(at_position(&items, 3).map(|i| i.id.as_str()), Some("code"));
+        assert!(at_position(&items, 0).is_none(), "there is no zeroth icon");
+        assert!(at_position(&items, 4).is_none(), "past the end is nothing, not the last one");
+    }
+
+    #[test]
+    fn only_an_app_with_no_window_open_is_started_by_choosing_it() {
+        assert!(starts_something(&item("code", &[])));
+        assert!(!starts_something(&item("firefox", &[7])), "brought back, not started");
+        assert!(!starts_something(&item(crate::trash::ID, &[])), "the trash opens a folder");
+    }
+
     use super::*;
     use crate::desktop::DesktopEntry;
     use std::path::PathBuf;
