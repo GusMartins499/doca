@@ -106,7 +106,7 @@ pub fn base_centre(index: usize, base_slot: f64, spacing: f64, offset: f64) -> f
 }
 
 /// The run a number of slots takes, spacing between them and not after.
-fn run(slots: f64, base_slot: f64, spacing: f64) -> f64 {
+pub fn run(slots: f64, base_slot: f64, spacing: f64) -> f64 {
     if slots <= 0.0 {
         return 0.0;
     }
@@ -122,11 +122,13 @@ fn run(slots: f64, base_slot: f64, spacing: f64) -> f64 {
 /// steps, and the neighbours of an app that just opened slide apart instead
 /// of appearing somewhere new.
 ///
-/// The run is centred on the room the *settled* row occupies — `settled` is
-/// how many icons are staying, which is the width the bar was given. That is
-/// what keeps the group still: while one end of the row is animating the run
-/// is narrower than the bar, and centring it means the other icons stay where
+/// The run is centred on the room it was given — `room`, in slots, which is
+/// the width the bar holds for the row. That is what keeps the group still
+/// whenever the two differ: while one end of the row is animating inside a
+/// room that did not follow it, centring means the other icons stay where
 /// the bar put them instead of being dragged along by the one that moved.
+/// The row gives the bar the room its icons take *this frame* — see
+/// `Row::hold_room` — so on screen the two agree and the run fills its room.
 ///
 /// With every icon fully present this is `base_centre`, exactly, which is the
 /// case the row is in except for the few frames after something opened.
@@ -135,11 +137,10 @@ pub fn centres(
     base_slot: f64,
     spacing: f64,
     offset: f64,
-    settled: usize,
+    room: f64,
 ) -> Vec<f64> {
     let present: f64 = presence.iter().sum();
-    let mut x = offset
-        + (run(settled as f64, base_slot, spacing) - run(present, base_slot, spacing)) / 2.0;
+    let mut x = offset + (run(room, base_slot, spacing) - run(present, base_slot, spacing)) / 2.0;
     presence
         .iter()
         .map(|part| {
@@ -175,7 +176,7 @@ mod tests {
     /// screen, however much wider or narrower the bar itself became.
     fn about_the_middle(presence: &[f64], settled: usize) -> Vec<f64> {
         let room = run(settled as f64, SLOT, SPACING);
-        centres(presence, SLOT, SPACING, MARGIN, settled)
+        centres(presence, SLOT, SPACING, MARGIN, settled as f64)
             .into_iter()
             .map(|centre| centre - (MARGIN + room / 2.0))
             .collect()
@@ -185,7 +186,7 @@ mod tests {
     fn a_row_with_nothing_arriving_sits_exactly_where_its_icons_rest() {
         let settled = vec![1.0; 6];
 
-        let centres = centres(&settled, SLOT, SPACING, MARGIN, 6);
+        let centres = centres(&settled, SLOT, SPACING, MARGIN, 6.0);
 
         for (index, centre) in centres.iter().enumerate() {
             assert_eq!(*centre, base_centre(index, SLOT, SPACING, MARGIN));
@@ -281,7 +282,7 @@ mod tests {
                 let settled = count;
                 let width = MARGIN * 2.0 + run(settled as f64, SLOT, SPACING);
                 for (index, centre) in
-                    centres(&row, SLOT, SPACING, MARGIN, settled).iter().enumerate()
+                    centres(&row, SLOT, SPACING, MARGIN, settled as f64).iter().enumerate()
                 {
                     assert!(
                         centre - SLOT / 2.0 >= 0.0 && centre + SLOT / 2.0 <= width,
