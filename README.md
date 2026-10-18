@@ -185,6 +185,7 @@ labels for all of them.
 | id | shows | tile | poll | panel offers |
 |---|---|---|---|---|
 | `clock` | time and date | wide | 1s | — |
+| `calendar` | the date, and the next three things on GNOME's calendars (Evolution Data Server, read only) | wide | 15s | — |
 | `battery` | charge and time to full or empty | wide | 30s | — |
 | `cpu` | busy share since the last sample | wide | 2s | — |
 | `network` | up and down rates | wide | 2s | — |
@@ -196,6 +197,7 @@ labels for all of them.
 | `countdown` | days to a date | wide | 60s | — |
 | `water` | glasses counted, in a ring of the goal | square | 60s | one more, take one back, start over |
 | `note` | a line you leave yourself | wide | — | — |
+| `claude` | Claude Code's tokens: the open five-hour session, the last seven days, or a window you pick | wide | 15s | — |
 
 A **square** tile is about one icon wide and a **wide** one about two and a
 half, so a tile follows the `icon_size` the config asks for instead of being
@@ -230,7 +232,30 @@ minutes = 15
 
 [widgets.water]
 goal = 8
+
+[widgets.calendar]
+ahead = "week"      # today, 3-days, week or month
+all_day = true      # list all-day events
 ```
+
+Which calendars the calendar widget reads is chosen in GNOME Calendar: a
+calendar unticked there is left out here too.
+
+```toml
+[widgets.claude]
+mode = "five-hours"   # five-hours, week or tokens
+window = "today"      # for tokens: 5h, today or 7-days
+budget = 0            # tokens you mean to stay under; 0 for none
+```
+
+**The `claude` widget reads personal data from your disk.** It counts the
+`usage` Claude Code writes into its own transcripts under
+`$CLAUDE_CONFIG_DIR` (or `~/.claude`). Only the counts are kept — never what
+was said — nothing is logged, and nothing leaves the machine. There is no
+network call and no token. Your plan's limit is not in those files, so the
+tile shows a percentage only against a `budget` you set yourself, and says
+so. The format is Claude Code's own and may change; when it does, the tile
+says it could not understand it rather than showing zero.
 
 A poll is not an update: the scheduler compares the rendered state to the last
 one and stays quiet when nothing changed, so a clock showing `17:21` is read
@@ -280,6 +305,42 @@ the script is the same thing for automation, and writes the same slots:
 ./scripts/bind-key.sh '<Super>1' Work    # one key straight to one environment
 ./scripts/bind-key.sh --list
 ./scripts/bind-key.sh --remove '<Super>1' Work
+./scripts/bind-key.sh --item 3           # <Super>3 chooses the third icon
+./scripts/bind-key.sh --items --take     # <Super>1..9, taken from GNOME's dash
+./scripts/bind-key.sh --remove --items
+./scripts/bind-key.sh --back                       # <Shift><Super>e, the other way
+./scripts/bind-key.sh --auto-hide '<Super><Alt>h'  # auto-hide on and off
+./scripts/bind-key.sh --widget water '<Super><Alt>w'   # one widget on and off
+```
+
+GNOME binds `<Super>1..9` to its own dash out of the box
+(`org.gnome.shell.keybindings switch-to-application-N`), and a key bound twice
+goes to whichever wins. So `--item` and `--items` refuse those keys and say
+which, unless `--take` is given — which clears GNOME's binding for exactly
+the keys being bound, and nothing else. `gsettings reset` gives them back.
+
+A chosen item behaves as if clicked: an open app comes forward, and one that
+is not running starts, with the same bounce on the bar a click gives.
+
+Every action a key can call, for binding by hand:
+
+| method | arguments | does |
+|---|---|---|
+| `CycleEnvironment` | — | the next dock, wrapping round |
+| `CycleEnvironmentBack` | — | the dock before, wrapping round |
+| `ToggleAutoHide` | — | auto-hide on or off; answers which |
+| `ToggleWidget` | `id` | that widget on or off the dock showing; answers which |
+| `SetEnvironment` | `name` | that dock |
+| `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
+| `ActivateItem` | `id` | that item, as a click would |
+| `InvokeWidget` | `id`, `action` | a widget's action — `water drink`, `music next` |
+| `SetAppearance` | `{key: value}` | e.g. `{'auto_hide': <true>}` |
+| `SetWidgetSetting` | `id`, `key`, `value` | e.g. `water goal <uint32 2500>` |
+
+```bash
+gdbus call --session --dest io.github.gusmartins499.Doca \
+    --object-path /io/github/gusmartins499/Doca \
+    --method io.github.gusmartins499.Doca1.ActivatePosition 3
 ```
 
 The script writes a GNOME custom keybinding whose command is a `gdbus call` to

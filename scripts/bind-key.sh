@@ -11,6 +11,18 @@
 #   ./scripts/bind-key.sh '<Super>1' Work    one key straight to one environment
 #   ./scripts/bind-key.sh --list             what is bound now
 #   ./scripts/bind-key.sh --remove '<Super>1' Work
+#   ./scripts/bind-key.sh --item 3           <Super>3 chooses the third icon
+#   ./scripts/bind-key.sh --item 3 '<Alt>3'  the same, your key
+#   ./scripts/bind-key.sh --items            <Super>1 to <Super>9, all nine
+#   ./scripts/bind-key.sh --remove --items   and gone again
+#   ./scripts/bind-key.sh --back             <Shift><Super>e cycles the other way
+#   ./scripts/bind-key.sh --auto-hide '<Super><Alt>h'
+#   ./scripts/bind-key.sh --widget water '<Super><Alt>w'   that widget on or off
+#
+# GNOME binds <Super>1..9 itself, to its own dash (switch-to-application-N).
+# Two bindings on one key is a coin toss, so --item and --items refuse a key
+# GNOME already holds and say which; add --take to clear GNOME's binding for
+# exactly those keys. Nothing else of GNOME's is touched.
 #
 # Running it twice with the same action changes that one binding rather than
 # adding a second: each action owns a named slot. Keybindings you set yourself
@@ -107,15 +119,145 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 REMOVE=0
-[ "${1:-}" = "--remove" ] && {
-    REMOVE=1
-    shift
+TAKE=0
+ACTION=""
+WIDGET=""
+ITEM=""
+ALL_ITEMS=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+    --remove) REMOVE=1 ;;
+    --take) TAKE=1 ;;
+    --items) ALL_ITEMS=1 ;;
+    --item) ITEM=next ;;
+    --back) ACTION=back ;;
+    --auto-hide) ACTION=auto-hide ;;
+    --widget) ACTION=widget WIDGET=next ;;
+    *)
+        if [ "$ITEM" = "next" ]; then
+            ITEM=$arg
+        elif [ "${WIDGET:-}" = "next" ]; then
+            WIDGET=$arg
+        else
+            ARGS+=("$arg")
+        fi
+        ;;
+    esac
+done
+[ "$ITEM" = "next" ] && {
+    echo "--item needs a position, 1 to 9" >&2
+    exit 1
 }
+
+# GNOME's own binding for the n-th app in its dash, which <Super>n is out of
+# the box. Printed as GNOME stores it.
+GNOME_KEYS=org.gnome.shell.keybindings
+gnome_holds() {
+    local position=$1 key=$2 held
+    held=$(gsettings get "$GNOME_KEYS" "switch-to-application-$position" 2>/dev/null) || return 1
+    grep -qF "'$key'" <<<"$held"
+}
+
+# One position: its slot, label, command and key.
+item_binding() {
+    local position=$1
+    SLOT="$SLOT_ROOT/doca-item-$position/"
+    LABEL="Doca: item $position"
+    COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ActivatePosition $position"
+}
+
+if [ -n "$ITEM" ] || [ "$ALL_ITEMS" = "1" ]; then
+    if [ "$ALL_ITEMS" = "1" ]; then
+        POSITIONS=(1 2 3 4 5 6 7 8 9)
+    else
+        case "$ITEM" in
+        [1-9]) POSITIONS=("$ITEM") ;;
+        *)
+            echo "--item takes a position from 1 to 9, not $ITEM" >&2
+            exit 1
+            ;;
+        esac
+    fi
+    read_slots
+
+    if [ "$REMOVE" = "1" ]; then
+        for position in "${POSITIONS[@]}"; do
+            item_binding "$position"
+            has_slot "$SLOT" && drop_slot "$SLOT" && echo "unbound $LABEL"
+        done
+        write_slots
+        echo "GNOME's own <Super>1..9, if --take cleared them: gsettings reset $GNOME_KEYS switch-to-application-N"
+        exit 0
+    fi
+
+    # Every key checked before any is written, so a refusal leaves nothing
+    # half bound.
+    taken=()
+    for position in "${POSITIONS[@]}"; do
+        key="${ARGS[0]:-<Super>$position}"
+        [ "${#POSITIONS[@]}" -gt 1 ] && key="<Super>$position"
+        gnome_holds "$position" "$key" && taken+=("$position:$key")
+    done
+    if [ "${#taken[@]}" -gt 0 ] && [ "$TAKE" = "0" ]; then
+        echo "GNOME already binds these to its own dash:" >&2
+        for pair in "${taken[@]}"; do
+            echo "  ${pair#*:}  ($GNOME_KEYS switch-to-application-${pair%%:*})" >&2
+        done
+        echo "Run again with --take to give them to Doca, or pick other keys." >&2
+        exit 1
+    fi
+    for pair in "${taken[@]:-}"; do
+        [ -n "$pair" ] || continue
+        gsettings set "$GNOME_KEYS" "switch-to-application-${pair%%:*}" "[]"
+        echo "took ${pair#*:} from GNOME's switch-to-application-${pair%%:*}"
+    done
+
+    for position in "${POSITIONS[@]}"; do
+        item_binding "$position"
+        key="${ARGS[0]:-<Super>$position}"
+        [ "${#POSITIONS[@]}" -gt 1 ] && key="<Super>$position"
+        gsettings set "$SLOT_SCHEMA:$SLOT" name "$LABEL"
+        gsettings set "$SLOT_SCHEMA:$SLOT" binding "$key"
+        gsettings set "$SLOT_SCHEMA:$SLOT" command "$COMMAND"
+        has_slot "$SLOT" || SLOTS+=("$SLOT")
+        echo "$key → $LABEL"
+    done
+    write_slots
+    exit 0
+fi
+
+set -- "${ARGS[@]:-}"
+[ "${1:-}" = "" ] && set --
 
 KEY="${1:-<Super>e}"
 ENVIRONMENT="${2:-}"
 
-if [ -n "$ENVIRONMENT" ]; then
+if [ "$ACTION" = "back" ]; then
+    KEY="${1:-<Shift><Super>e}"
+    SLOT="$SLOT_ROOT/doca-cycle-back/"
+    LABEL="Doca: cycle environment back"
+    COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.CycleEnvironmentBack"
+elif [ "$ACTION" = "auto-hide" ] || [ "$ACTION" = "widget" ]; then
+    if [ "$ACTION" = "widget" ] && { [ -z "$WIDGET" ] || [ "$WIDGET" = "next" ]; }; then
+        echo "--widget needs a widget id, e.g. --widget water '<Super><Alt>w'" >&2
+        exit 1
+    fi
+    # No default key for these: there is none that is obviously free.
+    [ "$REMOVE" = "1" ] || [ -n "${1:-}" ] || {
+        echo "--$ACTION needs a key, e.g. '<Super><Alt>h'" >&2
+        exit 1
+    }
+    if [ "$ACTION" = "auto-hide" ]; then
+        SLOT="$SLOT_ROOT/doca-auto-hide/"
+        LABEL="Doca: toggle auto-hide"
+        COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ToggleAutoHide"
+    else
+        SLOT="$SLOT_ROOT/doca-widget-$(slug "$WIDGET")/"
+        LABEL="Doca: toggle $WIDGET"
+        COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ToggleWidget \"$WIDGET\""
+    fi
+elif [ -n "$ENVIRONMENT" ]; then
     SLOT="$SLOT_ROOT/doca-$(slug "$ENVIRONMENT")/"
     LABEL="Doca: $ENVIRONMENT"
     COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.SetEnvironment \"$ENVIRONMENT\""

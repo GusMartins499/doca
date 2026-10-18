@@ -63,7 +63,24 @@ SERVER_PID=$!
 sleep 2
 
 export DISPLAY="$DISPLAY_NUM"
+# All exported before dbus-run-session below, because a service the bus
+# activates takes the *bus daemon's* environment, not the dock's — the lesson
+# check-live.sh learned from dconf. The calendar widget (#31) makes it bite
+# again: it activates Evolution Data Server, which would otherwise open your
+# real calendars, cache and local calendar file from a second process beside
+# the one your session already runs.
 export XDG_CONFIG_HOME="$SANDBOX/config"
+export XDG_STATE_HOME="$SANDBOX/state"
+export XDG_CACHE_HOME="$SANDBOX/cache"
+export XDG_DATA_HOME="$SANDBOX/data"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+# Your own apps and icons, so the bar still shows what yours does. Linked, not
+# copied, and only these two: everything else under ~/.local/share stays out.
+for shared in applications icons; do
+    if [ -d "$HOME/.local/share/$shared" ] && [ ! -e "$XDG_DATA_HOME/$shared" ]; then
+        ln -s "$HOME/.local/share/$shared" "$XDG_DATA_HOME/$shared"
+    fi
+done
 # The dock's "Preferences…" spawns doca-prefs by name, so the sandbox has to
 # find the one that was just built rather than one installed on the system.
 export PATH="$ROOT/target/release:$PATH"

@@ -215,8 +215,65 @@ impl WaterSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalendarSettings {
+    /// How far ahead to look, one of `doca_ipc::calendar_ahead::ALL`.
+    #[serde(default = "default_calendar_ahead")]
+    pub ahead: String,
+    /// Whether all-day events are listed. On by default: a birthday is
+    /// worth knowing about, and turning it off is one click.
+    #[serde(default = "default_true")]
+    pub all_day: bool,
+}
+
+fn default_calendar_ahead() -> String {
+    doca_ipc::calendar_ahead::DEFAULT.to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self { ahead: default_calendar_ahead(), all_day: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeSettings {
+    /// One of `doca_ipc::claude_mode::ALL`.
+    #[serde(default = "default_claude_mode")]
+    pub mode: String,
+    /// One of `doca_ipc::claude_window::ALL`, for the tokens mode.
+    #[serde(default = "default_claude_window")]
+    pub window: String,
+    /// Tokens the user means to stay under. Zero is none, and none is the
+    /// default: the plan's own limit is not on disk to be read.
+    #[serde(default)]
+    pub budget: u32,
+}
+
+fn default_claude_mode() -> String {
+    doca_ipc::claude_mode::DEFAULT.to_string()
+}
+
+fn default_claude_window() -> String {
+    doca_ipc::claude_window::DEFAULT.to_string()
+}
+
+impl Default for ClaudeSettings {
+    fn default() -> Self {
+        Self { mode: default_claude_mode(), window: default_claude_window(), budget: 0 }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidgetSettings {
+    #[serde(default)]
+    pub calendar: CalendarSettings,
+    #[serde(default)]
+    pub claude: ClaudeSettings,
     #[serde(default)]
     pub countdown: CountdownSettings,
     #[serde(default)]
@@ -255,6 +312,15 @@ impl WidgetSettings {
 
     pub fn sanitised(&self) -> Self {
         Self {
+            calendar: CalendarSettings {
+                ahead: doca_ipc::calendar_ahead::resolve(self.calendar.ahead.trim()).to_string(),
+                all_day: self.calendar.all_day,
+            },
+            claude: ClaudeSettings {
+                mode: doca_ipc::claude_mode::resolve(self.claude.mode.trim()).to_string(),
+                window: doca_ipc::claude_window::resolve(self.claude.window.trim()).to_string(),
+                budget: self.claude.budget,
+            },
             countdown: CountdownSettings {
                 date: self.countdown.date.trim().to_string(),
                 label: self.countdown.label.trim().to_string(),
@@ -285,6 +351,11 @@ impl WidgetSettings {
         use doca_ipc::widget_key as k;
 
         match (widget, key) {
+            (k::CALENDAR, k::AHEAD) => self.calendar.ahead = value.into_text()?,
+            (k::CALENDAR, k::ALL_DAY) => self.calendar.all_day = value.into_flag()?,
+            (k::CLAUDE, k::MODE) => self.claude.mode = value.into_text()?,
+            (k::CLAUDE, k::WINDOW) => self.claude.window = value.into_text()?,
+            (k::CLAUDE, k::BUDGET) => self.claude.budget = value.into_count()?,
             (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
             (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,
@@ -304,6 +375,9 @@ impl WidgetSettings {
 pub enum Setting {
     Text(String),
     Count(u32),
+    /// On or off. Added for the calendar's all-day switch (#31): writing
+    /// `all_day = "false"` would put a string where the file means a flag.
+    Flag(bool),
 }
 
 impl Setting {
@@ -311,6 +385,7 @@ impl Setting {
         match self {
             Setting::Text(text) => Ok(text),
             Setting::Count(count) => Ok(count.to_string()),
+            Setting::Flag(flag) => Ok(flag.to_string()),
         }
     }
 
@@ -321,6 +396,19 @@ impl Setting {
                 .trim()
                 .parse()
                 .with_context(|| format!("{text:?} is not a whole number")),
+            Setting::Flag(_) => anyhow::bail!("a count cannot be on or off"),
+        }
+    }
+
+    fn into_flag(self) -> Result<bool> {
+        match self {
+            Setting::Flag(flag) => Ok(flag),
+            Setting::Text(text) => match text.trim().to_lowercase().as_str() {
+                "true" | "on" | "yes" | "1" => Ok(true),
+                "false" | "off" | "no" | "0" => Ok(false),
+                other => anyhow::bail!("{other:?} is not true or false"),
+            },
+            Setting::Count(count) => Ok(count != 0),
         }
     }
 }
@@ -485,6 +573,49 @@ impl Config {
             .skip(position + 1)
             .take(self.environments.len())
             .find(|environment| environment.name != current)
+    }
+
+    /// The cycle the other way round: the environment before this one,
+    /// wrapping from the first to the last. #18, item 8, "cycle backwards".
+    pub fn environment_before(&self, current: &str) -> Option<&Environment> {
+        let count = self.environments.len();
+        let position = self
+            .environments
+            .iter()
+            .position(|environment| environment.name == current)
+            .unwrap_or(0);
+        (1..count)
+            .map(|back| &self.environments[(position + count - back) % count])
+            .find(|environment| environment.name != current)
+    }
+
+    /// Auto-hide the other way from how it is; answers with how it is now.
+    pub fn toggle_auto_hide(&mut self) -> bool {
+        let mut appearance = self.appearance();
+        appearance.auto_hide = !appearance.auto_hide;
+        self.set_appearance(appearance);
+        self.appearance().auto_hide
+    }
+
+    /// A widget on this dock if it was off, off if it was on; answers with
+    /// whether it is on now. Turned on, it goes at the end, which is where a
+    /// widget the user just asked for is looked for.
+    pub fn toggle_widget(&mut self, environment: &str, widget: &str) -> Result<bool> {
+        anyhow::ensure!(
+            doca_ipc::WIDGETS.contains(&widget),
+            "no widget {widget}; there are {}",
+            doca_ipc::WIDGETS.join(", ")
+        );
+        let mut widgets = self.named_mut(environment)?.widgets.clone();
+        let on = if let Some(at) = widgets.iter().position(|held| held == widget) {
+            widgets.remove(at);
+            false
+        } else {
+            widgets.push(widget.to_string());
+            true
+        };
+        self.set_environment_widgets(environment, widgets)?;
+        Ok(on)
     }
 
     /// Whether some environment asked for this workspace by name.
@@ -949,6 +1080,25 @@ mod tests {
     /// The unit changed under people who already had a goal, so the goal has
     /// to change with it rather than be clamped into nonsense — a saved `8`
     /// read as millilitres would be a goal of eight millilitres.
+    #[test]
+    fn the_calendar_settings_read_write_and_fall_back() {
+        assert_eq!(config("").widgets.calendar, CalendarSettings::default());
+
+        let mut settings = config("[widgets.calendar]\nahead = \"month\"\nall_day = false\n").widgets;
+        assert_eq!((settings.calendar.ahead.as_str(), settings.calendar.all_day), ("month", false));
+
+        settings.set("calendar", "ahead", Setting::Text("fortnight".to_string())).unwrap();
+        assert_eq!(settings.calendar.ahead, "week", "a choice nobody offers is the default");
+
+        settings.set("calendar", "all_day", Setting::Text("on".to_string())).unwrap();
+        assert!(settings.calendar.all_day);
+        assert!(settings.set("calendar", "all_day", Setting::Text("maybe".to_string())).is_err());
+
+        settings.set("calendar", "all_day", Setting::Flag(false)).unwrap();
+        let written = toml::to_string(&settings).unwrap();
+        assert!(written.contains("all_day = false"), "written as a flag, not a string: {written}");
+    }
+
     #[test]
     fn a_goal_written_in_glasses_is_read_as_the_millilitres_it_meant() {
         let carried = config("[widgets.water]\ngoal = 8\n").widgets;
@@ -1500,6 +1650,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(order(&config), ["Home", "Work", "Games"]);
+    }
+
+    #[test]
+    fn the_cycle_backwards_is_the_cycle_forwards_reversed() {
+        let docks = three_docks();
+        let names: Vec<&str> = docks.environments.iter().map(|e| e.name.as_str()).collect();
+        for name in &names {
+            let back = docks.environment_before(name).map(|e| e.name.clone()).unwrap();
+            assert_eq!(
+                docks.next_environment_after(&back).map(|e| e.name.as_str()),
+                Some(*name),
+                "one back from {name} and one forward again is not {name}"
+            );
+        }
+        assert_eq!(
+            docks.environment_before(names[0]).map(|e| e.name.as_str()),
+            Some(names[2]),
+            "back from the first wraps to the last"
+        );
+        let one = config("[[environments]]\nname = \"Work\"\n");
+        assert!(one.environment_before("Work").is_none(), "nowhere to go back to");
+    }
+
+    #[test]
+    fn toggles_flip_and_say_what_they_flipped_to() {
+        let mut config = three_docks();
+        let was = config.appearance().auto_hide;
+        assert_eq!(config.toggle_auto_hide(), !was);
+        assert_eq!(config.toggle_auto_hide(), was);
+
+        let dock = config.environments[0].name.clone();
+        config.set_environment_widgets(&dock, vec!["clock".to_string(), "water".to_string()]).unwrap();
+        assert!(!config.toggle_widget(&dock, "clock").unwrap());
+        assert_eq!(config.environments[0].widgets, vec!["water"]);
+        assert!(config.toggle_widget(&dock, "clock").unwrap());
+        assert_eq!(config.environments[0].widgets, vec!["water", "clock"], "back on, at the end");
+        assert!(config.toggle_widget(&dock, "clocks").is_err(), "a misspelt widget is told, not written");
     }
 
     /// The cycle reads this list, so the two have to agree after a reorder.
