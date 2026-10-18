@@ -128,9 +128,8 @@ struct Hide {
     dragging: Rc<Cell<bool>>,
 }
 
-/// How long after a drag leaves the dock it is asked whether it really left:
-/// long enough for the next widget of the dock to have taken it, if one did.
-const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(150);
+/// How often a drag over the dock is asked whether it is still there.
+const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Default for Hide {
     fn default() -> Self {
@@ -261,37 +260,62 @@ impl Hide {
                     tracing::debug!("drag over the dock: held");
                     holding.hold();
                     holding.intend(&dock, true);
+                    holding.watch_drag(&dock);
                 }
                 // Not a claim on the drop: whichever widget takes files
                 // says so for itself.
                 false
             });
-            let releasing = self.clone();
-            let dock = window.clone();
-            widget.connect_drag_leave(move |_, _, _| {
-                if !releasing.dragging.replace(false) {
-                    return;
-                }
-                tracing::debug!(over = pointer_is_over(&dock), "drag left a widget of the dock");
-                releasing.release(&dock);
-                // The leave a drag ends with is the only leave the dock
-                // gets: the ordinary one never came while the drag had the
-                // pointer. But a drag also "leaves" the row for the air
-                // above it, still inside the window, so whether it left the
-                // dock is asked a moment later, once nothing has taken it
-                // back — and only if no drag is over the dock by then. A drop
-                // lands with the pointer on the bar, which then goes the
-                // usual way once it moves off.
-                let settling = releasing.clone();
-                let dock = dock.clone();
-                glib::timeout_add_local_once(DRAG_SETTLES, move || {
-                    tracing::debug!(dragging = settling.dragging.get(), over = pointer_is_over(&dock), holds = settling.holds.get(), "drag settled");
-                    if !settling.dragging.get() && !pointer_is_over(&dock) {
-                        settling.intend(&dock, false);
-                    }
-                });
-            });
         }
+    }
+
+    /// Let go of a drag once the pointer is off the dock.
+    ///
+    /// Asked of the X server every [`DRAG_SETTLES`] rather than waited for as
+    /// a `drag-leave`: GTK sends that only under conditions on the drop site,
+    /// and measured in check-live.sh it never came — the bar stayed up after
+    /// the drag had gone. Where the pointer is can be asked even while
+    /// another app holds it, and the answer does not depend on which widget
+    /// of the dock the drag was last over. A drop leaves the pointer on the
+    /// bar, so the hold lasts until it moves off, which is when the bar
+    /// would go anyway.
+    /// Whether the pointer is inside where the bar is going — not where it
+    /// is this frame. Measured against the window mid-slide, a drag brought
+    /// up as fast as the bar rose was "outside" a bar it was over, and the
+    /// bar went away under the file.
+    fn pointer_is_over_its_place(&self, window: &gtk::Window) -> bool {
+        let Some(pointer) = gdk::Display::default()
+            .and_then(|display| display.default_seat())
+            .and_then(|seat| seat.pointer())
+        else {
+            return false;
+        };
+        let (_, x, y) = pointer.position();
+        let top = if self.shown.get() {
+            self.shown_y.get()
+        } else {
+            motion::hidden_y(self.shown_y.get(), self.height.get())
+        };
+        let left = self.x.get();
+        x >= left
+            && x < left + window.allocated_width()
+            && y >= top
+            && y < top + self.height.get()
+    }
+
+    fn watch_drag(&self, window: &gtk::Window) {
+        let watching = self.clone();
+        let dock = window.clone();
+        glib::timeout_add_local(DRAG_SETTLES, move || {
+            if watching.pointer_is_over_its_place(&dock) {
+                return glib::ControlFlow::Continue;
+            }
+            tracing::debug!("the drag left the dock: released");
+            watching.dragging.set(false);
+            watching.release(&dock);
+            watching.intend(&dock, false);
+            glib::ControlFlow::Break
+        });
     }
 
     fn hold(&self) {
