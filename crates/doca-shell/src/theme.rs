@@ -35,6 +35,7 @@ const NATIVE: &str = "
     #item:hover { background: rgba(255,255,255,0.10); }
     #widget:hover { background: rgba(255,255,255,0.10); }
     #widget.active { background: rgba(76,141,255,0.18); }
+    #widget:focus { box-shadow: inset 0 0 0 2px #4c8dff; }
     #separator { background: rgba(255,255,255,0.12); }
     #indicator { background: rgba(255,255,255,0.45); }
     #indicator-active { background: #4c8dff; }
@@ -57,6 +58,7 @@ const MIDNIGHT: &str = "
     #item:hover { background: #1a1f2b; }
     #widget:hover { background: #1a1f2b; }
     #widget.active { background: #16233d; }
+    #widget:focus { box-shadow: inset 0 0 0 2px #7aa2f7; }
     #separator { background: #232a38; }
     #indicator { background: #4a5568; }
     #indicator-active { background: #7aa2f7; }
@@ -79,6 +81,7 @@ const PAPER: &str = "
     #item:hover { background: rgba(0,0,0,0.06); }
     #widget:hover { background: rgba(0,0,0,0.06); }
     #widget.active { background: rgba(198,124,78,0.16); }
+    #widget:focus { box-shadow: inset 0 0 0 2px #c67c4e; }
     #separator { background: rgba(0,0,0,0.12); }
     #indicator { background: rgba(0,0,0,0.35); }
     #indicator-active { background: #c67c4e; }
@@ -115,6 +118,7 @@ const SYSTEM_CSS: &str = "
     #item:hover { background: alpha(@theme_fg_color, 0.10); }
     #widget:hover { background: alpha(@theme_fg_color, 0.10); }
     #widget.active { background: alpha(@theme_selected_bg_color, 0.22); }
+    #widget:focus { box-shadow: inset 0 0 0 2px @theme_selected_bg_color; }
     #separator { background: alpha(@theme_fg_color, 0.12); }
     #indicator { background: alpha(@theme_fg_color, 0.45); }
     #indicator-active { background: @theme_selected_bg_color; }
@@ -186,6 +190,24 @@ pub fn dots(name: &str) -> (gdk::RGBA, gdk::RGBA) {
             gdk::RGBA::new(0.298, 0.553, 1.0, 1.0),
         ),
     }
+}
+
+/// The ring round whatever has the keyboard (#18, item 9).
+///
+/// A tile is a widget and gets its ring from the sheet, `#widget:focus`; an
+/// icon is part of one drawing and gets it from here, for the reason the dots
+/// do. It is each theme's accent — the colour of its focused-app dot — so
+/// the drawn ring and the styled one are the same colour, which the test
+/// below holds them to: a keyboard walking off the icons onto the tiles must
+/// not see the ring change colour on the way.
+pub fn ring(name: &str) -> gdk::RGBA {
+    dots(name).1
+}
+
+/// The ring, asking the GTK theme first when the theme is `system` — the
+/// colour its sheet borrows for `#widget:focus`.
+pub fn ring_for(name: &str, context: &gtk::StyleContext) -> gdk::RGBA {
+    dots_for(name, context).1
 }
 
 /// The colours a drawn tile needs, since a tile is painted and not styled.
@@ -480,6 +502,30 @@ mod tests {
             && near(parts[1] / 255.0, colour.green())
             && near(parts[2] / 255.0, colour.blue())
             && near(parts[3], colour.alpha())
+    }
+
+    /// #18, item 9: what has the keyboard is visible in every theme, and in
+    /// one colour whether it is an icon (drawn) or a tile (styled).
+    #[test]
+    fn every_theme_rings_what_has_the_keyboard_in_its_own_accent() {
+        for name in names() {
+            assert!(
+                css(name).contains("#widget:focus { box-shadow: inset 0 0 0 2px "),
+                "{name} draws no ring round a tile that has the keyboard"
+            );
+        }
+        let declared = [("native", "#4c8dff"), ("midnight", "#7aa2f7"), ("paper", "#c67c4e")];
+        for (name, accent) in declared {
+            assert!(
+                css(name).contains(&format!("#widget:focus {{ box-shadow: inset 0 0 0 2px {accent}; }}")),
+                "{name} rings a tile in something other than {accent}"
+            );
+            assert_eq!(hex_of(ring(name)), accent, "{name} rings an icon and a tile in two colours");
+        }
+        assert!(
+            css(SYSTEM).contains("#widget:focus { box-shadow: inset 0 0 0 2px @theme_selected_bg_color; }"),
+            "system rings a tile in a colour it does not borrow"
+        );
     }
 
     #[test]
