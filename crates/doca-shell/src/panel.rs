@@ -24,10 +24,10 @@
 //! a constraint on the layout, not on the content, and it is the reason every
 //! row below is a `GtkMenuItem`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use doca_ipc::{Body, WidgetState};
 use gtk::prelude::*;
@@ -83,6 +83,39 @@ pub type Invoke = Rc<dyn Fn(&str, &str)>;
 /// The same closure opens it and reopens it, so a panel that has to be
 /// resized cannot come back somewhere other than where it was opened.
 pub type Show = Rc<dyn Fn(&gtk::Menu)>;
+
+/// Above the tile that asked, and the same way every time it is reopened.
+///
+/// Not `popup_at_widget`, which measures the widget's allocation against the
+/// widget's own window. A tile is an `EventBox`, whose window already stands
+/// where its allocation says, so the tile's offset in the bar was counted
+/// twice: the panel came up as far below the tile's top as the tile is below
+/// the bar's, over the tile it belongs to, and as far right again — which is
+/// off the screen for a tile at the end of the bar, so the panel was pushed
+/// back against the edge and squeezed to fit what was left. The tile's place
+/// in its toplevel, measured once, is what the panel hangs from.
+pub fn above(tile: &gtk::Widget) -> Show {
+    let tile = tile.clone();
+    Rc::new(move |menu: &gtk::Menu| {
+        let place = tile.toplevel().and_then(|top| {
+            let window = top.window()?;
+            let (x, y) = tile.translate_coordinates(&top, 0, 0)?;
+            let (width, height) = (tile.allocated_width(), tile.allocated_height());
+            Some((window, gdk::Rectangle::new(x, y, width, height)))
+        });
+        match place {
+            Some((window, rect)) => menu.popup_at_rect(
+                &window,
+                &rect,
+                gdk::Gravity::NorthWest,
+                gdk::Gravity::SouthWest,
+                None,
+            ),
+            // A tile that is not on a window yet has nowhere to be above.
+            None => menu.popup_at_pointer(None),
+        }
+    })
+}
 
 /// What a panel is made of.
 ///
@@ -266,15 +299,41 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
 /// down and up again, which blinks. A panel opened at the shape it turns out
 /// to have does not move at all — and that is every open after the first.
 #[derive(Clone, Default)]
-pub struct Remembered(Rc<RefCell<HashMap<String, usize>>>);
+pub struct Remembered(Rc<RefCell<HashMap<String, Shape>>>);
 
 impl Remembered {
-    pub fn of(&self, id: &str) -> usize {
-        self.0.borrow().get(id).copied().unwrap_or(UNKNOWN)
+    pub fn of(&self, id: &str) -> Shape {
+        self.0.borrow().get(id).copied().unwrap_or_default()
     }
 
-    pub fn note(&self, id: &str, rows: usize) {
-        self.0.borrow_mut().insert(id.to_string(), rows);
+    /// What the panel that is up holds now, rows and size both.
+    pub fn note(&self, id: &str, panel: &gtk::Menu) {
+        let (_, natural) = panel.preferred_size();
+        let shape = Shape {
+            rows: panel.children().len(),
+            size: Some((natural.width, natural.height)),
+        };
+        self.0.borrow_mut().insert(id.to_string(), shape);
+    }
+}
+
+/// The shape a panel is opened at, before its rows are in.
+///
+/// The size and not only the count: the rows waiting for an answer are a
+/// line each, and the rows that answer are not — the week is a chart, the
+/// heading is two lines — so a panel opened at the right number of rows was
+/// still too short for them, and the controls ended up behind a scroll arrow
+/// on every open after the first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub rows: usize,
+    /// How big the panel stood, once something has been in it to measure.
+    pub size: Option<(i32, i32)>,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self { rows: UNKNOWN, size: None }
     }
 }
 
@@ -316,13 +375,18 @@ pub const ROW_CHARS: i32 = 18;
 /// panel shows what is next, and both of those are a question for the daemon
 /// whose cost has no ceiling. So this is on screen in the frame the click
 /// landed in, and [`fill`] puts the rows into it when they arrive.
-pub fn opening(expected: usize) -> gtk::Menu {
+pub fn opening(expected: Shape) -> gtk::Menu {
     let menu = gtk::Menu::new();
     menu.set_widget_name("panel");
     menu.set_reserve_toggle_size(false);
 
-    for _ in 0..expected.max(1) {
+    for _ in 0..expected.rows.max(1) {
         menu.append(&waiting_row());
+    }
+    // As big as it stood, or the window this pops up in is the size of the
+    // rows that are only waiting.
+    if let Some((width, height)) = expected.size {
+        menu.set_size_request(width, height);
     }
 
     menu.show_all();
@@ -331,26 +395,32 @@ pub fn opening(expected: usize) -> gtk::Menu {
 
 /// Put the widget's rows into the panel that is already on screen.
 ///
-/// `expected` is what the panel was opened for. When the answer has the same
-/// number of rows — which is every open after the first — the rows are
-/// swapped and nothing moves. When it does not, the panel has to be popped
-/// down and up again: a menu keeps the window it sized at popup, so rows
-/// beyond it are not shown but scrolled to.
+/// When the rows take the room the panel was opened with — which is every
+/// open after the first — they are swapped in and nothing moves. When they do
+/// not, the panel has to be popped down and up again: a menu keeps the window
+/// it sized at popup, so rows beyond it are not shown but scrolled to. The
+/// room is measured, not counted: the same number of rows is not the same
+/// height when the ones waiting are a line and the ones arriving are not.
+///
+/// What comes back is how to bring those same rows up to date while the
+/// panel stays up — see [`Live`].
 pub fn fill(
     menu: &gtk::Menu,
-    expected: usize,
     id: &str,
     rows: &[Row],
     asks: &Asks,
     show: &Show,
     opened: Instant,
-) {
+) -> Live {
     for row in menu.children() {
         menu.remove(&row);
     }
 
+    let mut updates = Vec::with_capacity(rows.len());
     for row in rows {
-        menu.append(&drawn(menu, id, row, asks));
+        let (item, update) = drawn(menu, id, row, asks);
+        menu.append(&item);
+        updates.push(update);
     }
     if rows.is_empty() {
         let empty = gtk::MenuItem::with_label("nothing to show");
@@ -358,47 +428,160 @@ pub fn fill(
         menu.append(&empty);
     }
 
+    // Its own size from here on, whatever it was opened at.
+    menu.set_size_request(-1, -1);
     menu.show_all();
-    if expected != rows.len().max(1) {
+    if !fits(menu) {
         reopen(menu, show, opened);
+    }
+    Live(Rc::new(RefCell::new(Filled { rows: rows.to_vec(), updates })))
+}
+
+/// Whether the window the panel is up in is the size its rows are.
+fn fits(menu: &gtk::Menu) -> bool {
+    let Some(window) = menu.toplevel() else { return false };
+    let (_, natural) = menu.preferred_size();
+    (window.allocated_width(), window.allocated_height()) == (natural.width, natural.height)
+}
+
+/// The rows of a panel that is up, and how to change each without taking it
+/// down.
+///
+/// A panel that outlives its own controls (#28: drinking from it has to show
+/// the week growing) is a panel whose contents move while it is open. Putting
+/// new rows in would do it and would cost the keyboard its place — the item
+/// it had selected is gone — so the rows are kept and told what they now say.
+#[derive(Clone, Default)]
+pub struct Live(Rc<RefCell<Filled>>);
+
+#[derive(Default)]
+struct Filled {
+    rows: Vec<Row>,
+    updates: Vec<Option<Update>>,
+}
+
+/// How one row takes on what a newer row of the same kind says.
+type Update = Box<dyn Fn(&Row)>;
+
+impl Live {
+    /// Bring the panel to these rows, if it can be done in place.
+    ///
+    /// `false` when it cannot: the rows are a different shape — a cover that
+    /// arrived, a widget that lost its body — and only [`fill`] can draw
+    /// those. Rows of the same kind in the same places always can.
+    pub fn refresh(&self, rows: &[Row]) -> bool {
+        let mut filled = self.0.borrow_mut();
+        let same_shape = filled.rows.len() == rows.len()
+            && filled.rows.iter().zip(rows).all(|(was, now)| match (was, now) {
+                // A control is its verb: one that changed is another control.
+                (Row::Action { .. }, Row::Action { .. }) | (Row::Choice { .. }, Row::Choice { .. }) => was == now,
+                _ => std::mem::discriminant(was) == std::mem::discriminant(now),
+            });
+        if !same_shape {
+            return false;
+        }
+        for ((was, now), update) in filled.rows.iter().zip(rows).zip(&filled.updates) {
+            if was != now {
+                if let Some(update) = update {
+                    update(now);
+                }
+            }
+        }
+        filled.rows = rows.to_vec();
+        true
     }
 }
 
-/// One row, as the thing on screen.
-fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
+/// The panel that is up, if there is one, and what to do with news of it.
+///
+/// One at a time, because a panel is a menu and a menu holds the grab: a
+/// second one cannot go up while the first is. Kept apart from the tiles so
+/// that a widget's signal reaches whichever of the two is showing it.
+#[derive(Clone, Default)]
+pub struct Showing(Rc<RefCell<Option<(String, Takes)>>>);
+
+/// How the panel that is up takes on a widget's newer state.
+pub type Takes = Rc<dyn Fn(&WidgetState)>;
+
+impl Showing {
+    /// This widget's panel is up, and this is how it takes a new state.
+    pub fn now(&self, id: &str, update: Takes) {
+        self.0.replace(Some((id.to_string(), update)));
+    }
+
+    /// This widget's panel went down — unless another went up since.
+    pub fn gone(&self, id: &str) {
+        let mut showing = self.0.borrow_mut();
+        if showing.as_ref().is_some_and(|(up, _)| up == id) {
+            *showing = None;
+        }
+    }
+
+    /// A widget changed: tell its panel, if its panel is the one up.
+    pub fn update(&self, state: &WidgetState) {
+        // Cloned out first: the update may well put the panel down and up
+        // again, and a panel going down says so through `gone`.
+        let update = self
+            .0
+            .borrow()
+            .as_ref()
+            .filter(|(id, _)| *id == state.id)
+            .map(|(_, update)| update.clone());
+        if let Some(update) = update {
+            update(state);
+        }
+    }
+}
+
+/// One row, as the thing on screen, and how to change it later.
+fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, Option<Update>) {
     match row {
         Row::Heading { title, detail } => {
             let name = heading_label(title);
             name.set_attributes(Some(&weighted(pango::Weight::Bold, 1.0)));
 
+            // Always made, and hidden when there is nothing under the name:
+            // a heading that gains a detail while it is up has somewhere to
+            // put it.
+            let under = heading_label(detail);
+            under.set_attributes(Some(&weighted(pango::Weight::Normal, 0.85)));
+            // Dimmed rather than coloured, for the reason the waiting
+            // rows are: the panel wears whatever the desktop's menus
+            // wear, and a colour chosen here would be a guess about a
+            // background this code never picked.
+            under.set_opacity(0.6);
+            under.set_no_show_all(detail.is_empty());
+
             let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
             column.add(&name);
-            if !detail.is_empty() {
-                let under = heading_label(detail);
-                under.set_attributes(Some(&weighted(pango::Weight::Normal, 0.85)));
-                // Dimmed rather than coloured, for the reason the waiting
-                // rows are: the panel wears whatever the desktop's menus
-                // wear, and a colour chosen here would be a guess about a
-                // background this code never picked.
-                under.set_opacity(0.6);
-                column.add(&under);
-            }
+            column.add(&under);
 
             let heading = gtk::MenuItem::new();
             heading.add(&column);
             // Not a control. Leaving it insensitive also keeps the keyboard
             // off it, so the first arrow key lands on the first real one.
             heading.set_sensitive(false);
-            heading
+            let update: Update = Box::new(move |row| {
+                if let Row::Heading { title, detail } = row {
+                    name.set_text(title);
+                    under.set_text(detail);
+                    under.set_visible(!detail.is_empty());
+                }
+            });
+            (heading, Some(update))
         }
         Row::Action { action, label } => {
             let control = gtk::MenuItem::with_label(label);
             let (id, action) = (id.to_string(), action.to_string());
             let invoke = asks.invoke.clone();
             control.connect_activate(move |_| invoke(&id, &action));
-            control
+            stays_up(menu, &control);
+            (control, None)
         }
-        Row::Text { value } => text_row(menu, id, value, &asks.write),
+        // Never told what the note now says: the newest note is the one
+        // being typed here, and the daemon's echo of it would put the cursor
+        // back at the start of a word.
+        Row::Text { value } => (text_row(menu, id, value, &asks.write), None),
         Row::Figure { name, value } => {
             let named = gtk::Label::new(Some(name));
             named.set_xalign(0.0);
@@ -415,7 +598,13 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
             row.add(&line);
             // Read, not chosen.
             row.set_sensitive(false);
-            row
+            let update: Update = Box::new(move |row| {
+                if let Row::Figure { name, value } = row {
+                    named.set_text(name);
+                    figure.set_text(value);
+                }
+            });
+            (row, Some(update))
         }
         Row::Choice { key, value, label, chosen } => {
             // A dot rather than a radio item: the panel does not reserve
@@ -429,7 +618,10 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
                     choose(&id, key, value);
                 }
             });
-            item
+            stays_up(menu, &item);
+            // A choice is its dot: one that moved is a panel filled again,
+            // never a row told it in place — see `Live::refresh`.
+            (item, None)
         }
         Row::Cover { art } => {
             let picture = gtk::Image::new();
@@ -437,15 +629,25 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
             // menu row can be sure of: the rows beside it are text at
             // `ROW_CHARS`, and a cover wider than them would stretch the menu
             // around itself.
-            if let Some(pixbuf) = crate::dock::scaled_to_fill(art, COVER, COVER) {
-                picture.set_from_pixbuf(Some(&pixbuf));
-            }
+            let paint = {
+                let picture = picture.clone();
+                move |art: &str| match crate::dock::scaled_to_fill(art, COVER, COVER) {
+                    Some(pixbuf) => picture.set_from_pixbuf(Some(&pixbuf)),
+                    None => picture.clear(),
+                }
+            };
+            paint(art);
 
             let row = gtk::MenuItem::new();
             row.add(&picture);
             // A picture, not a control.
             row.set_sensitive(false);
-            row
+            let update: Update = Box::new(move |row| {
+                if let Row::Cover { art } = row {
+                    paint(art);
+                }
+            });
+            (row, Some(update))
         }
         Row::Event { when, title, now } => {
             let at = gtk::Label::new(Some(when));
@@ -473,20 +675,32 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
             // Something to read, not to choose — insensitive, like the week,
             // so the keyboard does not stop on every appointment.
             row.set_sensitive(false);
-            row
+            // An appointment that started while the panel is up turns bold
+            // in place, like any other row that has news.
+            let update: Update = Box::new(move |row| {
+                if let Row::Event { when, title, now } = row {
+                    at.set_text(when);
+                    what.set_text(title);
+                    let weight = if *now { pango::Weight::Bold } else { pango::Weight::Normal };
+                    what.set_attributes(Some(&weighted(weight, 0.9)));
+                }
+            });
+            (row, Some(update))
         }
         Row::Week { days, goal } => {
             let area = gtk::DrawingArea::new();
             area.set_size_request(-1, WEEK_HEIGHT);
-            let (days, goal) = (days.clone(), *goal);
+            let week = Rc::new(RefCell::new((days.clone(), *goal)));
+            let drawing = week.clone();
             area.connect_draw(move |area, cr| {
                 // The colour is read here, off the row that is really on
                 // screen, and handed down — so the drawing itself is numbers
                 // and a colour, and can be checked without a widget.
                 let ink = area.style_context().color(gtk::StateFlags::NORMAL);
+                let (days, goal) = &*drawing.borrow();
                 draw_week(
-                    &days,
-                    goal,
+                    days,
+                    *goal,
                     ink,
                     cr,
                     area.allocated_width() as f64,
@@ -501,9 +715,85 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> gtk::MenuItem {
             // so the arrows go straight from the heading to the first thing
             // that does something.
             row.set_sensitive(false);
-            row
+            let update: Update = Box::new(move |row| {
+                if let Row::Week { days, goal } = row {
+                    *week.borrow_mut() = (days.clone(), *goal);
+                    area.queue_draw();
+                }
+            });
+            (row, Some(update))
         }
     }
+}
+
+/// A control that does its thing and leaves the panel where it was.
+///
+/// # Why this is decided here and not per widget
+///
+/// #28 left it open: a `GtkMenuItem` takes its menu down when it is chosen,
+/// so drinking from the water panel closed the panel and the week you were
+/// looking at was gone before it could grow. Play and pause in the music
+/// panel did the same. The decision is the chassis's, and it is that a panel
+/// survives its controls — they are things you do *in* it, often several in
+/// a row (two bottles, next and next), and `Esc` or a click outside is
+/// already how a panel is put away.
+///
+/// Not by a property: `GtkMenuShell` takes the menu down on a release and on
+/// `Return` whatever the item says about it. So both are taken before the
+/// shell sees them, and the item is activated by hand — which is the same
+/// `activate` the shell would have emitted, without the dismissal it adds.
+fn stays_up(menu: &gtk::Menu, control: &gtk::MenuItem) {
+    // Only a release that this item saw the press of. The click that opened
+    // the panel releases somewhere too, and a panel that went up under the
+    // pointer must not take that release for a choice.
+    let pressed = Rc::new(std::cell::Cell::new(false));
+    let pressing = pressed.clone();
+    control.connect_button_press_event(move |_, _| {
+        pressing.set(true);
+        glib::Propagation::Proceed
+    });
+    control.connect_leave_notify_event({
+        let pressed = pressed.clone();
+        move |_, _| {
+            pressed.set(false);
+            glib::Propagation::Proceed
+        }
+    });
+    control.connect_button_release_event(move |control, _| {
+        if !pressed.replace(false) {
+            return glib::Propagation::Proceed;
+        }
+        control.activate();
+        glib::Propagation::Stop
+    });
+
+    // The keyboard's way of choosing it. Weak, because the handler is on the
+    // menu and outlives the row: a panel filled again has new controls, and
+    // the old ones' handlers must neither keep them alive nor answer for
+    // them.
+    let weak = control.downgrade();
+    menu.connect_key_press_event(move |menu, event| {
+        let Some(control) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if !chooses(event.keyval()) || menu.selected_item().as_ref() != Some(control.upcast_ref()) {
+            return glib::Propagation::Proceed;
+        }
+        control.activate();
+        glib::Propagation::Stop
+    });
+}
+
+/// The keys a menu reads as "choose the selected item".
+fn chooses(key: gdk::keys::Key) -> bool {
+    matches!(
+        key,
+        gdk::keys::constants::Return
+            | gdk::keys::constants::KP_Enter
+            | gdk::keys::constants::ISO_Enter
+            | gdk::keys::constants::space
+            | gdk::keys::constants::KP_Space
+    )
 }
 
 /// A row you type into.
@@ -752,12 +1042,8 @@ fn reopen(menu: &gtk::Menu, show: &Show, opened: Instant) {
         if !menu.is_visible() {
             return;
         }
+        once_let_go(&menu, &show);
         menu.popdown();
-        // Up again on the next turn, not this one: the one just dismissed is
-        // still handing back its grab, and a popup into that is swallowed.
-        let menu = menu.clone();
-        let show = show.clone();
-        glib::idle_add_local_once(move || show(&menu));
     };
 
     let waited = opened.elapsed();
@@ -766,6 +1052,55 @@ fn reopen(menu: &gtk::Menu, show: &Show, opened: Instant) {
     } else {
         glib::timeout_add_local_once(SETTLED - waited, swap);
     }
+}
+
+/// How long a panel being reopened waits for its old grab to be let go of
+/// before it goes up regardless.
+const LET_GO: Duration = Duration::from_millis(300);
+
+/// Show the panel again once the grab it is about to give up has been reported
+/// gone, for the pointer and for the keyboard both.
+///
+/// A panel comes back in the same window it went down from, and GDK reports
+/// the end of the old grab as a grab-broken event on that window — one per
+/// device, each when that device next says something, which is a round trip
+/// later and not a turn of the loop later. A panel already back up takes the
+/// late one as its own grab breaking and closes itself: the panel came back
+/// and was gone again in the same breath, on every first open. So it waits
+/// for both; and for no longer than [`LET_GO`], so that a report that never
+/// comes costs a moment and not the panel.
+fn once_let_go(menu: &gtk::Menu, show: &Show) {
+    let shown = Rc::new(Cell::new(false));
+    let listening: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::default();
+    let go = {
+        let (menu, show, listening) = (menu.clone(), show.clone(), listening.clone());
+        move || {
+            if let Some(handler) = listening.borrow_mut().take() {
+                menu.disconnect(handler);
+            }
+            if !shown.replace(true) {
+                show(&menu);
+            }
+        }
+    };
+
+    let (pointer, keyboard) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+    let soon = go.clone();
+    let handler = menu.connect_grab_broken_event(move |_, broken| {
+        if broken.is_keyboard() {
+            keyboard.set(true);
+        } else {
+            pointer.set(true);
+        }
+        if pointer.get() && keyboard.get() {
+            // After this event is done with, not inside it.
+            glib::idle_add_local_once(soon.clone());
+        }
+        // The menu's own handler still has to hear the grab it held is gone.
+        glib::Propagation::Proceed
+    });
+    listening.replace(Some(handler));
+    glib::timeout_add_local_once(LET_GO, go);
 }
 
 #[cfg(test)]
@@ -816,6 +1151,35 @@ pub mod tests {
             }
             gtk::main_iteration_do(false);
         }
+    }
+
+    /// Let GTK and the X server both get on with it, for as long as a panel
+    /// taken down to be resized may take to come back — which waits on the
+    /// server, so a turn of the loop is not enough.
+    fn settle_past_a_reopen() {
+        let until = Instant::now() + LET_GO * 2;
+        while Instant::now() < until {
+            settle();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The shape these rows leave behind once a panel has held them — what
+    /// every open after the first is opened at.
+    fn opened_before(rows: &[Row]) -> Shape {
+        let panels = Remembered::default();
+        let window = a_window();
+        let (show, _) = against(&window);
+        let panel = opening(panels.of("water"));
+        show(&panel);
+        settle();
+        fill(&panel, "water", rows, &asks_nothing(), &show, Instant::now() - SETTLED);
+        settle_past_a_reopen();
+        panels.note("water", &panel);
+        panel.popdown();
+        window.close();
+        settle();
+        panels.of("water")
     }
 
     /// Somewhere for a panel to hang off, standing in for the tile.
@@ -1235,7 +1599,7 @@ pub mod tests {
     /// Closing a panel that was only read must not write anything: opening a
     /// note to look at it would otherwise touch the config every time.
     pub fn reading_a_note_and_closing_writes_nothing() {
-        let panel = opening(1);
+        let panel = opening(Shape { rows: 1, size: None });
         let window = a_window();
         let (show, _) = against(&window);
         let typed = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -1246,7 +1610,6 @@ pub mod tests {
 
         fill(
             &panel,
-            1,
             "note",
             &[Row::Text { value: "call the dentist".to_string() }],
             &Asks { invoke: invokes_nothing(), write, choose: chooses_nothing() },
@@ -1281,7 +1644,7 @@ pub mod tests {
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_panel_closes_on_escape_and_holds_the_grab_that_dismisses_it() {
         let rows = rows_for(&water(3, 8));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, _) = against(&window);
         show(&panel);
@@ -1321,7 +1684,7 @@ pub mod tests {
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_panel_opens_before_the_daemon_has_answered() {
         let rows = rows_for(&water(3, 8));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, _) = against(&window);
         show(&panel);
@@ -1336,7 +1699,6 @@ pub mod tests {
 
         fill(
             &panel,
-            rows.len(),
             "water",
             &rows,
             &asks_nothing(),
@@ -1367,7 +1729,7 @@ pub mod tests {
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_panel_opened_at_the_shape_it_turns_out_to_have_does_not_move() {
         let rows = rows_for(&water(3, 8));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, shown) = against(&window);
         show(&panel);
@@ -1376,7 +1738,6 @@ pub mod tests {
 
         fill(
             &panel,
-            rows.len(),
             "water",
             &rows,
             &asks_nothing(),
@@ -1405,17 +1766,16 @@ pub mod tests {
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_panel_larger_than_it_opened_for_is_still_shown_whole() {
-        let panel = opening(UNKNOWN);
+        let panel = opening(Shape::default());
         let window = a_window();
         let (show, shown) = against(&window);
         show(&panel);
         settle();
 
         let rows = rows_for(&water(3, 8));
-        assert_ne!(rows.len(), UNKNOWN, "this test needs a wrong guess");
+        assert_ne!(rows.len(), Shape::default().rows, "this test needs a wrong guess");
         fill(
             &panel,
-            UNKNOWN,
             "water",
             &rows,
             &asks_nothing(),
@@ -1424,6 +1784,7 @@ pub mod tests {
         );
         settle();
 
+        settle_past_a_reopen();
         assert_eq!(shown.get(), 2, "the panel never came back at its new size");
         let (_, natural) = panel.preferred_size();
         let (width, height) = window_of(&panel);
@@ -1439,18 +1800,125 @@ pub mod tests {
         settle();
     }
 
+    /// Where a panel's window is on the screen: left, top, width, height.
+    fn placed(menu: &gtk::Menu) -> (i32, i32, i32, i32) {
+        let top = menu.toplevel().expect("a panel that is up has a window");
+        let (_, x, y) = top.window().expect("and the window is real").origin();
+        let (width, height) = window_of(menu);
+        (x, y, width, height)
+    }
+
+    /// A panel hangs from the top of the tile that asked: above it, never
+    /// over it.
+    ///
+    /// The tile is an `EventBox` partway down its window, as on the bar —
+    /// a tile at the window's corner would hide an offset counted twice.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_panel_hangs_above_the_tile_that_asked() {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.move_(100, 400);
+        let tile = gtk::EventBox::new();
+        tile.set_size_request(120, 50);
+        tile.set_margin_top(40);
+        tile.set_margin_start(200);
+        tile.set_halign(gtk::Align::Start);
+        tile.set_valign(gtk::Align::Start);
+        window.add(&tile);
+        window.show_all();
+        settle();
+
+        // Until the window manager has put the window where it goes: before
+        // then the window's origin is still the corner it was created in.
+        settle_past_a_reopen();
+
+        let tile: gtk::Widget = tile.upcast();
+        let panel = opening(Shape::default());
+        above(&tile)(&panel);
+        settle();
+
+        let (_, left, top) = window.window().expect("a window that is up is real").origin();
+        let (x, y) = tile.translate_coordinates(&window, 0, 0).expect("the tile is in the window");
+        let (tile_left, tile_top) = (left + x, top + y);
+
+        let (panel_left, panel_top, _, height) = placed(&panel);
+        assert_eq!(
+            (panel_left, panel_top + height),
+            (tile_left, tile_top),
+            "the panel's bottom-left corner is not on the tile's top-left one"
+        );
+        panel.popdown();
+        window.close();
+        settle();
+    }
+
+    /// The second open of a panel is shown whole too, not only the first —
+    /// a remembered panel is opened before its rows are in, and rows that
+    /// are only waiting are not as tall as the week they stand in for.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_panel_opened_again_is_shown_whole() {
+        let panels = Remembered::default();
+        let window = a_window();
+        let (show, _) = against(&window);
+        let rows = rows_for(&water(3, 8));
+
+        for open in ["first", "second"] {
+            let panel = opening(panels.of("water"));
+            show(&panel);
+            settle();
+            fill(&panel, "water", &rows, &asks_nothing(), &show, Instant::now() - SETTLED);
+            panels.note("water", &panel);
+            settle_past_a_reopen();
+
+            let (_, natural) = panel.preferred_size();
+            let (width, height) = window_of(&panel);
+            assert!(
+                panel.is_visible() && width >= natural.width && height >= natural.height,
+                "the {open} open is {width}x{height} for {}x{} of rows: the \
+                 rest is behind a scroll arrow",
+                natural.width,
+                natural.height
+            );
+            panel.popdown();
+            settle();
+        }
+        window.close();
+        settle();
+    }
+
     /// A panel opened before is opened at the size it was, which is what
     /// keeps the common case from blinking.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_panel_opened_before_is_drawn_at_the_size_it_was() {
         let panels = Remembered::default();
+        assert_eq!(
+            panels.of("water"),
+            Shape::default(),
+            "a panel nobody opened has no size to use"
+        );
 
-        assert_eq!(panels.of("water"), UNKNOWN, "a panel nobody opened has no size to use");
-        panels.note("water", rows_for(&water(3, 8)).len());
+        let rows = rows_for(&water(3, 8));
+        let window = a_window();
+        let (show, _) = against(&window);
+        let panel = opening(panels.of("water"));
+        show(&panel);
+        settle();
+        fill(&panel, "water", &rows, &asks_nothing(), &show, Instant::now() - SETTLED);
+        settle_past_a_reopen();
+        panels.note("water", &panel);
+        let (_, natural) = panel.preferred_size();
+        panel.popdown();
+        window.close();
+        settle();
 
-        // A heading, the week, and the three controls water declares.
-        assert_eq!(panels.of("water"), 5);
+        // A heading, the week, and the three controls water declares — and
+        // the room they took, which is not five lines.
+        assert_eq!(
+            panels.of("water"),
+            Shape { rows: 5, size: Some((natural.width, natural.height)) }
+        );
         assert_eq!(
             opening(panels.of("water")).children().len(),
             5,
@@ -1469,14 +1937,13 @@ pub mod tests {
         });
 
         let rows = rows_for(&water(1, 8));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, _) = against(&window);
         show(&panel);
         settle();
         fill(
             &panel,
-            rows.len(),
             "water",
             &rows,
             &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
@@ -1509,6 +1976,194 @@ pub mod tests {
         settle();
     }
 
+    /// A key press as the menu would get it through its grab.
+    ///
+    /// Built by hand rather than posted: under a grab a posted key arrives
+    /// nowhere (see the Escape test). What the menu's bindings look up is the
+    /// *hardware* keycode, so that is taken from the keymap, not made up.
+    fn a_key(menu: &gtk::Menu, key: gdk::keys::Key) -> gdk::Event {
+        use glib::translate::{IntoGlib, ToGlibPtr, ToGlibPtrMut};
+        let window = menu
+            .toplevel()
+            .and_then(|top| top.window())
+            .expect("a panel that is up has a window");
+        let keycode = gdk::Keymap::for_display(&window.display())
+            .and_then(|keymap| keymap.entries_for_keyval(*key).first().map(|entry| entry.keycode()))
+            .expect("the keymap has no key for this");
+        let mut event = gdk::Event::new(gdk::EventType::KeyPress);
+        // SAFETY: a KeyPress event is a GdkEventKey; the window reference
+        // handed over is the one `gdk_event_free` gives back.
+        unsafe {
+            let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+            let raw = raw as *mut gdk::ffi::GdkEventKey;
+            (*raw).window = window.to_glib_full();
+            (*raw).send_event = 1;
+            (*raw).keyval = key.into_glib();
+            (*raw).hardware_keycode = keycode as u16;
+        }
+        event
+    }
+
+    /// A click as a row would get it, pressed or released.
+    fn a_click(menu: &gtk::Menu, kind: gdk::EventType) -> gdk::Event {
+        use glib::translate::{ToGlibPtr, ToGlibPtrMut};
+        let window = menu
+            .toplevel()
+            .and_then(|top| top.window())
+            .expect("a panel that is up has a window");
+        let mut event = gdk::Event::new(kind);
+        // SAFETY: a button event is a GdkEventButton; the window reference
+        // handed over is the one `gdk_event_free` gives back.
+        unsafe {
+            let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+            let raw = raw as *mut gdk::ffi::GdkEventButton;
+            (*raw).window = window.to_glib_full();
+            (*raw).send_event = 1;
+            (*raw).button = 1;
+        }
+        event
+    }
+
+    /// The water panel, up and filled, with what its controls asked for.
+    fn a_water_panel(
+        drunk: u32,
+    ) -> (gtk::Menu, gtk::Window, Live, Rc<RefCell<Vec<String>>>) {
+        let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+        let telling = asked.clone();
+        let invoke: Invoke = Rc::new(move |_: &str, action: &str| {
+            telling.borrow_mut().push(action.to_string());
+        });
+        let rows = rows_for(&water(drunk, 2000));
+        let panel = opening(opened_before(&rows));
+        let window = a_window();
+        let (show, _) = against(&window);
+        show(&panel);
+        settle();
+        let live = fill(
+            &panel,
+            "water",
+            &rows,
+            &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
+            &show,
+            Instant::now() - SETTLED,
+        );
+        settle();
+        (panel, window, live, asked)
+    }
+
+    fn first_control(panel: &gtk::Menu) -> gtk::MenuItem {
+        panel
+            .children()
+            .into_iter()
+            .find(|row| row.is_sensitive())
+            .and_then(|row| row.downcast::<gtk::MenuItem>().ok())
+            .expect("the panel has no controls")
+    }
+
+    /// The decision #28 left to the chassis: a control does its thing and the
+    /// panel stays, so drinking shows the week growing instead of taking it
+    /// away.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn choosing_a_control_leaves_the_panel_up() {
+        let (panel, window, _, asked) = a_water_panel(500);
+        let drink = first_control(&panel);
+
+        // By the keyboard: Return is what `GtkMenuShell` binds to "activate
+        // and take the menu down", whatever the item says about it.
+        panel.select_item(&drink);
+        settle();
+        panel.event(&a_key(&panel, gdk::keys::constants::Return));
+        settle();
+        assert_eq!(*asked.borrow(), vec!["drink"], "Return did not choose the control");
+        assert!(panel.is_visible(), "choosing a control by Return took the panel down");
+
+        // And by the pointer: a press and its release, on the row.
+        drink.event(&a_click(&panel, gdk::EventType::ButtonPress));
+        let taken = drink.event(&a_click(&panel, gdk::EventType::ButtonRelease));
+        settle();
+        assert!(taken, "the release went on to the menu, which takes the panel down");
+        assert_eq!(*asked.borrow(), vec!["drink", "drink"], "the click did not choose it");
+        assert!(panel.is_visible(), "choosing a control by clicking took the panel down");
+
+        panel.popdown();
+        window.close();
+        settle();
+    }
+
+    /// The click that opened the panel releases somewhere, and if the panel
+    /// went up under the pointer that is on a control. It is not a choice.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn the_release_of_the_click_that_opened_a_panel_chooses_nothing() {
+        let (panel, window, _, asked) = a_water_panel(500);
+        let drink = first_control(&panel);
+
+        let taken = drink.event(&a_click(&panel, gdk::EventType::ButtonRelease));
+        settle();
+        assert!(!taken, "a release with no press was kept from the menu");
+        assert!(asked.borrow().is_empty(), "a release nobody pressed chose {:?}", asked.borrow());
+
+        panel.popdown();
+        window.close();
+        settle();
+    }
+
+    /// The panel shows what a control did, in place: the very rows that were
+    /// there, saying something newer.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_panel_that_is_up_takes_the_widgets_news_in_place() {
+        let (panel, window, live, _) = a_water_panel(500);
+        let before = panel.children();
+        let drink = first_control(&panel);
+        panel.select_item(&drink);
+
+        assert!(
+            live.refresh(&rows_for(&water(1000, 2000))),
+            "a newer state of the same widget could not be shown in place"
+        );
+        settle();
+
+        assert_eq!(panel.children(), before, "the rows were remade, not updated");
+        assert_eq!(
+            panel.selected_item().as_ref(),
+            Some(drink.upcast_ref::<gtk::Widget>()),
+            "the keyboard lost its place to the update"
+        );
+        let heading = format!("{:?}", texts_in(before[0].clone()));
+        assert!(heading.contains("1000 of 2000 ml"), "the heading still says {heading}");
+
+        panel.popdown();
+        window.close();
+        settle();
+    }
+
+    /// Every label's text under a widget, in order.
+    fn texts_in(widget: gtk::Widget) -> Vec<String> {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            return vec![label.text().to_string()];
+        }
+        match widget.downcast::<gtk::Container>() {
+            Ok(container) => container.children().into_iter().flat_map(texts_in).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Rows of another shape are not forced into the ones on screen.
+    #[test]
+    fn a_panel_of_another_shape_is_not_refreshed_in_place() {
+        let live = Live(Rc::new(RefCell::new(Filled {
+            rows: rows_for(&water(500, 2000)),
+            updates: Vec::new(),
+        })));
+        assert!(!live.refresh(&rows_for(&clock())), "a clock's rows were poured into a water panel");
+        assert!(
+            live.refresh(&rows_for(&water(750, 2000))),
+            "the same widget's next state was refused"
+        );
+    }
+
     /// Picking a view in the usage panel writes the mode, as the preferences
     /// window would; picking the one already showing writes nothing.
     ///
@@ -1521,14 +2176,13 @@ pub mod tests {
         });
 
         let rows = rows_for(&usage("five-hours", "20:30"));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, _) = against(&window);
         show(&panel);
         settle();
         fill(
             &panel,
-            rows.len(),
             "claude",
             &rows,
             &Asks { invoke: invokes_nothing(), write: writes_nothing(), choose },
@@ -1565,12 +2219,12 @@ pub mod tests {
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn the_keyboard_walks_the_controls_and_skips_the_heading() {
         let rows = rows_for(&water(1, 8));
-        let panel = opening(rows.len());
+        let panel = opening(opened_before(&rows));
         let window = a_window();
         let (show, _) = against(&window);
         show(&panel);
         settle();
-        fill(&panel, rows.len(), "water", &rows, &asks_nothing(), &show, Instant::now() - SETTLED);
+        fill(&panel, "water", &rows, &asks_nothing(), &show, Instant::now() - SETTLED);
         settle();
 
         panel.select_first(true);

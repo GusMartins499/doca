@@ -181,9 +181,17 @@ impl Hide {
 
     /// Where the bar is this instant, part-way through a slide or at rest.
     fn y(&self) -> i32 {
+        self.y_at(Instant::now())
+    }
+
+    /// Where the bar is at `now`. The clock is an argument so the slide can
+    /// be walked a frame at a time without a window or a main loop — which
+    /// is the only way to check a reversal frame by frame.
+    fn y_at(&self, now: Instant) -> i32 {
         let shown_y = self.shown_y.get();
         let hidden = motion::hidden_y(shown_y, self.height.get());
-        let progress = motion::slide_progress(self.since.get().elapsed(), self.shown.get());
+        let elapsed = now.saturating_duration_since(self.since.get());
+        let progress = motion::slide_progress(elapsed, self.shown.get());
         motion::slide_y(progress, shown_y, hidden)
     }
 
@@ -266,13 +274,21 @@ impl Hide {
     /// this did — left the pointer inside a bar that stayed hidden until the
     /// mouse moved again.
     fn slide(&self, window: &gtk::Window, to_shown: bool) {
-        if !self.enabled.get() || self.shown.replace(to_shown) == to_shown {
-            return;
+        if self.turn(to_shown, Instant::now()) {
+            self.run(window);
         }
-        let elapsed = self.since.get().elapsed();
+    }
+
+    /// Point the slide the other way at `now`, from where it is. `false` when
+    /// there was nothing to turn: auto-hide off, or already going that way.
+    fn turn(&self, to_shown: bool, now: Instant) -> bool {
+        if !self.enabled.get() || self.shown.replace(to_shown) == to_shown {
+            return false;
+        }
+        let elapsed = now.saturating_duration_since(self.since.get());
         self.since
-            .set(Instant::now() - motion::reversed_start(elapsed, motion::SLIDE));
-        self.run(window);
+            .set(now - motion::reversed_start(elapsed, motion::SLIDE));
+        true
     }
 
     /// Draw the slide on the compositor's clock, and stop once it has arrived.
@@ -356,6 +372,8 @@ async fn drive(
         label,
         themes: appearance::Themes::capture(),
         panels: panel::Remembered::default(),
+        showing: panel::Showing::default(),
+        settling: Rc::new(RefCell::new(None)),
     };
 
     // A theme switched in GNOME Tweaks arrives as a GtkSettings notification,
@@ -418,6 +436,10 @@ async fn drive(
                 if let Some(signal) = signal {
                     if let Ok(args) = signal.args() {
                         tiles.update(&args.state);
+                        // And the panel, when it is this widget's that is
+                        // up: a panel outlives its controls, so it has to
+                        // show what they did.
+                        chrome.showing.update(&args.state);
                     }
                 }
                 continue;
@@ -600,6 +622,12 @@ struct Chrome {
     /// How big each widget's panel was the last time it was opened, so the
     /// next open does not blink — see `panel::Remembered`.
     panels: panel::Remembered,
+    /// The panel that is up, so a widget's news reaches it as well as the
+    /// tile.
+    showing: panel::Showing,
+    /// The bar's second seating, once what a rebuild set moving has stopped.
+    /// One at a time: a rebuild that lands mid-change starts the wait over.
+    settling: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl Style {
@@ -678,6 +706,7 @@ fn expanding(
     window: gtk::Window,
     proxy: Rc<DocaProxy<'static>>,
     panels: panel::Remembered,
+    showing: panel::Showing,
     hide: Hide,
 ) -> widget_tile::Expand {
     let invoke: panel::Invoke = {
@@ -738,22 +767,13 @@ fn expanding(
     let asks = panel::Asks { invoke, write, choose };
 
     Rc::new(move |id: &str, over: &gtk::Widget| {
-        let expected = panels.of(id);
-        let menu = panel::opening(expected);
+        let menu = panel::opening(panels.of(id));
         hide.holds_for(&window, &menu);
 
         // Over the tile that asked, and the same way every time it is
         // reopened — including the reopen `panel::fill` does when the panel
         // turns out to be a different shape than it was opened for.
-        let anchor = over.clone();
-        let show: panel::Show = Rc::new(move |menu: &gtk::Menu| {
-            menu.popup_at_widget(
-                &anchor,
-                gdk::Gravity::NorthWest,
-                gdk::Gravity::SouthWest,
-                None,
-            );
-        });
+        let show = panel::above(over);
         show(&menu);
         let opened = std::time::Instant::now();
 
@@ -767,13 +787,50 @@ fn expanding(
         // and none when the menu closes either, so a bar that auto-hides
         // would sit there shown for ever. Asking again on close is what makes
         // auto-hide work after a panel rather than only before one.
+        //
+        // On the menu being closed, not on it being hidden: a panel that
+        // turns out to be a different shape is taken down and put up again
+        // by `panel::fill`, and that is a hide too — one after which the bar
+        // slid away from under the panel still on it, and the panel stopped
+        // hearing the widget's news. Escape, a click elsewhere and a lost
+        // grab all close a menu by deactivating it; taking it down from code
+        // does not.
         let closing = hide.clone();
         let dock = window.clone();
         let back_to = over.clone();
-        menu.connect_hide(move |_| {
+        let going = showing.clone();
+        let gone = id.to_string();
+        menu.connect_deactivate(move |_| {
+            going.gone(&gone);
             back_to.grab_focus();
             closing.slide(&dock, pointer_is_over(&dock));
         });
+
+        // What the rows are once they are in. None until the daemon has
+        // answered: news that arrives before then is already in the answer
+        // the panel is waiting for.
+        let live: Rc<RefCell<Option<panel::Live>>> = Rc::default();
+        {
+            let (menu, live, asks, show, panels) =
+                (menu.clone(), live.clone(), asks.clone(), show.clone(), panels.clone());
+            let widget = id.to_string();
+            showing.now(
+                id,
+                Rc::new(move |state: &doca_ipc::WidgetState| {
+                    let Some(current) = live.borrow().clone() else { return };
+                    let rows = panel::rows_for(state);
+                    if current.refresh(&rows) {
+                        return;
+                    }
+                    // A different shape — a cover that arrived — is drawn
+                    // again, which may move the panel; that is the price of a
+                    // row that was not there.
+                    let refilled = panel::fill(&menu, &widget, &rows, &asks, &show, opened);
+                    panels.note(&widget, &menu);
+                    live.replace(Some(refilled));
+                }),
+            );
+        }
 
         let filling = menu.clone();
         let proxy = proxy.clone();
@@ -796,8 +853,9 @@ fn expanding(
                     Vec::new()
                 }
             };
-            panels.note(&id, rows.len().max(1));
-            panel::fill(&filling, expected, &id, &rows, &asks, &show, opened);
+            let filled = panel::fill(&filling, &id, &rows, &asks, &show, opened);
+            panels.note(&id, &filling);
+            live.replace(Some(filled));
         });
     })
 }
@@ -836,6 +894,8 @@ async fn rebuild(
         label,
         themes,
         panels,
+        showing,
+        settling,
     } = chrome;
     let appearance = proxy.appearance().await.ok();
     if let Some(appearance) = &appearance {
@@ -971,7 +1031,13 @@ async fn rebuild(
     // The dock may have changed under a pointer that never moved.
     name_what_is_hovered(row, label);
 
-    let expand = expanding(window.clone(), proxy.clone(), panels.clone(), hide.clone());
+    let expand = expanding(
+        window.clone(),
+        proxy.clone(),
+        panels.clone(),
+        showing.clone(),
+        hide.clone(),
+    );
     tiles.show(
         items,
         &widgets,
@@ -1003,6 +1069,55 @@ async fn rebuild(
     // tile had hidden for having no progress to report.
     tiles.refresh(&widgets);
 
+    let width = seat(window, bar, screen, row, &tiles, hide, auto_hide);
+
+    // A dock switched for another, or an app opened or closed, is still
+    // moving when the rebuild is over: the bar was seated wide enough for
+    // the whole of the change, and is seated again at its own size once the
+    // change is done. Shrinking the window then trims air: it is centred,
+    // and so is the bar in it, so nothing the eye is following moves. The
+    // one exception is an X server with no compositor, which shows a window
+    // at its new place a frame before GTK has drawn it there — the same
+    // frame every rebuild that changed the bar's width has always cost, now
+    // paid once after the movement instead of in the middle of it.
+    if let Some(waiting) = settling.replace(None) {
+        waiting.remove();
+    }
+    if row.changing() || tiles.changing() {
+        let (window, bar, screen) = (window.clone(), bar.clone(), *screen);
+        let (row, tiles, hide) = (row.clone(), tiles.clone(), hide.clone());
+        let clearing = settling.clone();
+        let waiting = glib::timeout_add_local_once(motion::ENTRY, move || {
+            clearing.replace(None);
+            row.settle();
+            tiles.settle();
+            seat(&window, &bar, &screen, &row, &tiles, &hide, auto_hide);
+        });
+        settling.replace(Some(waiting));
+    }
+
+    tracing::debug!(items = entries.len(), width, "rebuilt");
+}
+
+/// Size the window to what is on the bar, put it on the screen, and reserve
+/// the edge it stands on. Answers with the width the bar was given.
+///
+/// Measured rather than worked out, and measured at the widest the bar will
+/// be before what is changing on it has finished: an icon arriving eases out
+/// while one leaving eases in, so halfway through a dock switch the two
+/// together take more room than either dock does. A window narrower than
+/// that is one the bar outgrows mid-switch, and a window that grows under a
+/// bar it was centred for pushes the bar off centre — a jump made by the
+/// thing meant to stop them.
+fn seat(
+    window: &gtk::Window,
+    bar: &gtk::Box,
+    screen: &gdk::Rectangle,
+    row: &row::Row,
+    tiles: &Tiles,
+    hide: &Hide,
+    auto_hide: bool,
+) -> i32 {
     // The bar is as wide as its contents ask; the window is that plus the room
     // a magnified icon rises into and spreads into, which the bar is never
     // *laid out* over. Keeping that room out of the layout is what makes the
@@ -1011,21 +1126,28 @@ async fn rebuild(
     // matter and `ground.rs`'s.
     let margin = row.margin();
     let natural = dock::natural_size(bar);
+    let widest = (natural.0 + row.unfolding() + tiles.unfolding(), natural.1);
     let (width, bar_height) = dock::clamp_to_screen(
-        natural,
+        widest,
         (screen.width() - margin * 2, screen.height()),
     );
     let height = bar_height + row.overhead();
-    if (width, bar_height) != natural {
+    if (width, bar_height) != widest {
         tracing::warn!(
-            natural_width = natural.0,
-            natural_height = natural.1,
+            natural_width = widest.0,
+            natural_height = widest.1,
             width,
             bar_height,
             "bar clamped to the screen"
         );
     }
-    bar.set_size_request(width, -1);
+    // Pinned only once nothing on it is moving. A bar held at the width it
+    // was seated at would hold that width for the whole of a change — the
+    // room an app gave up kept until the end and then let go of in a frame,
+    // which is the jump the row now goes out of its way not to make.
+    if !row.changing() && !tiles.changing() {
+        bar.set_size_request(width, -1);
+    }
     let window_width = width + margin * 2;
     window.set_size_request(window_width, height);
     window.resize(window_width, height);
@@ -1036,11 +1158,11 @@ async fn rebuild(
 
     let Some(gdk_window) = window.window() else {
         tracing::warn!("window is not realised yet, strut skipped");
-        return;
+        return width;
     };
     let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() else {
         tracing::warn!("not an X11 window, strut skipped");
-        return;
+        return width;
     };
     // Only the bar takes the screen edge. The room above it is air a magnified
     // icon passes through, and the room either side of it is air one spreads
@@ -1057,8 +1179,146 @@ async fn rebuild(
         Ok(()) => tracing::info!(xid, height, x, width, "strut applied"),
         Err(e) => tracing::error!("strut failed: {e:#}"),
     }
+    width
+}
 
-    tracing::debug!(items = entries.len(), width, "rebuilt");
+/// The bar's own slide, walked a frame at a time on a clock the test holds.
+///
+/// `motion` already checks that a reversal lands where the slide was, at the
+/// instant it turns. What it cannot check is the bar: that `Hide` asks the
+/// curve the right question, at the right time, from the right start — a
+/// `since` set a frame late, or from `Instant::now()` where it meant the
+/// moment of turning, lands nowhere near where the curve says.
+#[cfg(test)]
+mod slide_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const SHOWN_Y: i32 = 900;
+    const HEIGHT: i32 = 84;
+
+    /// A bar on auto-hide, at rest where `shown` says, and told at `at` to
+    /// go the other way.
+    fn sent(shown: bool, at: Instant) -> Hide {
+        let hide = Hide::default();
+        hide.enabled.set(true);
+        hide.shown_y.set(SHOWN_Y);
+        hide.height.set(HEIGHT);
+        hide.shown.set(shown);
+        hide.since.set(at - motion::SLIDE);
+        assert!(hide.turn(!shown, at), "the bar would not move");
+        hide
+    }
+
+    /// The furthest an ordinary slide travels between two frames, either way.
+    ///
+    /// The yardstick and not a constant: the curve is fastest at the end
+    /// nearest the screen edge, and a turn is allowed whatever a frame of
+    /// that already costs — but not one pixel more.
+    fn an_ordinary_frame() -> i32 {
+        let start = Instant::now();
+        [true, false]
+            .into_iter()
+            .map(|shown| {
+                let hide = sent(shown, start);
+                (1..=motion::SLIDE.as_millis() as u32 / motion::FRAME.as_millis() as u32 + 1)
+                    .map(|frame| {
+                        let before = hide.y_at(start + motion::FRAME * (frame - 1));
+                        let after = hide.y_at(start + motion::FRAME * frame);
+                        (after - before).abs()
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Walk a slide that turns at each of `turns`, one frame at a time, and
+    /// answer with the largest step between two frames and where it ended.
+    fn walk(shown: bool, turns: &[Duration]) -> (i32, i32) {
+        let start = Instant::now();
+        let hide = sent(shown, start);
+        let mut going = !shown;
+        let mut turns = turns.iter().map(|after| start + *after).peekable();
+        let last = turns.clone().last().unwrap_or(start);
+        let mut now = start;
+        let mut at = hide.y_at(now);
+        let mut widest = 0;
+        while now < last + motion::SLIDE * 2 {
+            let next = now + motion::FRAME;
+            // A turn lands between two frames, on the clock the pointer
+            // keeps rather than the one the compositor does.
+            while let Some(turn) = turns.next_if(|turn| *turn <= next) {
+                going = !going;
+                assert!(hide.turn(going, turn), "the turn was refused");
+            }
+            let then = hide.y_at(next);
+            widest = widest.max((then - at).abs());
+            at = then;
+            now = next;
+        }
+        (widest, at)
+    }
+
+    /// The case P0.1 was opened about: the pointer comes back while the bar
+    /// is on its way down, at any moment of the way.
+    #[test]
+    fn turning_the_bar_round_mid_slide_never_jumps_further_than_a_frame_does() {
+        let ordinary = an_ordinary_frame();
+        let hidden = motion::hidden_y(SHOWN_Y, HEIGHT);
+        for shown in [true, false] {
+            for ms in 0..=motion::SLIDE.as_millis() as u64 {
+                let (widest, ended) = walk(shown, &[Duration::from_millis(ms)]);
+                assert!(
+                    widest <= ordinary,
+                    "turning round {ms}ms into a slide jumped {widest}px, where a frame moves {ordinary}px"
+                );
+                assert_eq!(
+                    ended,
+                    if shown { SHOWN_Y } else { hidden },
+                    "turned round at {ms}ms, the bar never got back"
+                );
+            }
+        }
+    }
+
+    /// A hand that cannot make up its mind: down, up, down again inside one
+    /// slide's worth of time. Every turn starts from where the last one had
+    /// got to, so no turn may cost more than a frame either.
+    #[test]
+    fn turning_round_again_and_again_never_jumps_either() {
+        let ordinary = an_ordinary_frame();
+        for first in (0..=motion::SLIDE.as_millis() as u64).step_by(7) {
+            for gap in (5..=motion::SLIDE.as_millis() as u64).step_by(11) {
+                let turns = [
+                    Duration::from_millis(first),
+                    Duration::from_millis(first + gap),
+                    Duration::from_millis(first + gap * 2),
+                ];
+                let (widest, ended) = walk(true, &turns);
+                assert!(
+                    widest <= ordinary,
+                    "turns at {turns:?} jumped {widest}px, where a frame moves {ordinary}px"
+                );
+                // Down, then up, down and up again: it ends where the
+                // pointer last asked for it, on screen.
+                assert_eq!(ended, SHOWN_Y, "after three turns the bar was not where it was sent");
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_of_slide_is_a_real_distance_and_not_the_whole_way() {
+        let ordinary = an_ordinary_frame();
+        let travel = motion::hidden_y(SHOWN_Y, HEIGHT) - SHOWN_Y;
+
+        assert!(ordinary > 0, "the yardstick measured a bar that never moved");
+        assert!(
+            ordinary < travel / 2,
+            "a frame covers {ordinary}px of {travel}: the yardstick would excuse a jump"
+        );
+    }
 }
 
 /// The checks that need a real X display, run in the order GTK demands.
@@ -1095,6 +1355,7 @@ fn on_a_display() {
     row::tests::an_app_that_closed_keeps_its_place_until_it_has_finished_going();
     row::tests::an_app_that_opened_grows_into_the_room_rather_than_appearing_in_it();
     row::tests::a_row_that_was_resized_or_reloaded_is_not_a_row_six_apps_just_opened_on();
+    row::tests::a_switch_that_took_the_icons_down_a_size_still_carries_the_shared_apps_over();
     row::tests::an_app_that_closed_and_opened_again_comes_back_from_where_it_had_got_to();
     stack::tests::a_grid_opens_before_the_folder_has_been_read();
     stack::tests::a_folder_opened_at_the_shape_it_turns_out_to_have_does_not_move();
@@ -1110,6 +1371,9 @@ fn on_a_display() {
     widget_tile::tests::a_calendar_tile_keeps_its_date_and_gives_up_its_list();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
+    widget_tile::tests::a_widget_that_joined_grows_onto_the_bar_rather_than_appearing();
+    widget_tile::tests::a_tile_that_is_leaving_keeps_its_place_until_it_has_gone();
+    widget_tile::tests::a_tile_asked_for_again_while_leaving_turns_round();
     widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();
     widget_tile::tests::a_reorder_moves_the_tiles_rather_than_remaking_them();
     widget_tile::tests::the_divider_only_stands_where_there_is_something_to_divide();
@@ -1128,9 +1392,14 @@ fn on_a_display() {
     panel::tests::a_panel_opens_before_the_daemon_has_answered();
     panel::tests::a_panel_opened_at_the_shape_it_turns_out_to_have_does_not_move();
     panel::tests::a_panel_larger_than_it_opened_for_is_still_shown_whole();
+    panel::tests::a_panel_hangs_above_the_tile_that_asked();
+    panel::tests::a_panel_opened_again_is_shown_whole();
     panel::tests::a_panel_opened_before_is_drawn_at_the_size_it_was();
     panel::tests::choosing_a_control_asks_the_daemon_for_it();
     panel::tests::the_keyboard_walks_the_controls_and_skips_the_heading();
+    panel::tests::choosing_a_control_leaves_the_panel_up();
+    panel::tests::the_release_of_the_click_that_opened_a_panel_chooses_nothing();
+    panel::tests::a_panel_that_is_up_takes_the_widgets_news_in_place();
     panel::tests::choosing_a_view_in_the_panel_writes_the_mode();
     an_undefined_colour_is_not_something_gtk_reports();
     a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::fit::Level;
+use crate::motion::{self, Life};
 use doca_ipc::{Body, Simple, Tile, Water, WidgetState, NO_PROGRESS};
 use gtk::cairo;
 use gtk::prelude::*;
@@ -51,25 +52,40 @@ pub struct Look {
 /// the other end cannot be checked without one either.
 pub type Expand = Rc<dyn Fn(&str, &gtk::Widget)>;
 
+#[derive(Clone)]
 pub struct WidgetTile {
     pub root: gtk::Widget,
     area: gtk::DrawingArea,
     /// What the drawing path reads, and the only thing it reads.
     shown: Rc<RefCell<WidgetState>>,
     look: Rc<Cell<Look>>,
+    /// How far onto the bar the tile has got, on the icons' own curve.
+    ///
+    /// A dock switched for another takes its tiles with it and brings its
+    /// own, and a tile that blinked in and out beside icons that grew and
+    /// shrank was the part of the switch that still read as a rebuild.
+    life: Rc<Cell<Life>>,
+    ticking: Rc<Cell<bool>>,
 }
 
 impl WidgetTile {
     pub fn new(state: &WidgetState, look: Look, expand: Expand) -> Self {
         let shown = Rc::new(RefCell::new(state.clone()));
         let held = Rc::new(Cell::new(look));
+        let life = Rc::new(Cell::new(Life::settled()));
 
         let area = gtk::DrawingArea::new();
         area.set_widget_name("widget-face");
         let painting = shown.clone();
         let wearing = held.clone();
+        let living = life.clone();
         area.connect_draw(move |area, cr| {
-            draw(&painting.borrow(), wearing.get(), area, cr);
+            let presence = living.get().presence();
+            if presence < 1.0 {
+                draw_passing(&painting.borrow(), wearing.get(), presence, area, cr);
+            } else {
+                draw(&painting.borrow(), wearing.get(), area, cr);
+            }
             glib::Propagation::Proceed
         });
 
@@ -98,10 +114,91 @@ impl WidgetTile {
             area,
             shown,
             look: held,
+            life,
+            ticking: Rc::new(Cell::new(false)),
         };
         tile.resize();
         tile.mark();
         tile
+    }
+
+    /// Start from nothing and grow onto the bar.
+    fn arrive(&self) {
+        self.life.set(Life::arriving());
+        self.pass();
+        self.animate();
+    }
+
+    /// Shrink off the bar, from wherever it had got to.
+    fn leave(&self) {
+        if !self.life.get().leaving() {
+            self.life.set(self.life.get().reversed());
+        }
+        self.animate();
+    }
+
+    /// Asked for again before it had finished leaving: it turns round where
+    /// it stands, the way an app reopened mid-close does on the row.
+    fn stay(&self) {
+        if self.life.get().leaving() {
+            self.life.set(self.life.get().reversed());
+            self.animate();
+        }
+    }
+
+    /// The width the widget declared, before any arriving or leaving.
+    fn declared(&self) -> i32 {
+        declared_width(&self.shown.borrow(), self.look.get())
+    }
+
+    /// One frame of the passage: the room it holds, and how much of it shows.
+    ///
+    /// The room is the same fraction of the declared width that an icon
+    /// takes of its slot, so a tile and an icon arriving together open the
+    /// bar at the same rate. What is drawn in it is the tile at its own size,
+    /// scaled the way an arriving icon is and faded with it.
+    fn pass(&self) {
+        self.resize();
+        self.root.set_opacity(self.life.get().presence());
+        self.area.queue_draw();
+    }
+
+    /// Run the passage on the compositor's clock, and stop once it is over.
+    ///
+    /// A tile that has finished leaving takes itself off the bar here, the
+    /// way a departing icon lets go of its slot only once it is gone.
+    fn animate(&self) {
+        if self.ticking.replace(true) {
+            return;
+        }
+        let tile = self.clone();
+        self.root.add_tick_callback(move |_, _| {
+            tile.pass();
+            if tile.life.get().moving() {
+                return glib::ControlFlow::Continue;
+            }
+            tile.ticking.set(false);
+            if tile.life.get().gone() {
+                tile.unshelve();
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// Off whatever it was packed in, if it still is.
+    fn unshelve(&self) {
+        if let Some(parent) = self
+            .root
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk::Container>().ok())
+        {
+            parent.remove(&self.root);
+        }
+    }
+
+    /// How much wider this tile would be at its full declared size.
+    fn unfolding(&self) -> i32 {
+        (self.declared() - self.area.size_request().0).max(0)
     }
 
     /// What this tile is showing now.
@@ -132,9 +229,11 @@ impl WidgetTile {
     /// text is ellipsised into the declared width instead.
     fn resize(&self) {
         let look = self.look.get();
-        let tile = self.shown.borrow().tile().unwrap_or(Tile::Wide);
-        self.area
-            .set_size_request(look.level.width(tile, look.icon_size), height_of(look.icon_size));
+        let width = (self.declared() as f64 * self.life.get().presence()).round() as i32;
+        let size = (width, height_of(look.icon_size));
+        if self.area.size_request() != size {
+            self.area.set_size_request(size.0, size.1);
+        }
     }
 
     /// The one thing still left to the stylesheet: the wash of accent behind
@@ -167,6 +266,45 @@ impl WidgetTile {
 fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Context) {
     let width = area.allocated_width() as f64;
     let height = area.allocated_height() as f64;
+    draw_in(state, look, area, cr, width, height);
+}
+
+/// The width a widget declared for its tile, at the size the bar is wearing.
+fn declared_width(state: &WidgetState, look: Look) -> i32 {
+    look.level
+        .width(state.tile().unwrap_or(Tile::Wide), look.icon_size)
+}
+
+/// A tile on its way onto the bar or off it.
+///
+/// Drawn at its own declared size and scaled about the middle of the room it
+/// holds so far — `motion::entry_scale`, the curve an icon arriving is drawn
+/// on — rather than laid out again into a room too narrow for it, which
+/// would ellipsise every word on the way in and out.
+fn draw_passing(
+    state: &WidgetState,
+    look: Look,
+    presence: f64,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+) {
+    let width = declared_width(state, look) as f64;
+    let height = area.allocated_height() as f64;
+    let scale = motion::entry_scale(presence);
+    cr.translate(area.allocated_width() as f64 / 2.0, height / 2.0);
+    cr.scale(scale, scale);
+    cr.translate(-width / 2.0, -height / 2.0);
+    draw_in(state, look, area, cr, width, height);
+}
+
+fn draw_in(
+    state: &WidgetState,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
@@ -810,6 +948,12 @@ pub struct Shelf {
     divider: RefCell<Option<gtk::Separator>>,
     /// The tiles on the bar, in the order they are shown.
     tiles: RefCell<Vec<(String, WidgetTile)>>,
+    /// The tiles on their way off it, each still holding a shrinking share
+    /// of its place until it has gone.
+    leaving: RefCell<Vec<(String, WidgetTile)>>,
+    /// Whether the bar has been shown before. The first time is the dock
+    /// starting, and tiles that were there all along do not *arrive*.
+    shown_before: Cell<bool>,
 }
 
 impl Shelf {
@@ -820,7 +964,8 @@ impl Shelf {
     /// Whether this widget is one of ours, and must survive a rebuild.
     ///
     /// The rebuild sweeps the bar clear of everything it is about to make
-    /// again. What the shelf owns is not made again, so it has to be asked.
+    /// again. What the shelf owns is not made again, so it has to be asked —
+    /// and a tile on its way out is still the shelf's until it has gone.
     pub fn owns(&self, child: &gtk::Widget) -> bool {
         if self
             .divider
@@ -833,15 +978,20 @@ impl Shelf {
         self.tiles
             .borrow()
             .iter()
+            .chain(self.leaving.borrow().iter())
             .any(|(_, tile)| tile.root == *child)
     }
 
     /// Put these widgets on the bar, keeping the tiles already there.
     ///
     /// A tile whose id comes back is the same tile, moved into place and told
-    /// its new state rather than remade. One that does not come back is taken
-    /// off the bar and dropped — which is when its widget is finally
-    /// destroyed, because until then this held the only other reference to it.
+    /// its new state rather than remade. One that does not come back shrinks
+    /// off the bar where it stood and is dropped once it has gone — which is
+    /// when its widget is finally destroyed, because until then this held
+    /// the only other reference to it. One that is new grows into the room
+    /// that opens for it. Both on the curve the icons use, so that a dock
+    /// switched for another is one movement and not a bar emptied and
+    /// refilled.
     ///
     /// Order is settled by moving each child to the end in turn, never by
     /// unparenting: taking a widget out of a container and putting it back is
@@ -858,22 +1008,51 @@ impl Shelf {
         look: Look,
         expand: &Expand,
     ) -> Reconciled {
-        let mut known: HashMap<String, WidgetTile> =
-            self.tiles.borrow_mut().drain(..).collect();
-        let had = known.len();
+        self.settle();
+        let announcing = self.shown_before.replace(true);
 
+        // The order the tiles stand in now, leaving ones included: where a
+        // tile that is going goes from is worked out from its neighbours.
+        let children = items.children();
+        let standing = |tile: &WidgetTile| children.iter().position(|child| *child == tile.root);
+        let mut before: Vec<(String, bool, WidgetTile)> = self
+            .tiles
+            .borrow_mut()
+            .drain(..)
+            .map(|(id, tile)| (id, false, tile))
+            .chain(
+                self.leaving
+                    .borrow_mut()
+                    .drain(..)
+                    .map(|(id, tile)| (id, true, tile)),
+            )
+            .collect();
+        before.sort_by_key(|(_, _, tile)| standing(tile));
+        let previous: Vec<String> = before.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut known: HashMap<String, (bool, WidgetTile)> = before
+            .into_iter()
+            .map(|(id, leaving, tile)| (id, (leaving, tile)))
+            .collect();
+
+        let mut did = Reconciled::default();
         let shown: Vec<(String, WidgetTile)> = widgets
             .iter()
             .map(|state| {
                 let tile = match known.remove(&state.id) {
-                    Some(tile) => {
+                    Some((_, tile)) => {
+                        did.kept += 1;
                         tile.relook(look);
                         tile.update(state);
+                        tile.stay();
                         tile
                     }
                     None => {
+                        did.made += 1;
                         let tile = WidgetTile::new(state, look, expand.clone());
                         items.add(&tile.root);
+                        if announcing {
+                            tile.arrive();
+                        }
                         tile
                     }
                 };
@@ -881,16 +1060,29 @@ impl Shelf {
             })
             .collect();
 
-        // Whatever no dock asks for any more.
-        let gone = known.len();
-        for (_, departed) in known {
-            items.remove(&departed.root);
-        }
-        let did = Reconciled {
-            kept: had - gone,
-            made: shown.len() - (had - gone),
-            gone,
-        };
+        // Whatever no dock asks for any more goes, from where it stood:
+        // after as many of its old neighbours as are still on the bar.
+        let staying: Vec<&String> = shown.iter().map(|(id, _)| id).collect();
+        let mut leaving: Vec<(usize, usize, String, WidgetTile)> = known
+            .into_iter()
+            .map(|(id, (was_leaving, tile))| {
+                if !was_leaving {
+                    did.gone += 1;
+                }
+                tile.leave();
+                let at = previous
+                    .iter()
+                    .position(|seen| *seen == id)
+                    .unwrap_or(previous.len());
+                let anchor = previous[..at]
+                    .iter()
+                    .filter(|seen| staying.contains(seen))
+                    .count();
+                (anchor, at, id, tile)
+            })
+            .collect();
+        leaving.sort_by_key(|(anchor, at, _, _)| (*anchor, *at));
+
         // Read back by scripts/check-live.sh, which has no other way to tell
         // a bar that kept its tiles from one that made them again.
         tracing::debug!(
@@ -900,14 +1092,20 @@ impl Shelf {
             "the widget shelf"
         );
 
-        if shown.is_empty() {
+        let mut order: Vec<&WidgetTile> = Vec::with_capacity(shown.len() + leaving.len());
+        let mut going = leaving.iter().peekable();
+        for (index, (_, tile)) in shown.iter().enumerate() {
+            while going.peek().is_some_and(|(anchor, ..)| *anchor <= index) {
+                order.push(&going.next().expect("peeked").3);
+            }
+            order.push(tile);
+        }
+        order.extend(going.map(|(.., tile)| tile));
+
+        if order.is_empty() {
             // Nothing to divide from. A separator with no widgets behind it
             // is a stray line at the end of the bar.
-            if let Some(divider) = self.divider.borrow().as_ref() {
-                if divider.parent().is_some() {
-                    items.remove(divider);
-                }
-            }
+            self.take_divider_down();
         } else {
             let divider = self
                 .divider
@@ -918,13 +1116,72 @@ impl Shelf {
                 items.add(&divider);
             }
             items.reorder_child(&divider, -1);
-            for (_, tile) in &shown {
+            for tile in order {
                 items.reorder_child(&tile.root, -1);
             }
         }
 
         *self.tiles.borrow_mut() = shown;
+        *self.leaving.borrow_mut() = leaving
+            .into_iter()
+            .map(|(_, _, id, tile)| (id, tile))
+            .collect();
         did
+    }
+
+    /// Let go of the tiles that have finished leaving, and of the divider if
+    /// nothing is left for it to divide.
+    ///
+    /// A tile takes itself off the bar on the last frame of its leaving, but
+    /// only if there is a frame to take it on: this is for whoever cannot
+    /// wait for one — the next `show`, and the bar measuring itself once a
+    /// dock switch is over.
+    pub fn settle(&self) {
+        self.leaving.borrow_mut().retain(|(_, tile)| {
+            if tile.life.get().gone() {
+                tile.unshelve();
+                return false;
+            }
+            true
+        });
+        for (_, tile) in self.tiles.borrow().iter().chain(self.leaving.borrow().iter()) {
+            tile.pass();
+        }
+        if self.tiles.borrow().is_empty() && self.leaving.borrow().is_empty() {
+            self.take_divider_down();
+        }
+    }
+
+    fn take_divider_down(&self) {
+        if let Some(divider) = self.divider.borrow().as_ref() {
+            if let Some(parent) = divider
+                .parent()
+                .and_then(|parent| parent.downcast::<gtk::Container>().ok())
+            {
+                parent.remove(divider);
+            }
+        }
+    }
+
+    /// Whether any tile is still arriving or leaving.
+    pub fn changing(&self) -> bool {
+        self.tiles
+            .borrow()
+            .iter()
+            .chain(self.leaving.borrow().iter())
+            .any(|(_, tile)| tile.life.get().moving())
+    }
+
+    /// How much wider the shelf would be with every tile at its full size —
+    /// the arriving ones arrived and the leaving ones not yet gone. The same
+    /// question `Row::unfolding` asks of the icons, and for the same reason.
+    pub fn unfolding(&self) -> i32 {
+        self.tiles
+            .borrow()
+            .iter()
+            .chain(self.leaving.borrow().iter())
+            .map(|(_, tile)| tile.unfolding())
+            .sum()
     }
 
     /// Say again what every tile is showing, after the bar's `show_all`.
@@ -1421,11 +1678,100 @@ pub mod tests {
 
         assert_eq!(did, Reconciled { kept: 1, made: 0, gone: 1 });
         assert_eq!(roots(&shelf), vec![clock.clone()], "the wrong tile stayed");
+        // Going, not gone: it shrinks off the bar where it stood, the way an
+        // icon does, rather than leaving a tile-sized hole in one frame.
+        assert!(
+            items.children().contains(&cpu),
+            "the tile was snatched off the bar instead of leaving it"
+        );
+
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
+
         assert!(
             !items.children().contains(&cpu),
             "a widget nobody asks for is still on the bar"
         );
         assert!(items.children().contains(&clock), "the survivor went too");
+    }
+
+    /// The other half of a dock switch: the tiles of the dock that came in.
+    /// They grow into the room that opens for them rather than appearing in
+    /// it at full size — but only when something is switched, never when the
+    /// dock starts with them already on it.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_widget_that_joined_grows_onto_the_bar_rather_than_appearing() {
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+        assert_eq!(
+            widths(&shelf),
+            vec![Tile::Wide.width(ICON)],
+            "a tile the dock started with was announced as if it had just come"
+        );
+
+        shelf.show(&items, &[simple("clock"), water(2, 8)], look(ICON), &expand);
+        let joined = widths(&shelf)[1];
+        assert!(
+            joined < Tile::Wide.width(ICON) / 2,
+            "the new tile took {joined}px the instant it was asked for"
+        );
+        assert!(shelf.changing());
+
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
+
+        assert_eq!(
+            widths(&shelf),
+            vec![Tile::Wide.width(ICON), Tile::Wide.width(ICON)],
+            "the new tile never finished arriving"
+        );
+        assert!(!shelf.changing());
+        assert_eq!(shelf.unfolding(), 0);
+    }
+
+    /// A tile on its way out goes from where it stood, between the same two
+    /// neighbours, not from the end of the shelf it was moved to.
+    pub fn a_tile_that_is_leaving_keeps_its_place_until_it_has_gone() {
+        let (items, row, shelf, expand) = bar();
+        shelf.show(
+            &items,
+            &[simple("clock"), simple("cpu"), simple("disk")],
+            look(ICON),
+            &expand,
+        );
+        let standing = roots(&shelf);
+
+        shelf.show(&items, &[simple("clock"), simple("disk")], look(ICON), &expand);
+
+        let divider = shelf.divider.borrow().clone().expect("a divider").upcast();
+        let mut expected = vec![row, divider];
+        expected.extend(standing);
+        assert_eq!(
+            items.children(),
+            expected,
+            "the leaving tile was moved before it went"
+        );
+    }
+
+    /// Two dock switches in a row, faster than a tile can leave: the tile
+    /// asked for again is the same tile, turned round where it stood.
+    pub fn a_tile_asked_for_again_while_leaving_turns_round() {
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[simple("clock"), simple("cpu")], look(ICON), &expand);
+        let cpu = roots(&shelf)[1].clone();
+
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+        let did = shelf.show(&items, &[simple("clock"), simple("cpu")], look(ICON), &expand);
+
+        assert_eq!(
+            did,
+            Reconciled { kept: 2, made: 0, gone: 0 },
+            "a tile that had not finished leaving was made again"
+        );
+        assert_eq!(roots(&shelf)[1], cpu);
+        let tiles = shelf.tiles.borrow();
+        assert!(!tiles[1].1.life.get().leaving(), "the tile that came back is still going");
     }
 
     /// Adding a widget to one dock must not reset the stopwatch in another,
@@ -1473,6 +1819,13 @@ pub mod tests {
         assert_eq!(items.children().len(), 3, "row, divider, tile");
 
         shelf.show(&items, &[], look(ICON), &expand);
+        assert_eq!(
+            items.children().len(),
+            3,
+            "the divider went before the tile it divides had finished going"
+        );
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
 
         assert_eq!(
             items.children(),
