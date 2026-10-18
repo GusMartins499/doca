@@ -120,7 +120,13 @@ struct Hide {
     /// crosses the edge and leaves again has asked for both, and should get
     /// neither.
     intent: Rc<RefCell<Option<glib::SourceId>>>,
+    /// A drag from another app is over the dock. Held once per drag, however
+    /// many motion events it sends.
+    dragging: Rc<Cell<bool>>,
 }
+
+/// How often a drag over the dock is asked whether it is still there.
+const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Default for Hide {
     fn default() -> Self {
@@ -136,6 +142,7 @@ impl Default for Hide {
             holds: Rc::new(Cell::new(0)),
             held_back: Rc::new(Cell::new(false)),
             intent: Rc::new(RefCell::new(None)),
+            dragging: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -238,6 +245,82 @@ impl Hide {
         let releasing = self.clone();
         let window = window.clone();
         menu.connect_unmap(move |_| releasing.release(&window));
+    }
+
+    /// Keep the bar for a drag, and bring it up for one.
+    ///
+    /// #18, item 12: "never hide while a drag is in progress". It was worse
+    /// than that: while another app drags, the pointer is that app's, and
+    /// the dock gets none of the enter and leave events auto-hide runs on —
+    /// so a file dragged to a hidden bar's edge never brought it up, and
+    /// nothing kept a shown one from going while the file was over it. A
+    /// drag says where it is through its own events, so those are listened
+    /// to on every widget a drag can be over, the window's sliver included.
+    fn follows_drags(&self, window: &gtk::Window, over: &[gtk::Widget]) {
+        for widget in over {
+            let holding = self.clone();
+            let dock = window.clone();
+            widget.connect_drag_motion(move |_, _, _, _, _| {
+                if !holding.dragging.replace(true) {
+                    tracing::debug!("drag over the dock: held");
+                    holding.hold();
+                    holding.intend(&dock, true);
+                    holding.watch_drag(&dock);
+                }
+                // Not a claim on the drop: whichever widget takes files
+                // says so for itself.
+                false
+            });
+        }
+    }
+
+    /// Let go of a drag once the pointer is off the dock.
+    ///
+    /// Asked of the X server every [`DRAG_SETTLES`] rather than waited for as
+    /// a `drag-leave`: GTK sends that only under conditions on the drop site,
+    /// and measured in check-live.sh it never came — the bar stayed up after
+    /// the drag had gone. Where the pointer is can be asked even while
+    /// another app holds it, and the answer does not depend on which widget
+    /// of the dock the drag was last over. A drop leaves the pointer on the
+    /// bar, so the hold lasts until it moves off, which is when the bar
+    /// would go anyway.
+    /// Whether the pointer is inside where the bar is going — not where it
+    /// is this frame. Measured against the window mid-slide, a drag brought
+    /// up as fast as the bar rose was "outside" a bar it was over, and the
+    /// bar went away under the file.
+    fn pointer_is_over_its_place(&self, window: &gtk::Window) -> bool {
+        let Some(pointer) = gdk::Display::default()
+            .and_then(|display| display.default_seat())
+            .and_then(|seat| seat.pointer())
+        else {
+            return false;
+        };
+        let (_, x, y) = pointer.position();
+        let top = if self.shown.get() {
+            self.shown_y.get()
+        } else {
+            motion::hidden_y(self.shown_y.get(), self.height.get())
+        };
+        let left = self.x.get();
+        x >= left
+            && x < left + window.allocated_width()
+            && y >= top
+            && y < top + self.height.get()
+    }
+
+    fn watch_drag(&self, window: &gtk::Window) {
+        let watching = self.clone();
+        let dock = window.clone();
+        glib::timeout_add_local(DRAG_SETTLES, move || {
+            if watching.pointer_is_over_its_place(&dock) {
+                return glib::ControlFlow::Continue;
+            }
+            tracing::debug!("the drag left the dock: released");
+            watching.dragging.set(false);
+            watching.release(&dock);
+            watching.intend(&dock, false);
+            glib::ControlFlow::Break
+        });
     }
 
     fn hold(&self) {
@@ -351,6 +434,11 @@ async fn drive(
         showing.intend(window, true);
         glib::Propagation::Proceed
     });
+
+    // The whole window takes part in a drag, so that a drag reaching the
+    // sliver of a hidden bar is heard; the row is a drop target of its own.
+    window.drag_dest_set(gtk::DestDefaults::empty(), &[], gdk::DragAction::COPY);
+    hide.follows_drags(&window, &[window.clone().upcast(), icons.area.clone().upcast()]);
 
     icons.serve(proxy.clone());
     wire(

@@ -673,6 +673,58 @@ else
     fail "the bar never drew its widgets"
     tail -5 "$WORK/shell.log"
 fi
+# A file dragged from another app to a hidden bar (#18, item 12). While a
+# drag has the pointer the dock gets no enter or leave, so auto-hide never
+# heard it: the bar stayed hidden under a file brought to its edge.
+bar_y() {
+    local id
+    id=$(xdotool search --name '^Doca$' 2>/dev/null | head -1)
+    [ -n "$id" ] && xwininfo -id "$id" | awk '/Absolute upper-left Y/ {print $4}'
+}
+if command -v xdotool >/dev/null && python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    gdbus call --session --dest "$BUS" --object-path "$OBJECT" \
+        --method "$INTERFACE.SetAppearance" "{'auto_hide': <true>}" >/dev/null 2>&1
+    for _ in $(seq 1 30); do [ "$(bar_y)" -ge 790 ] 2>/dev/null && break; sleep 0.1; done
+    HIDDEN_Y=$(bar_y)
+    echo dragged > "$WORK/dragged.txt"
+    cat > "$WORK/drag_source.py" <<'PY'
+import sys, gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, GLib
+uri = GLib.filename_to_uri(sys.argv[1], None)
+w = Gtk.Window(title="drag source")
+w.move(500, 150); w.set_default_size(240, 160)
+b = Gtk.Button(label="drag me")
+b.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [Gtk.TargetEntry.new("text/uri-list", 0, 0)], Gdk.DragAction.COPY)
+b.connect("drag-data-get", lambda w, c, data, i, t: data.set_uris([uri]))
+w.add(b); w.show_all()
+GLib.timeout_add(20000, Gtk.main_quit)
+Gtk.main()
+PY
+    python3 -I "$WORK/drag_source.py" "$WORK/dragged.txt" &
+    SOURCE=$!
+    sleep 2
+    xdotool mousemove 620 230; sleep 0.3; xdotool mousedown 1; sleep 0.2
+    for y in 260 320 420 520 620 720 780 799; do xdotool mousemove 630 "$y"; sleep 0.08; done
+    for _ in 1 2 3 4 5; do xdotool mousemove 632 799; sleep 0.1; xdotool mousemove 630 799; sleep 0.1; done
+    sleep 0.5
+    DRAG_Y=$(bar_y)
+    for y in 600 400 230; do xdotool mousemove 630 "$y"; sleep 0.1; done
+    xdotool mouseup 1
+    sleep 1.5
+    AFTER_Y=$(bar_y)
+    kill "$SOURCE" 2>/dev/null
+    [ -n "$DRAG_Y" ] && [ -n "$HIDDEN_Y" ] && [ "$DRAG_Y" -lt "$HIDDEN_Y" ] \
+        && ok "a file dragged to the hidden bar's edge brought it up (y $HIDDEN_Y → $DRAG_Y)" \
+        || fail "a file dragged to the hidden bar's edge left it hidden (y $HIDDEN_Y → $DRAG_Y)"
+    [ "$AFTER_Y" = "$HIDDEN_Y" ] \
+        && ok "the drag went elsewhere and the bar went away again" \
+        || fail "after the drag left, the bar stayed at y $AFTER_Y"
+    gdbus call --session --dest "$BUS" --object-path "$OBJECT" \
+        --method "$INTERFACE.SetAppearance" "{'auto_hide': <false>}" >/dev/null 2>&1
+else
+    echo "  skip  xdotool or python3-gi missing: a drag to the bar is not checked"
+fi
 
 # The screen changing under a running bar (#18, item 11): a monitor swapped,
 # a resolution switched. The bar has to land on the new bottom edge, inside
