@@ -109,6 +109,7 @@ pub enum Body {
     Music(Music),
     Note(Note),
     Calendar(Calendar),
+    Claude(Claude),
 }
 
 /// The name each [`Body`] arm travels under, which is the `s` of the `(s v)`.
@@ -121,9 +122,10 @@ pub mod body_kind {
     pub const MUSIC: &str = "music";
     pub const NOTE: &str = "note";
     pub const CALENDAR: &str = "calendar";
+    pub const CLAUDE: &str = "claude";
 
     /// Every name there is, for a test to walk.
-    pub const ALL: [&str; 5] = [SIMPLE, WATER, MUSIC, NOTE, CALENDAR];
+    pub const ALL: [&str; 6] = [SIMPLE, WATER, MUSIC, NOTE, CALENDAR, CLAUDE];
 }
 
 /// Two lines and a progress bar.
@@ -223,6 +225,30 @@ pub struct Calendar {
     pub missing: String,
 }
 
+/// Claude Code's usage, as the tile says it and as the panel breaks it down.
+///
+/// The tile's two lines and bar travel ready-made, as a `Simple` would carry
+/// them: what they say depends on the mode, the budget and the user's zone,
+/// all of which the daemon holds. The four counts are what the panel adds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Claude {
+    /// One of [`claude_mode::ALL`], so the panel can say which is showing.
+    pub mode: String,
+    pub label: String,
+    pub detail: String,
+    /// The share of the budget, or [`NO_PROGRESS`] with none set.
+    pub progress: f64,
+    /// At or past the point the tile marks itself.
+    pub near: bool,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    /// When the window being counted turns over, in words — `20:30`,
+    /// `midnight` — or empty for one that rolls rather than turns.
+    pub turns: String,
+}
+
 /// One thing on the calendar, as it will be read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
 pub struct Upcoming {
@@ -306,6 +332,7 @@ impl Body {
             Body::Music(_) => body_kind::MUSIC,
             Body::Note(_) => body_kind::NOTE,
             Body::Calendar(_) => body_kind::CALENDAR,
+            Body::Claude(_) => body_kind::CLAUDE,
         }
     }
 
@@ -333,6 +360,8 @@ impl Body {
             // The date on the left and the agenda beside it: the issue asks
             // for the card, and a square holds the date and nothing else.
             Body::Calendar(_) => Tile::Wide,
+            // Two lines and a bar, which is the simple tile's shape.
+            Body::Claude(_) => Tile::Wide,
         }
     }
 }
@@ -374,6 +403,7 @@ impl WidgetState {
             Body::Music(music) => OwnedValue::try_from(music),
             Body::Note(note) => OwnedValue::try_from(note),
             Body::Calendar(calendar) => OwnedValue::try_from(calendar),
+            Body::Claude(claude) => OwnedValue::try_from(claude),
         };
         Self {
             id: id.into(),
@@ -412,6 +442,9 @@ impl WidgetState {
             body_kind::CALENDAR => Calendar::try_from(self.body.clone())
                 .map(Body::Calendar)
                 .map_err(|e| unreadable(e.to_string())),
+            body_kind::CLAUDE => Claude::try_from(self.body.clone())
+                .map(Body::Claude)
+                .map_err(|e| unreadable(e.to_string())),
             unknown => Err(UnreadableBody {
                 kind: unknown.to_string(),
                 why: format!("no such body; this build knows {}", body_kind::ALL.join(", ")),
@@ -426,6 +459,28 @@ impl WidgetState {
 }
 
 pub const NO_PROGRESS: f64 = -1.0;
+
+/// Tokens as a tile can show them: `950`, `12k`, `2.4M`.
+///
+/// Three significant figures at most, because a tile is read at a glance and
+/// `2412887` is read digit by digit.
+pub fn compact_tokens(tokens: u64) -> String {
+    let scaled = |value: f64, unit: &str| {
+        if value < 10.0 {
+            let tenth = format!("{value:.1}");
+            format!("{}{unit}", tenth.trim_end_matches(".0"))
+        } else {
+            format!("{value:.0}{unit}")
+        }
+    };
+    match tokens {
+        0..=999 => tokens.to_string(),
+        1_000..=999_999 => scaled(tokens as f64 / 1e3, "k"),
+        1_000_000..=999_999_999 => scaled(tokens as f64 / 1e6, "M"),
+        _ => scaled(tokens as f64 / 1e9, "B"),
+    }
+}
+
 
 /// The look of the dock as the daemon reports it.
 ///
@@ -962,6 +1017,21 @@ mod tests {
                         Upcoming { when: "Tue 14:00".to_string(), title: "Dentist".to_string(), now: false },
                     ],
                     missing: String::new(),
+                }),
+            ),
+            (
+                body_kind::CLAUDE,
+                Body::Claude(Claude {
+                    mode: claude_mode::FIVE_HOURS.to_string(),
+                    label: "80%".to_string(),
+                    detail: "2.4M of 3M".to_string(),
+                    progress: 0.8,
+                    near: true,
+                    input: 2,
+                    output: 550,
+                    cache_write: 17_842,
+                    cache_read: 28_458,
+                    turns: "20:30".to_string(),
                 }),
             ),
         ]

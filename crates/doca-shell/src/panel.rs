@@ -64,7 +64,16 @@ pub type Write = Rc<dyn Fn(&str, &str)>;
 pub struct Asks {
     pub invoke: Invoke,
     pub write: Write,
+    pub choose: Choose,
 }
+
+/// What picking one of a widget's settings in its panel does: write that
+/// setting, as the preferences window would. `(widget, key, value)`.
+///
+/// Added for #32's "switch the mode from the panel": a mode is a setting, and
+/// a panel that changed it some other way would disagree with the window
+/// and the file.
+pub type Choose = Rc<dyn Fn(&str, &str, &str)>;
 
 /// What a control does when it is chosen: tell the daemon so.
 pub type Invoke = Rc<dyn Fn(&str, &str)>;
@@ -131,6 +140,15 @@ pub enum Row {
     Text { value: String },
     /// One thing on the calendar: when, and what. Added by #31.
     Event { when: String, title: String, now: bool },
+    /// A named number, read rather than chosen. Added by #32.
+    Figure { name: String, value: String },
+    /// One of a setting's values, picked by choosing it. Added by #32.
+    Choice {
+        key: &'static str,
+        value: &'static str,
+        label: &'static str,
+        chosen: bool,
+    },
 }
 
 /// The widget's name as a person would write it: `time-progress` is
@@ -194,6 +212,10 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
                 (true, n) => format!("{n} coming up"),
             },
         },
+        Ok(Body::Claude(claude)) => Row::Heading {
+            title: claude.label.clone(),
+            detail: claude.detail.clone(),
+        },
         // A body this build cannot read still opens a panel that names the
         // widget: the controls below come from the id, not from the body, so
         // all of them still work.
@@ -225,6 +247,35 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
             title: up.title,
             now: up.now,
         }));
+    }
+    // The breakdown under the heading, then the three views to switch
+    // between — the issue's "switch modes from the panel, without going
+    // through the preferences".
+    if let Ok(Body::Claude(claude)) = state.body() {
+        let compact = doca_ipc::compact_tokens;
+        rows.extend([
+            Row::Figure { name: "Input".to_string(), value: compact(claude.input) },
+            Row::Figure { name: "Output".to_string(), value: compact(claude.output) },
+            Row::Figure { name: "Cache written".to_string(), value: compact(claude.cache_write) },
+            Row::Figure { name: "Cache read".to_string(), value: compact(claude.cache_read) },
+        ]);
+        if !claude.turns.is_empty() {
+            rows.push(Row::Figure { name: "Turns over".to_string(), value: claude.turns.clone() });
+        }
+        rows.extend(
+            [
+                (doca_ipc::claude_mode::FIVE_HOURS, "This session"),
+                (doca_ipc::claude_mode::WEEK, "This week"),
+                (doca_ipc::claude_mode::TOKENS, "Tokens"),
+            ]
+            .into_iter()
+            .map(|(value, label)| Row::Choice {
+                key: doca_ipc::widget_key::MODE,
+                value,
+                label,
+                chosen: claude.mode == value,
+            }),
+        );
     }
     // The week sits above the controls: it is what you came to look at, and
     // the controls are what you do about it.
@@ -423,7 +474,7 @@ impl Live {
         let same_shape = filled.rows.len() == rows.len()
             && filled.rows.iter().zip(rows).all(|(was, now)| match (was, now) {
                 // A control is its verb: one that changed is another control.
-                (Row::Action { .. }, Row::Action { .. }) => was == now,
+                (Row::Action { .. }, Row::Action { .. }) | (Row::Choice { .. }, Row::Choice { .. }) => was == now,
                 _ => std::mem::discriminant(was) == std::mem::discriminant(now),
             });
         if !same_shape {
@@ -531,6 +582,47 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, 
         // being typed here, and the daemon's echo of it would put the cursor
         // back at the start of a word.
         Row::Text { value } => (text_row(menu, id, value, &asks.write), None),
+        Row::Figure { name, value } => {
+            let named = gtk::Label::new(Some(name));
+            named.set_xalign(0.0);
+            named.set_hexpand(true);
+            named.set_opacity(0.7);
+            let figure = gtk::Label::new(Some(value));
+            figure.set_xalign(1.0);
+            figure.set_attributes(Some(&weighted(pango::Weight::Bold, 1.0)));
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            line.set_size_request(-1, -1);
+            line.add(&named);
+            line.add(&figure);
+            let row = gtk::MenuItem::new();
+            row.add(&line);
+            // Read, not chosen.
+            row.set_sensitive(false);
+            let update: Update = Box::new(move |row| {
+                if let Row::Figure { name, value } = row {
+                    named.set_text(name);
+                    figure.set_text(value);
+                }
+            });
+            (row, Some(update))
+        }
+        Row::Choice { key, value, label, chosen } => {
+            // A dot rather than a radio item: the panel does not reserve
+            // room for toggles, and a dot needs none.
+            let item = gtk::MenuItem::with_label(&format!("{} {label}", if *chosen { "●" } else { "○" }));
+            let (id, key, value, chosen) = (id.to_string(), *key, *value, *chosen);
+            let choose = asks.choose.clone();
+            item.connect_activate(move |_| {
+                // Choosing what is already chosen writes nothing.
+                if !chosen {
+                    choose(&id, key, value);
+                }
+            });
+            stays_up(menu, &item);
+            // A choice is its dot: one that moved is a panel filled again,
+            // never a row told it in place — see `Live::refresh`.
+            (item, None)
+        }
         Row::Cover { art } => {
             let picture = gtk::Image::new();
             // Square and the width of the panel, which is the one size a
@@ -1043,8 +1135,12 @@ pub mod tests {
         Rc::new(|_: &str, _: &str| {})
     }
 
+    fn chooses_nothing() -> Choose {
+        Rc::new(|_: &str, _: &str, _: &str| {})
+    }
+
     fn asks_nothing() -> Asks {
-        Asks { invoke: invokes_nothing(), write: writes_nothing() }
+        Asks { invoke: invokes_nothing(), write: writes_nothing(), choose: chooses_nothing() }
     }
 
     /// Let GTK get on with whatever the last call asked for.
@@ -1270,6 +1366,58 @@ pub mod tests {
         );
     }
 
+    fn usage(mode: &str, turns: &str) -> WidgetState {
+        WidgetState::new(
+            "claude",
+            Body::Claude(doca_ipc::Claude {
+                mode: mode.to_string(),
+                label: "2.4M".to_string(),
+                detail: "session · until 20:30".to_string(),
+                progress: doca_ipc::NO_PROGRESS,
+                near: false,
+                input: 2_400_000,
+                output: 61_000,
+                cache_write: 340_000,
+                cache_read: 150_000_000,
+                turns: turns.to_string(),
+            }),
+        )
+    }
+
+    #[test]
+    fn a_usage_panel_breaks_the_number_down_and_offers_the_other_views() {
+        let rows = rows_for(&usage("five-hours", "20:30"));
+        assert_eq!(rows[0], Row::Heading { title: "2.4M".to_string(), detail: "session · until 20:30".to_string() });
+        let figures: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Figure { name, value } => Some((name.clone(), value.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            figures,
+            vec![
+                ("Input".to_string(), "2.4M".to_string()),
+                ("Output".to_string(), "61k".to_string()),
+                ("Cache written".to_string(), "340k".to_string()),
+                ("Cache read".to_string(), "150M".to_string()),
+                ("Turns over".to_string(), "20:30".to_string()),
+            ]
+        );
+        let choices: Vec<(&str, bool)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Choice { value, chosen, .. } => Some((*value, *chosen)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(choices, vec![("five-hours", true), ("week", false), ("tokens", false)]);
+
+        // A window that rolls has no moment to name.
+        assert!(!rows_for(&usage("week", "")).iter().any(|row| matches!(row, Row::Figure { name, .. } if name == "Turns over")));
+    }
+
     /// And only water has one. A clock with a week of bars under it would be
     /// a drawer that ran on the wrong body.
     #[test]
@@ -1317,7 +1465,9 @@ pub mod tests {
                 | Row::Week { .. }
                 | Row::Cover { .. }
                 | Row::Text { .. }
-                | Row::Event { .. } => None,
+                | Row::Event { .. }
+                | Row::Figure { .. }
+                | Row::Choice { .. } => None,
             })
             .collect();
         assert_eq!(offered, vec!["drink", "undo", "reset"]);
@@ -1462,7 +1612,7 @@ pub mod tests {
             &panel,
             "note",
             &[Row::Text { value: "call the dentist".to_string() }],
-            &Asks { invoke: invokes_nothing(), write },
+            &Asks { invoke: invokes_nothing(), write, choose: chooses_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -1796,7 +1946,7 @@ pub mod tests {
             &panel,
             "water",
             &rows,
-            &Asks { invoke, write: writes_nothing() },
+            &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -1893,7 +2043,7 @@ pub mod tests {
             &panel,
             "water",
             &rows,
-            &Asks { invoke, write: writes_nothing() },
+            &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -2012,6 +2162,55 @@ pub mod tests {
             live.refresh(&rows_for(&water(750, 2000))),
             "the same widget's next state was refused"
         );
+    }
+
+    /// Picking a view in the usage panel writes the mode, as the preferences
+    /// window would; picking the one already showing writes nothing.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn choosing_a_view_in_the_panel_writes_the_mode() {
+        let chose: Rc<RefCell<Vec<(String, String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let telling = chose.clone();
+        let choose: Choose = Rc::new(move |id: &str, key: &str, value: &str| {
+            telling.borrow_mut().push((id.to_string(), key.to_string(), value.to_string()));
+        });
+
+        let rows = rows_for(&usage("five-hours", "20:30"));
+        let panel = opening(opened_before(&rows));
+        let window = a_window();
+        let (show, _) = against(&window);
+        show(&panel);
+        settle();
+        fill(
+            &panel,
+            "claude",
+            &rows,
+            &Asks { invoke: invokes_nothing(), write: writes_nothing(), choose },
+            &show,
+            Instant::now() - SETTLED,
+        );
+        settle();
+
+        for row in panel.children() {
+            if let Ok(item) = row.downcast::<gtk::MenuItem>() {
+                if item.is_sensitive() {
+                    item.activate();
+                }
+            }
+        }
+        settle();
+
+        assert_eq!(
+            *chose.borrow(),
+            vec![
+                ("claude".to_string(), "mode".to_string(), "week".to_string()),
+                ("claude".to_string(), "mode".to_string(), "tokens".to_string()),
+            ],
+            "every view but the one showing, and only those, as the mode"
+        );
+        panel.popdown();
+        window.close();
+        settle();
     }
 
     /// A panel is navigable by keyboard, and the heading is not a stop on the

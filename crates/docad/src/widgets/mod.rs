@@ -100,6 +100,14 @@ impl Drawn for WidgetState {
     fn simple(&self) -> doca_ipc::Simple {
         match self.body().expect("a body that reads back") {
             doca_ipc::Body::Simple(simple) => simple,
+            // The usage tile is the simple tile with a breakdown beside it,
+            // and its tests read it as one.
+            doca_ipc::Body::Claude(claude) => doca_ipc::Simple {
+                label: claude.label,
+                detail: claude.detail,
+                progress: claude.progress,
+                active: claude.near,
+            },
             other => panic!("a {other:?} body does not draw two lines and a bar"),
         }
     }
@@ -491,6 +499,7 @@ mod tests {
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
             doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
+            doca_ipc::Body::Claude(claude) => claude.label,
         }
     }
 
@@ -508,6 +517,7 @@ mod tests {
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
             doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
+            doca_ipc::Body::Claude(claude) => claude.label,
         }
     }
 
