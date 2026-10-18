@@ -237,6 +237,13 @@ pub struct Row {
     /// one call a frame, off the clock the icons are already on.
     following: Follower,
     dots: Rc<RefCell<(gdk::RGBA, gdk::RGBA)>>,
+    /// The icon the keyboard is on, by id, while the dock has the keyboard.
+    ///
+    /// By id and not by place, because the row is filled again whenever a
+    /// window opens or closes: an app that opened to the left of the one
+    /// being pointed at must not move the ring onto its neighbour.
+    ringed: Rc<RefCell<Option<String>>>,
+    ring: Rc<Cell<gdk::RGBA>>,
     proxy: Rc<RefCell<Option<Rc<DocaProxy<'static>>>>>,
 }
 
@@ -277,6 +284,13 @@ impl Row {
                 | gdk::EventMask::ENTER_NOTIFY_MASK,
         );
 
+        // So that the keyboard can stand on it: the row is one widget for all
+        // the icons, and it holds GTK's focus whenever an icon has the
+        // keyboard — which is also what tells a screen reader that the icon
+        // it is reading out is the one that is focused. A click does not
+        // take focus with it: a drawing area never asks for focus on its own.
+        area.set_can_focus(true);
+
         let perch = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         perch.set_widget_name("perch");
 
@@ -294,6 +308,8 @@ impl Row {
             hover_since: Rc::new(Cell::new(Instant::now() - crate::motion::ZOOM)),
             ticking: Rc::new(Cell::new(false)),
             following: Rc::new(RefCell::new(None)),
+            ringed: Rc::new(RefCell::new(None)),
+            ring: Rc::new(Cell::new(crate::theme::ring(crate::theme::DEFAULT))),
             proxy: Rc::new(RefCell::new(None)),
             dots: Rc::new(RefCell::new((
                 gdk::RGBA::new(1.0, 1.0, 1.0, 0.45),
@@ -319,13 +335,6 @@ impl Row {
     /// windows away, took focus. What changed is which apps are running, not
     /// where the pointer is or what an icon looks like.
     pub fn fill(&self, items: &[DockItem], rest: Rest) {
-        // The row is one drawing, so a screen reader is told what is on it
-        // as the row's own description — in order, the way the keys count.
-        if let Some(accessible) = self.area.accessible() {
-            use atk::prelude::*;
-            accessible.set_name("Dock");
-            accessible.set_description(&spoken(items));
-        }
         let largest = (rest.icon * rest.scale).ceil() as i32;
         let resized = largest != self.largest.replace(largest);
         // A row that had nothing on it is not a row something arrived at.
@@ -411,8 +420,70 @@ impl Row {
         self.rest.set(rest);
         self.settled.set(items.len());
         self.hold_room();
+        self.speak();
         self.area.queue_draw();
         self.animate();
+    }
+
+    /// Tell a screen reader what the row is saying now.
+    ///
+    /// The row is one drawing, so it is one accessible object. At rest it is
+    /// "Dock", described by what is on it in order, the way the keys count.
+    /// While the keyboard is on an icon the object takes that icon's name and
+    /// says where it is — the object a reader announces when focus lands, and
+    /// again whenever its name changes, which is every arrow. An accessible
+    /// child per icon would say the same with more machinery; this is what
+    /// the one widget the row is can say on its own.
+    fn speak(&self) {
+        let Some(accessible) = self.area.accessible() else {
+            return;
+        };
+        use atk::prelude::*;
+        let items = self.items();
+        let ringed = self.ringed.borrow().clone();
+        match ringed.and_then(|id| items.iter().position(|item| item.id == id)) {
+            Some(index) => {
+                accessible.set_name(&spoken(&items[index..=index]));
+                accessible.set_description(&format!("Dock, {} of {}", index + 1, items.len()));
+            }
+            None => {
+                accessible.set_name("Dock");
+                accessible.set_description(&spoken(&items));
+            }
+        }
+    }
+
+    /// What is on the row and staying, in the order it is shown — the icons
+    /// the keyboard can stand on. One on its way out is a picture, not a
+    /// place to go.
+    pub fn items(&self) -> Vec<DockItem> {
+        self.entries
+            .borrow()
+            .iter()
+            .filter(|entry| !entry.life.get().leaving())
+            .map(|entry| entry.item.clone())
+            .collect()
+    }
+
+    /// Put the keyboard's ring on this icon, or take it off the row.
+    pub fn ring(&self, id: Option<&str>) {
+        let id = id.map(str::to_string);
+        if *self.ringed.borrow() == id {
+            return;
+        }
+        *self.ringed.borrow_mut() = id;
+        self.speak();
+        self.area.queue_draw();
+    }
+
+    /// The icon the ring is on, if it is on one.
+    #[cfg(test)]
+    pub fn ringed(&self) -> Option<String> {
+        self.ringed.borrow().clone()
+    }
+
+    pub fn ring_colour(&self, colour: gdk::RGBA) {
+        self.ring.set(colour);
     }
 
     /// Give the bar the room the icons take this instant, and no more.
@@ -620,6 +691,11 @@ impl Row {
         let progress =
             crate::motion::zoom_progress(self.hover_since.get().elapsed(), self.hovering.get());
         1.0 + (rest.scale - 1.0) * progress
+    }
+
+    /// The item at this place in the row, the way `index_of` counts.
+    pub fn item(&self, index: usize) -> Option<DockItem> {
+        self.entries.borrow().get(index).map(|entry| entry.item.clone())
     }
 
     /// Where this item is in the row, if it is in it.
@@ -867,6 +943,48 @@ impl Row {
                 let _ = cr.fill();
             }
         }
+
+        let ringed = self.ringed.borrow();
+        let ringed = ringed
+            .as_deref()
+            .and_then(|id| entries.iter().position(|entry| entry.item.id == id));
+        if let Some(icon) = ringed.and_then(|index| drawn.get(index)) {
+            self.draw_ring(cr, icon, rest.icon, bottom, area.allocated_height() as f64);
+        }
+    }
+
+    /// The keyboard's ring round one icon and its dot: a wash of the accent
+    /// and a line of it, both rounded like the bar.
+    ///
+    /// Inside the row's own surface on every side, because there is nothing
+    /// beyond it to draw on: with the lens off the row is exactly as tall as
+    /// an icon and its dot, so a ring that stood outside the icon would be
+    /// cut off at the top. It is drawn after the icons so the line is on top
+    /// of the picture, and the wash is faint enough not to hide it.
+    fn draw_ring(&self, cr: &cairo::Context, icon: &Drawn, base: f64, bottom: f64, height: f64) {
+        let size = icon.size(base) as f64 * icon.growth().unwrap_or(1.0);
+        let pad = crate::dock::ITEM_PADDING as f64;
+        let line = 2.0;
+        let left = icon.placed.centre - size / 2.0 - pad + line / 2.0;
+        let top = (bottom - size - pad).max(line / 2.0);
+        let width = size + pad * 2.0 - line;
+        let tall = (height - line / 2.0) - top;
+        let radius = (size * 0.2).min(10.0);
+        let colour = self.ring.get();
+
+        let _ = cr.save();
+        cr.new_sub_path();
+        cr.arc(left + width - radius, top + radius, radius, -std::f64::consts::FRAC_PI_2, 0.0);
+        cr.arc(left + width - radius, top + tall - radius, radius, 0.0, std::f64::consts::FRAC_PI_2);
+        cr.arc(left + radius, top + tall - radius, radius, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+        cr.arc(left + radius, top + radius, radius, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+        cr.close_path();
+        cr.set_source_rgba(colour.red(), colour.green(), colour.blue(), colour.alpha() * 0.18);
+        let _ = cr.fill_preserve();
+        cr.set_source_rgba(colour.red(), colour.green(), colour.blue(), colour.alpha());
+        cr.set_line_width(line);
+        let _ = cr.stroke();
+        let _ = cr.restore();
     }
 }
 

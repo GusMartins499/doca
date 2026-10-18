@@ -18,6 +18,7 @@
 #   ./scripts/bind-key.sh --back             <Shift><Super>e cycles the other way
 #   ./scripts/bind-key.sh --auto-hide '<Super><Alt>h'
 #   ./scripts/bind-key.sh --widget water '<Super><Alt>w'   that widget on or off
+#   ./scripts/bind-key.sh --focus '<Super><Alt>d'   the keyboard to the dock
 #
 # GNOME binds <Super>1..9 itself, to its own dash (switch-to-application-N).
 # Two bindings on one key is a coin toss, so --item and --items refuse a key
@@ -133,6 +134,7 @@ for arg in "$@"; do
     --item) ITEM=next ;;
     --back) ACTION=back ;;
     --auto-hide) ACTION=auto-hide ;;
+    --focus) ACTION=focus ;;
     --widget) ACTION=widget WIDGET=next ;;
     *)
         if [ "$ITEM" = "next" ]; then
@@ -238,7 +240,7 @@ if [ "$ACTION" = "back" ]; then
     SLOT="$SLOT_ROOT/doca-cycle-back/"
     LABEL="Doca: cycle environment back"
     COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.CycleEnvironmentBack"
-elif [ "$ACTION" = "auto-hide" ] || [ "$ACTION" = "widget" ]; then
+elif [ "$ACTION" = "auto-hide" ] || [ "$ACTION" = "widget" ] || [ "$ACTION" = "focus" ]; then
     if [ "$ACTION" = "widget" ] && { [ -z "$WIDGET" ] || [ "$WIDGET" = "next" ]; }; then
         echo "--widget needs a widget id, e.g. --widget water '<Super><Alt>w'" >&2
         exit 1
@@ -252,6 +254,10 @@ elif [ "$ACTION" = "auto-hide" ] || [ "$ACTION" = "widget" ]; then
         SLOT="$SLOT_ROOT/doca-auto-hide/"
         LABEL="Doca: toggle auto-hide"
         COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.ToggleAutoHide"
+    elif [ "$ACTION" = "focus" ]; then
+        SLOT="$SLOT_ROOT/doca-focus/"
+        LABEL="Doca: focus the dock"
+        COMMAND="gdbus call --session --dest $BUS --object-path $OBJECT --method $INTERFACE.FocusDock"
     else
         SLOT="$SLOT_ROOT/doca-widget-$(slug "$WIDGET")/"
         LABEL="Doca: toggle $WIDGET"
