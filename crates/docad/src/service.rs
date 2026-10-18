@@ -272,6 +272,32 @@ impl DockService {
         }
     }
 
+    /// Choose the item at this place in the dock, as a click on it would —
+    /// what a `Super+1..9` binding calls (#18, item 8). Counted from one;
+    /// answers with the id it chose.
+    ///
+    /// The bar is told through `ItemActivated`, so that a key gets the same
+    /// bounce a click does: a key press is the action least likely to be
+    /// watched, and the one that most needs saying it landed.
+    async fn activate_position(
+        &self,
+        position: u32,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let items = self.items().await?;
+        let Some(item) = model::at_position(&items, position).cloned() else {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "there is no item {position}; this dock shows {}",
+                items.len()
+            )));
+        };
+        self.activate_item(&item.id).await?;
+        Self::item_activated(&emitter, &item.id, model::starts_something(&item))
+            .await
+            .map_err(failed)?;
+        Ok(item.id)
+    }
+
     async fn launch_item(&self, id: &str) -> zbus::fdo::Result<()> {
         self.spawn(id)
     }
@@ -581,6 +607,47 @@ impl DockService {
         Ok(next)
     }
 
+    /// The cycle the other way round, for a second key.
+    async fn cycle_environment_back(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<String> {
+        let current = self.shown().await?.name;
+        let back = self.with_config(|config| {
+            config
+                .environment_before(&current)
+                .map(|environment| environment.name.clone())
+        })?;
+        let Some(back) = back else {
+            return Err(zbus::fdo::Error::Failed(
+                "no other environment to cycle to".to_string(),
+            ));
+        };
+        self.chosen.set(&back);
+        Self::environment_changed(&emitter, &back).await?;
+        Ok(back)
+    }
+
+    /// Auto-hide on if it was off, off if it was on — the one appearance
+    /// change that is worth a key of its own. Answers with how it is now.
+    async fn toggle_auto_hide(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        self.commit(&emitter, |config| Ok(config.toggle_auto_hide())).await
+    }
+
+    /// A widget on the dock showing now, or off it. Answers with whether it
+    /// is on now.
+    async fn toggle_widget(
+        &self,
+        id: &str,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let shown = self.shown().await?.name;
+        self.commit(&emitter, |config| config.toggle_widget(&shown, id)).await
+    }
+
     async fn close_window(&self, id: u32) -> zbus::fdo::Result<()> {
         self.x11.close_window(id).await.map_err(failed)
     }
@@ -620,6 +687,11 @@ impl DockService {
     #[zbus(signal)]
     pub async fn items_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
+    /// An item was chosen by something other than a click on it — a key —
+    /// and whether that started it, which is when the bar bounces it.
+    #[zbus(signal)]
+    pub async fn item_activated(emitter: &SignalEmitter<'_>, id: &str, starting: bool) -> zbus::Result<()>;
+
     #[zbus(signal)]
     pub async fn windows_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
@@ -639,6 +711,11 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         timer_minutes: settings.timer.minutes,
         water_goal: settings.water.goal,
         water_bottle: settings.water.bottle,
+        calendar_ahead: settings.calendar.ahead,
+        calendar_all_day: settings.calendar.all_day,
+        claude_mode: settings.claude.mode,
+        claude_window: settings.claude.window,
+        claude_budget: settings.claude.budget,
     }
 }
 

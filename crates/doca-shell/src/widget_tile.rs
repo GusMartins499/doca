@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::fit::Level;
+use crate::motion::{self, Life};
 use doca_ipc::{Body, Simple, Tile, Water, WidgetState, NO_PROGRESS};
 use gtk::cairo;
 use gtk::prelude::*;
@@ -51,25 +52,40 @@ pub struct Look {
 /// the other end cannot be checked without one either.
 pub type Expand = Rc<dyn Fn(&str, &gtk::Widget)>;
 
+#[derive(Clone)]
 pub struct WidgetTile {
     pub root: gtk::Widget,
     area: gtk::DrawingArea,
     /// What the drawing path reads, and the only thing it reads.
     shown: Rc<RefCell<WidgetState>>,
     look: Rc<Cell<Look>>,
+    /// How far onto the bar the tile has got, on the icons' own curve.
+    ///
+    /// A dock switched for another takes its tiles with it and brings its
+    /// own, and a tile that blinked in and out beside icons that grew and
+    /// shrank was the part of the switch that still read as a rebuild.
+    life: Rc<Cell<Life>>,
+    ticking: Rc<Cell<bool>>,
 }
 
 impl WidgetTile {
     pub fn new(state: &WidgetState, look: Look, expand: Expand) -> Self {
         let shown = Rc::new(RefCell::new(state.clone()));
         let held = Rc::new(Cell::new(look));
+        let life = Rc::new(Cell::new(Life::settled()));
 
         let area = gtk::DrawingArea::new();
         area.set_widget_name("widget-face");
         let painting = shown.clone();
         let wearing = held.clone();
+        let living = life.clone();
         area.connect_draw(move |area, cr| {
-            draw(&painting.borrow(), wearing.get(), area, cr);
+            let presence = living.get().presence();
+            if presence < 1.0 {
+                draw_passing(&painting.borrow(), wearing.get(), presence, area, cr);
+            } else {
+                draw(&painting.borrow(), wearing.get(), area, cr);
+            }
             glib::Propagation::Proceed
         });
 
@@ -98,10 +114,106 @@ impl WidgetTile {
             area,
             shown,
             look: held,
+            life,
+            ticking: Rc::new(Cell::new(false)),
         };
         tile.resize();
         tile.mark();
+        tile.speak();
         tile
+    }
+
+    /// Tell a screen reader what this tile says, and that it opens something.
+    ///
+    /// A tile is a drawing, and a drawing says nothing to anyone who cannot
+    /// see it. The name is the tile's state in words — the same words the
+    /// panel's heading uses — and the role is a button, because choosing it
+    /// opens the panel.
+    fn speak(&self) {
+        if let Some(accessible) = self.root.accessible() {
+            use atk::prelude::*;
+            accessible.set_role(atk::Role::PushButton);
+            accessible.set_name(&spoken(&self.shown.borrow()));
+        }
+    }
+
+    /// Start from nothing and grow onto the bar.
+    fn arrive(&self) {
+        self.life.set(Life::arriving());
+        self.pass();
+        self.animate();
+    }
+
+    /// Shrink off the bar, from wherever it had got to.
+    fn leave(&self) {
+        if !self.life.get().leaving() {
+            self.life.set(self.life.get().reversed());
+        }
+        self.animate();
+    }
+
+    /// Asked for again before it had finished leaving: it turns round where
+    /// it stands, the way an app reopened mid-close does on the row.
+    fn stay(&self) {
+        if self.life.get().leaving() {
+            self.life.set(self.life.get().reversed());
+            self.animate();
+        }
+    }
+
+    /// The width the widget declared, before any arriving or leaving.
+    fn declared(&self) -> i32 {
+        declared_width(&self.shown.borrow(), self.look.get())
+    }
+
+    /// One frame of the passage: the room it holds, and how much of it shows.
+    ///
+    /// The room is the same fraction of the declared width that an icon
+    /// takes of its slot, so a tile and an icon arriving together open the
+    /// bar at the same rate. What is drawn in it is the tile at its own size,
+    /// scaled the way an arriving icon is and faded with it.
+    fn pass(&self) {
+        self.resize();
+        self.root.set_opacity(self.life.get().presence());
+        self.area.queue_draw();
+    }
+
+    /// Run the passage on the compositor's clock, and stop once it is over.
+    ///
+    /// A tile that has finished leaving takes itself off the bar here, the
+    /// way a departing icon lets go of its slot only once it is gone.
+    fn animate(&self) {
+        if self.ticking.replace(true) {
+            return;
+        }
+        let tile = self.clone();
+        self.root.add_tick_callback(move |_, _| {
+            tile.pass();
+            if tile.life.get().moving() {
+                return glib::ControlFlow::Continue;
+            }
+            tile.ticking.set(false);
+            if tile.life.get().gone() {
+                tile.unshelve();
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// Off whatever it was packed in, if it still is.
+    fn unshelve(&self) {
+        if let Some(parent) = self
+            .root
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk::Container>().ok())
+        {
+            parent.remove(&self.root);
+        }
+    }
+
+    /// How much wider this tile would be at its full declared size.
+    fn unfolding(&self) -> i32 {
+        (self.declared() - self.area.size_request().0).max(0)
     }
 
     /// What this tile is showing now.
@@ -112,6 +224,7 @@ impl WidgetTile {
             self.resize();
         }
         self.mark();
+        self.speak();
         self.area.queue_draw();
     }
 
@@ -132,9 +245,11 @@ impl WidgetTile {
     /// text is ellipsised into the declared width instead.
     fn resize(&self) {
         let look = self.look.get();
-        let tile = self.shown.borrow().tile().unwrap_or(Tile::Wide);
-        self.area
-            .set_size_request(look.level.width(tile, look.icon_size), height_of(look.icon_size));
+        let width = (self.declared() as f64 * self.life.get().presence()).round() as i32;
+        let size = (width, height_of(look.icon_size));
+        if self.area.size_request() != size {
+            self.area.set_size_request(size.0, size.1);
+        }
     }
 
     /// The one thing still left to the stylesheet: the wash of accent behind
@@ -146,6 +261,9 @@ impl WidgetTile {
         ) || matches!(
             self.shown.borrow().body(),
             Ok(Body::Water(Water { drunk, goal, .. })) if drunk >= goal
+        ) || matches!(
+            self.shown.borrow().body(),
+            Ok(Body::Claude(doca_ipc::Claude { near: true, .. }))
         );
         let style = self.root.style_context();
         if active {
@@ -164,6 +282,45 @@ impl WidgetTile {
 fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Context) {
     let width = area.allocated_width() as f64;
     let height = area.allocated_height() as f64;
+    draw_in(state, look, area, cr, width, height);
+}
+
+/// The width a widget declared for its tile, at the size the bar is wearing.
+fn declared_width(state: &WidgetState, look: Look) -> i32 {
+    look.level
+        .width(state.tile().unwrap_or(Tile::Wide), look.icon_size)
+}
+
+/// A tile on its way onto the bar or off it.
+///
+/// Drawn at its own declared size and scaled about the middle of the room it
+/// holds so far — `motion::entry_scale`, the curve an icon arriving is drawn
+/// on — rather than laid out again into a room too narrow for it, which
+/// would ellipsise every word on the way in and out.
+fn draw_passing(
+    state: &WidgetState,
+    look: Look,
+    presence: f64,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+) {
+    let width = declared_width(state, look) as f64;
+    let height = area.allocated_height() as f64;
+    let scale = motion::entry_scale(presence);
+    cr.translate(area.allocated_width() as f64 / 2.0, height / 2.0);
+    cr.scale(scale, scale);
+    cr.translate(-width / 2.0, -height / 2.0);
+    draw_in(state, look, area, cr, width, height);
+}
+
+fn draw_in(
+    state: &WidgetState,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
@@ -173,11 +330,61 @@ fn draw(state: &WidgetState, look: Look, area: &gtk::DrawingArea, cr: &cairo::Co
         Ok(Body::Water(water)) => draw_water(&water, look, area, cr, width, height),
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
+        Ok(Body::Calendar(calendar)) => draw_calendar(&calendar, look, area, cr, width, height),
+        // Two lines and a bar: the simple tile, which is all the usage tile
+        // is. The breakdown it carries is the panel's.
+        Ok(Body::Claude(claude)) => draw_simple(
+            &Simple { label: claude.label, detail: claude.detail, progress: claude.progress, active: claude.near },
+            look,
+            area,
+            cr,
+            width,
+            height,
+        ),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();
             paint(cr, &layout, 0.0, (height - logical.height() as f64) / 2.0, look.palette.detail);
         }
+    }
+}
+
+/// A tile's state in words, for a screen reader.
+///
+/// The widget's name first, so a list of tiles read aloud says which is
+/// which, then what it is showing.
+pub fn spoken(state: &WidgetState) -> String {
+    let name = crate::panel::name_of(&state.id);
+    match state.body() {
+        Ok(Body::Simple(simple)) => match (simple.label.is_empty(), simple.detail.is_empty()) {
+            (false, false) => format!("{name}: {}, {}", simple.label, simple.detail),
+            (false, true) => format!("{name}: {}", simple.label),
+            (true, false) => format!("{name}: {}", simple.detail),
+            (true, true) => name,
+        },
+        Ok(Body::Water(water)) => format!("{name}: {} of {} ml", water.drunk, water.goal),
+        Ok(Body::Music(music)) if music.title.is_empty() => format!("{name}: nothing playing"),
+        Ok(Body::Music(music)) if music.artist.is_empty() => format!("{name}: {}", music.title),
+        Ok(Body::Music(music)) => format!("{name}: {} by {}", music.title, music.artist),
+        Ok(Body::Note(note)) => match note.text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            Some(line) => format!("{name}: {line}"),
+            None => format!("{name}: empty"),
+        },
+        // The date and what comes first, which is what the tile shows.
+        Ok(Body::Calendar(calendar)) if !calendar.missing.is_empty() => {
+            format!("{name}: {} {}, {}", calendar.weekday, calendar.day, calendar.missing)
+        }
+        Ok(Body::Calendar(calendar)) => match calendar.upcoming.first() {
+            Some(next) => format!("{name}: {} {}, {} {}", calendar.weekday, calendar.day, next.when, next.title),
+            None => format!("{name}: {} {}, nothing ahead", calendar.weekday, calendar.day),
+        },
+        Ok(Body::Claude(claude)) => match (claude.label.is_empty(), claude.detail.is_empty()) {
+            (false, false) => format!("{name}: {}, {}", claude.label, claude.detail),
+            (false, true) => format!("{name}: {}", claude.label),
+            (true, false) => format!("{name}: {}", claude.detail),
+            (true, true) => name,
+        },
+        Err(_) => name,
     }
 }
 
@@ -403,6 +610,125 @@ fn draw_note(
     let y = ((height - logical.height() as f64) / 2.0).max(3.0);
     paint(cr, &layout, 2.0, y, note_ink());
 }
+
+/// The calendar: the date as a leaf off a desk calendar, and what is next
+/// beside it.
+///
+/// The date is the one thing that is always true, so it is what a crowded
+/// bar keeps. Then the next thing's time, which is the glance; then the
+/// list, which is the reading.
+fn draw_calendar(
+    calendar: &doca_ipc::Calendar,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let icon = look.icon_size as f64;
+    let column = if look.level == Level::Minimal {
+        width
+    } else {
+        (icon * 0.72).min(width * 0.45)
+    };
+
+    // The day of the week in the accent, the number under it in the label
+    // ink: the leaf of a desk calendar, which is the oldest way there is of
+    // saying "today" at a glance.
+    let weekday = line(area, &calendar.weekday.to_uppercase(), text_size(look.icon_size, 0.18), true, column);
+    let day = line(area, &calendar.day.to_string(), text_size(look.icon_size, 0.40), true, column);
+    let weekday_height = weekday.pixel_extents().1.height() as f64;
+    let day_height = day.pixel_extents().1.height() as f64;
+    let y = ((height - weekday_height - day_height) / 2.0).max(0.0);
+    paint(cr, &weekday, 0.0, y, look.palette.fill);
+    paint(cr, &day, 0.0, y + weekday_height, look.palette.label);
+
+    if look.level == Level::Minimal {
+        return;
+    }
+
+    let gap = (icon * 0.10).max(3.0);
+    // A hairline between the leaf and the list, in the groove colour.
+    let track = look.palette.track;
+    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
+    cr.rectangle(column + gap / 2.0, height * 0.18, 1.0, height * 0.64);
+    let _ = cr.fill();
+
+    let left = column + gap;
+    let room = (width - left).max(0.0);
+    if room <= 0.0 {
+        return;
+    }
+    let size = text_size(look.icon_size, 0.19);
+
+    // Nothing to list is said, in the quieter ink, and so is a calendar that
+    // could not be read — in its own words, because "nothing ahead" over a
+    // calendar nobody could open would be a lie.
+    let quiet = if !calendar.missing.is_empty() {
+        Some(calendar.missing.as_str())
+    } else if calendar.upcoming.is_empty() {
+        Some("nothing ahead")
+    } else {
+        None
+    };
+    if let Some(words) = quiet {
+        let layout = line(area, words, size, false, room);
+        layout.set_alignment(pango::Alignment::Left);
+        layout.set_wrap(pango::WrapMode::WordChar);
+        layout.set_single_paragraph_mode(false);
+        layout.set_height((height as i32) * pango::SCALE);
+        let text_height = layout.pixel_extents().1.height() as f64;
+        paint(cr, &layout, left, ((height - text_height) / 2.0).max(0.0), look.palette.detail);
+        return;
+    }
+
+    // Compact keeps the next thing's time and nothing else: at 1.6 icons
+    // there is room for "19:00" and not for what happens at it.
+    let shown: Vec<pango::Layout> = if look.level == Level::Compact {
+        let next = &calendar.upcoming[0];
+        let layout = line(area, &next.when, text_size(look.icon_size, 0.24), true, room);
+        layout.set_alignment(pango::Alignment::Left);
+        vec![layout]
+    } else {
+        let probe = line(area, "0", size, false, room);
+        let line_height = probe.pixel_extents().1.height().max(1) as f64;
+        let fits = ((height * 0.9) / line_height).floor().max(1.0) as usize;
+        calendar
+            .upcoming
+            .iter()
+            .take(fits.min(UPCOMING_LINES))
+            .map(|up| {
+                let layout = line(area, "", size, false, room);
+                layout.set_alignment(pango::Alignment::Left);
+                layout.set_markup(&format!(
+                    "<b>{}</b> {}",
+                    glib::markup_escape_text(&up.when),
+                    glib::markup_escape_text(&up.title)
+                ));
+                layout
+            })
+            .collect()
+    };
+
+    let heights: Vec<f64> = shown.iter().map(|l| l.pixel_extents().1.height() as f64).collect();
+    let mut y = ((height - heights.iter().sum::<f64>()) / 2.0).max(0.0);
+    for (index, (layout, line_height)) in shown.iter().zip(heights).enumerate() {
+        // What is happening now is in the accent; what is still to come in
+        // the label ink, the first of it brightest.
+        let ink = if calendar.upcoming[index].now {
+            look.palette.fill
+        } else if index == 0 {
+            look.palette.label
+        } else {
+            look.palette.detail
+        };
+        paint(cr, layout, left, y, ink);
+        y += line_height;
+    }
+}
+
+/// The most things a calendar tile lists, however tall it is.
+const UPCOMING_LINES: usize = 3;
 
 /// The ink a note is written in, on any of its papers.
 fn note_ink() -> gdk::RGBA {
@@ -677,6 +1003,12 @@ pub struct Shelf {
     divider: RefCell<Option<gtk::Separator>>,
     /// The tiles on the bar, in the order they are shown.
     tiles: RefCell<Vec<(String, WidgetTile)>>,
+    /// The tiles on their way off it, each still holding a shrinking share
+    /// of its place until it has gone.
+    leaving: RefCell<Vec<(String, WidgetTile)>>,
+    /// Whether the bar has been shown before. The first time is the dock
+    /// starting, and tiles that were there all along do not *arrive*.
+    shown_before: Cell<bool>,
 }
 
 impl Shelf {
@@ -687,7 +1019,8 @@ impl Shelf {
     /// Whether this widget is one of ours, and must survive a rebuild.
     ///
     /// The rebuild sweeps the bar clear of everything it is about to make
-    /// again. What the shelf owns is not made again, so it has to be asked.
+    /// again. What the shelf owns is not made again, so it has to be asked —
+    /// and a tile on its way out is still the shelf's until it has gone.
     pub fn owns(&self, child: &gtk::Widget) -> bool {
         if self
             .divider
@@ -700,15 +1033,20 @@ impl Shelf {
         self.tiles
             .borrow()
             .iter()
+            .chain(self.leaving.borrow().iter())
             .any(|(_, tile)| tile.root == *child)
     }
 
     /// Put these widgets on the bar, keeping the tiles already there.
     ///
     /// A tile whose id comes back is the same tile, moved into place and told
-    /// its new state rather than remade. One that does not come back is taken
-    /// off the bar and dropped — which is when its widget is finally
-    /// destroyed, because until then this held the only other reference to it.
+    /// its new state rather than remade. One that does not come back shrinks
+    /// off the bar where it stood and is dropped once it has gone — which is
+    /// when its widget is finally destroyed, because until then this held
+    /// the only other reference to it. One that is new grows into the room
+    /// that opens for it. Both on the curve the icons use, so that a dock
+    /// switched for another is one movement and not a bar emptied and
+    /// refilled.
     ///
     /// Order is settled by moving each child to the end in turn, never by
     /// unparenting: taking a widget out of a container and putting it back is
@@ -725,22 +1063,51 @@ impl Shelf {
         look: Look,
         expand: &Expand,
     ) -> Reconciled {
-        let mut known: HashMap<String, WidgetTile> =
-            self.tiles.borrow_mut().drain(..).collect();
-        let had = known.len();
+        self.settle();
+        let announcing = self.shown_before.replace(true);
 
+        // The order the tiles stand in now, leaving ones included: where a
+        // tile that is going goes from is worked out from its neighbours.
+        let children = items.children();
+        let standing = |tile: &WidgetTile| children.iter().position(|child| *child == tile.root);
+        let mut before: Vec<(String, bool, WidgetTile)> = self
+            .tiles
+            .borrow_mut()
+            .drain(..)
+            .map(|(id, tile)| (id, false, tile))
+            .chain(
+                self.leaving
+                    .borrow_mut()
+                    .drain(..)
+                    .map(|(id, tile)| (id, true, tile)),
+            )
+            .collect();
+        before.sort_by_key(|(_, _, tile)| standing(tile));
+        let previous: Vec<String> = before.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut known: HashMap<String, (bool, WidgetTile)> = before
+            .into_iter()
+            .map(|(id, leaving, tile)| (id, (leaving, tile)))
+            .collect();
+
+        let mut did = Reconciled::default();
         let shown: Vec<(String, WidgetTile)> = widgets
             .iter()
             .map(|state| {
                 let tile = match known.remove(&state.id) {
-                    Some(tile) => {
+                    Some((_, tile)) => {
+                        did.kept += 1;
                         tile.relook(look);
                         tile.update(state);
+                        tile.stay();
                         tile
                     }
                     None => {
+                        did.made += 1;
                         let tile = WidgetTile::new(state, look, expand.clone());
                         items.add(&tile.root);
+                        if announcing {
+                            tile.arrive();
+                        }
                         tile
                     }
                 };
@@ -748,16 +1115,29 @@ impl Shelf {
             })
             .collect();
 
-        // Whatever no dock asks for any more.
-        let gone = known.len();
-        for (_, departed) in known {
-            items.remove(&departed.root);
-        }
-        let did = Reconciled {
-            kept: had - gone,
-            made: shown.len() - (had - gone),
-            gone,
-        };
+        // Whatever no dock asks for any more goes, from where it stood:
+        // after as many of its old neighbours as are still on the bar.
+        let staying: Vec<&String> = shown.iter().map(|(id, _)| id).collect();
+        let mut leaving: Vec<(usize, usize, String, WidgetTile)> = known
+            .into_iter()
+            .map(|(id, (was_leaving, tile))| {
+                if !was_leaving {
+                    did.gone += 1;
+                }
+                tile.leave();
+                let at = previous
+                    .iter()
+                    .position(|seen| *seen == id)
+                    .unwrap_or(previous.len());
+                let anchor = previous[..at]
+                    .iter()
+                    .filter(|seen| staying.contains(seen))
+                    .count();
+                (anchor, at, id, tile)
+            })
+            .collect();
+        leaving.sort_by_key(|(anchor, at, _, _)| (*anchor, *at));
+
         // Read back by scripts/check-live.sh, which has no other way to tell
         // a bar that kept its tiles from one that made them again.
         tracing::debug!(
@@ -767,14 +1147,20 @@ impl Shelf {
             "the widget shelf"
         );
 
-        if shown.is_empty() {
+        let mut order: Vec<&WidgetTile> = Vec::with_capacity(shown.len() + leaving.len());
+        let mut going = leaving.iter().peekable();
+        for (index, (_, tile)) in shown.iter().enumerate() {
+            while going.peek().is_some_and(|(anchor, ..)| *anchor <= index) {
+                order.push(&going.next().expect("peeked").3);
+            }
+            order.push(tile);
+        }
+        order.extend(going.map(|(.., tile)| tile));
+
+        if order.is_empty() {
             // Nothing to divide from. A separator with no widgets behind it
             // is a stray line at the end of the bar.
-            if let Some(divider) = self.divider.borrow().as_ref() {
-                if divider.parent().is_some() {
-                    items.remove(divider);
-                }
-            }
+            self.take_divider_down();
         } else {
             let divider = self
                 .divider
@@ -785,13 +1171,72 @@ impl Shelf {
                 items.add(&divider);
             }
             items.reorder_child(&divider, -1);
-            for (_, tile) in &shown {
+            for tile in order {
                 items.reorder_child(&tile.root, -1);
             }
         }
 
         *self.tiles.borrow_mut() = shown;
+        *self.leaving.borrow_mut() = leaving
+            .into_iter()
+            .map(|(_, _, id, tile)| (id, tile))
+            .collect();
         did
+    }
+
+    /// Let go of the tiles that have finished leaving, and of the divider if
+    /// nothing is left for it to divide.
+    ///
+    /// A tile takes itself off the bar on the last frame of its leaving, but
+    /// only if there is a frame to take it on: this is for whoever cannot
+    /// wait for one — the next `show`, and the bar measuring itself once a
+    /// dock switch is over.
+    pub fn settle(&self) {
+        self.leaving.borrow_mut().retain(|(_, tile)| {
+            if tile.life.get().gone() {
+                tile.unshelve();
+                return false;
+            }
+            true
+        });
+        for (_, tile) in self.tiles.borrow().iter().chain(self.leaving.borrow().iter()) {
+            tile.pass();
+        }
+        if self.tiles.borrow().is_empty() && self.leaving.borrow().is_empty() {
+            self.take_divider_down();
+        }
+    }
+
+    fn take_divider_down(&self) {
+        if let Some(divider) = self.divider.borrow().as_ref() {
+            if let Some(parent) = divider
+                .parent()
+                .and_then(|parent| parent.downcast::<gtk::Container>().ok())
+            {
+                parent.remove(divider);
+            }
+        }
+    }
+
+    /// Whether any tile is still arriving or leaving.
+    pub fn changing(&self) -> bool {
+        self.tiles
+            .borrow()
+            .iter()
+            .chain(self.leaving.borrow().iter())
+            .any(|(_, tile)| tile.life.get().moving())
+    }
+
+    /// How much wider the shelf would be with every tile at its full size —
+    /// the arriving ones arrived and the leaving ones not yet gone. The same
+    /// question `Row::unfolding` asks of the icons, and for the same reason.
+    pub fn unfolding(&self) -> i32 {
+        self.tiles
+            .borrow()
+            .iter()
+            .chain(self.leaving.borrow().iter())
+            .map(|(_, tile)| tile.unfolding())
+            .sum()
     }
 
     /// Say again what every tile is showing, after the bar's `show_all`.
@@ -824,6 +1269,58 @@ impl Shelf {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_of_tile_is_said_in_words() {
+        let clock = WidgetState::new(
+            "time-progress",
+            Body::Simple(Simple { label: "63%".to_string(), detail: "of today".to_string(), progress: 0.63, active: false }),
+        );
+        assert_eq!(spoken(&clock), "Time progress: 63%, of today");
+        assert_eq!(spoken(&water(750, 2000)), "Water: 750 of 2000 ml");
+        let music = |title: &str, artist: &str| {
+            WidgetState::new(
+                "music",
+                Body::Music(doca_ipc::Music {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    player: "rhythmbox".to_string(),
+                    playing: true,
+                    art: String::new(),
+                }),
+            )
+        };
+        assert_eq!(spoken(&music("Girl from Ipanema", "João Gilberto")), "Music: Girl from Ipanema by João Gilberto");
+        assert_eq!(spoken(&music("", "")), "Music: nothing playing");
+        let note = |text: &str| {
+            WidgetState::new(
+                "note",
+                Body::Note(doca_ipc::Note { text: text.to_string(), colour: "yellow".to_string() }),
+            )
+        };
+        assert_eq!(spoken(&note("\n  milk\nbread")), "Note: milk", "the first line that says something");
+        assert_eq!(spoken(&note("")), "Note: empty");
+        let calendar = |upcoming: Vec<doca_ipc::Upcoming>, missing: &str| {
+            WidgetState::new(
+                "calendar",
+                Body::Calendar(doca_ipc::Calendar {
+                    weekday: "Sat".to_string(),
+                    day: 17,
+                    upcoming,
+                    missing: missing.to_string(),
+                }),
+            )
+        };
+        let dentist = doca_ipc::Upcoming { when: "19:00".to_string(), title: "Dentist".to_string(), now: false };
+        let named = crate::panel::name_of("calendar");
+        assert_eq!(spoken(&calendar(vec![dentist], "")), format!("{named}: Sat 17, 19:00 Dentist"));
+        assert_eq!(spoken(&calendar(Vec::new(), "")), format!("{named}: Sat 17, nothing ahead"));
+        assert_eq!(
+            spoken(&calendar(Vec::new(), "no calendar service")),
+            format!("{named}: Sat 17, no calendar service"),
+            "what is missing, never an empty day"
+        );
+    }
 
     pub fn simple(id: &str) -> WidgetState {
         WidgetState::new(
@@ -1175,6 +1672,89 @@ pub mod tests {
         );
     }
 
+    /// The calendar draws its date always, its list only when there is room,
+    /// and what is happening now in the accent.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_calendar_tile_keeps_its_date_and_gives_up_its_list() {
+        let up = |when: &str, title: &str, now: bool| doca_ipc::Upcoming {
+            when: when.to_string(),
+            title: title.to_string(),
+            now,
+        };
+        let calendar = |upcoming: Vec<doca_ipc::Upcoming>| doca_ipc::Calendar {
+            weekday: "Sat".to_string(),
+            day: 17,
+            upcoming,
+            missing: String::new(),
+        };
+        // Every pixel's alpha, and how many right of the leaf are painted and
+        // how many of those in the accent — at the width the bar really gives
+        // a calendar at that level.
+        let drawn = |calendar: &doca_ipc::Calendar, level: Level| {
+            let height = ICON;
+            let width = level.width(Tile::Wide, ICON);
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width, height).expect("no surface");
+            let mut tile_look = look(ICON);
+            tile_look.level = level;
+            {
+                let cr = gtk::cairo::Context::new(&surface).expect("no context");
+                let area = gtk::DrawingArea::new();
+                area.set_size_request(width, height);
+                draw_calendar(calendar, tile_look, &area, &cr, width as f64, height as f64);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().expect("the surface is still borrowed");
+            let fill = tile_look.palette.fill;
+            let leaf = (ICON as f64 * 0.72) as usize + 2;
+            let (mut alphas, mut list, mut accent) = (Vec::new(), 0usize, 0usize);
+            for row in 0..height as usize {
+                for column in 0..width as usize {
+                    let at = row * stride + column * 4;
+                    alphas.push(data[at + 3]);
+                    if data[at + 3] == 0 || column < leaf {
+                        continue;
+                    }
+                    list += 1;
+                    // ARGB32 is premultiplied BGRA in memory. Text over
+                    // nothing keeps its ink's colour at every coverage,
+                    // so un-premultiplied it is the accent or it is not.
+                    let alpha = data[at + 3] as f64;
+                    let channel = |offset: usize| data[at + offset] as f64 * 255.0 / alpha;
+                    if (channel(2) - fill.red() * 255.0).abs() < 12.0
+                        && (channel(1) - fill.green() * 255.0).abs() < 12.0
+                        && (channel(0) - fill.blue() * 255.0).abs() < 12.0
+                    {
+                        accent += 1;
+                    }
+                }
+            }
+            (alphas, list, accent)
+        };
+
+        let busy = calendar(vec![up("19:00", "Dinner", false), up("Sun 09:00", "Mass", false)]);
+        let (full, list, _) = drawn(&busy, Level::Full);
+        assert!(full.iter().any(|a| *a > 0), "nothing was drawn");
+        assert!(list > 0, "the list was not drawn");
+
+        let (minimal, _, _) = drawn(&busy, Level::Minimal);
+        let (minimal_empty, _, _) = drawn(&calendar(vec![]), Level::Minimal);
+        assert!(minimal.iter().any(|a| *a > 0), "a crowded bar lost the date, which is the one thing it keeps");
+        assert_eq!(minimal, minimal_empty, "the narrowest tile still drew part of a list it has no room for");
+
+        let (_, compact_list, _) = drawn(&busy, Level::Compact);
+        assert!(compact_list > 0 && compact_list < list, "compact keeps the next time and only that");
+
+        let (_, _, calm) = drawn(&calendar(vec![up("19:00", "Dinner", false)]), Level::Full);
+        let (_, _, lit) = drawn(&calendar(vec![up("now", "Dinner", true)]), Level::Full);
+        assert!(lit > calm, "something under way is not drawn apart: {calm} accent pixels against {lit}");
+
+        let (_, nothing, _) = drawn(&calendar(vec![]), Level::Full);
+        assert!(nothing > 0, "nothing ahead drew nothing, which reads as a broken tile");
+    }
+
     /// The one that matters. Everything else here is about this holding under
     /// a list that moved.
     ///
@@ -1205,11 +1785,100 @@ pub mod tests {
 
         assert_eq!(did, Reconciled { kept: 1, made: 0, gone: 1 });
         assert_eq!(roots(&shelf), vec![clock.clone()], "the wrong tile stayed");
+        // Going, not gone: it shrinks off the bar where it stood, the way an
+        // icon does, rather than leaving a tile-sized hole in one frame.
+        assert!(
+            items.children().contains(&cpu),
+            "the tile was snatched off the bar instead of leaving it"
+        );
+
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
+
         assert!(
             !items.children().contains(&cpu),
             "a widget nobody asks for is still on the bar"
         );
         assert!(items.children().contains(&clock), "the survivor went too");
+    }
+
+    /// The other half of a dock switch: the tiles of the dock that came in.
+    /// They grow into the room that opens for them rather than appearing in
+    /// it at full size — but only when something is switched, never when the
+    /// dock starts with them already on it.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_widget_that_joined_grows_onto_the_bar_rather_than_appearing() {
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+        assert_eq!(
+            widths(&shelf),
+            vec![Tile::Wide.width(ICON)],
+            "a tile the dock started with was announced as if it had just come"
+        );
+
+        shelf.show(&items, &[simple("clock"), water(2, 8)], look(ICON), &expand);
+        let joined = widths(&shelf)[1];
+        assert!(
+            joined < Tile::Wide.width(ICON) / 2,
+            "the new tile took {joined}px the instant it was asked for"
+        );
+        assert!(shelf.changing());
+
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
+
+        assert_eq!(
+            widths(&shelf),
+            vec![Tile::Wide.width(ICON), Tile::Wide.width(ICON)],
+            "the new tile never finished arriving"
+        );
+        assert!(!shelf.changing());
+        assert_eq!(shelf.unfolding(), 0);
+    }
+
+    /// A tile on its way out goes from where it stood, between the same two
+    /// neighbours, not from the end of the shelf it was moved to.
+    pub fn a_tile_that_is_leaving_keeps_its_place_until_it_has_gone() {
+        let (items, row, shelf, expand) = bar();
+        shelf.show(
+            &items,
+            &[simple("clock"), simple("cpu"), simple("disk")],
+            look(ICON),
+            &expand,
+        );
+        let standing = roots(&shelf);
+
+        shelf.show(&items, &[simple("clock"), simple("disk")], look(ICON), &expand);
+
+        let divider = shelf.divider.borrow().clone().expect("a divider").upcast();
+        let mut expected = vec![row, divider];
+        expected.extend(standing);
+        assert_eq!(
+            items.children(),
+            expected,
+            "the leaving tile was moved before it went"
+        );
+    }
+
+    /// Two dock switches in a row, faster than a tile can leave: the tile
+    /// asked for again is the same tile, turned round where it stood.
+    pub fn a_tile_asked_for_again_while_leaving_turns_round() {
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[simple("clock"), simple("cpu")], look(ICON), &expand);
+        let cpu = roots(&shelf)[1].clone();
+
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+        let did = shelf.show(&items, &[simple("clock"), simple("cpu")], look(ICON), &expand);
+
+        assert_eq!(
+            did,
+            Reconciled { kept: 2, made: 0, gone: 0 },
+            "a tile that had not finished leaving was made again"
+        );
+        assert_eq!(roots(&shelf)[1], cpu);
+        let tiles = shelf.tiles.borrow();
+        assert!(!tiles[1].1.life.get().leaving(), "the tile that came back is still going");
     }
 
     /// Adding a widget to one dock must not reset the stopwatch in another,
@@ -1257,6 +1926,13 @@ pub mod tests {
         assert_eq!(items.children().len(), 3, "row, divider, tile");
 
         shelf.show(&items, &[], look(ICON), &expand);
+        assert_eq!(
+            items.children().len(),
+            3,
+            "the divider went before the tile it divides had finished going"
+        );
+        std::thread::sleep(motion::ENTRY);
+        shelf.settle();
 
         assert_eq!(
             items.children(),
@@ -1303,6 +1979,21 @@ pub mod tests {
     /// a wide one is two and a half, side by side.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    /// A tile says what it shows to a screen reader, and says it again when
+    /// it changes — it is a drawing, and otherwise says nothing at all.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_tile_tells_a_screen_reader_what_it_shows() {
+        use atk::prelude::*;
+        let tile = WidgetTile::new(&water(500, 2000), look(ICON), Rc::new(|_: &str, _: &gtk::Widget| {}));
+        let accessible = tile.root.accessible().expect("a widget has an accessible");
+        assert_eq!(accessible.name().as_deref(), Some("Water: 500 of 2000 ml"));
+        assert_eq!(accessible.role(), atk::Role::PushButton, "choosing it opens a panel");
+
+        tile.update(&water(750, 2000));
+        assert_eq!(accessible.name().as_deref(), Some("Water: 750 of 2000 ml"), "it said the old amount");
+    }
+
     pub fn a_tile_is_the_size_the_widget_declared() {
         let (items, _, shelf, expand) = bar();
 
