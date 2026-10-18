@@ -14,6 +14,9 @@ pub struct WindowInfo {
     pub app_id: String,
     pub workspace: i32,
     pub active: bool,
+    /// Covering its whole monitor, the way a video or a game does. The bar
+    /// gets out of the way of one that is active (#18, item 12).
+    pub fullscreen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -108,6 +111,8 @@ pub enum Body {
     Water(Water),
     Music(Music),
     Note(Note),
+    Calendar(Calendar),
+    Claude(Claude),
 }
 
 /// The name each [`Body`] arm travels under, which is the `s` of the `(s v)`.
@@ -119,9 +124,11 @@ pub mod body_kind {
     pub const WATER: &str = "water";
     pub const MUSIC: &str = "music";
     pub const NOTE: &str = "note";
+    pub const CALENDAR: &str = "calendar";
+    pub const CLAUDE: &str = "claude";
 
     /// Every name there is, for a test to walk.
-    pub const ALL: [&str; 4] = [SIMPLE, WATER, MUSIC, NOTE];
+    pub const ALL: [&str; 6] = [SIMPLE, WATER, MUSIC, NOTE, CALENDAR, CLAUDE];
 }
 
 /// Two lines and a progress bar.
@@ -205,6 +212,61 @@ pub struct Note {
     pub colour: String,
 }
 
+/// The day, and what is coming up in it and after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Calendar {
+    /// The day of the week, short: `Sat`.
+    pub weekday: String,
+    /// The day of the month.
+    pub day: u32,
+    /// What has not ended yet, soonest first. Only as many as a tile or a
+    /// panel could show; the daemon decides how far ahead to look.
+    pub upcoming: Vec<Upcoming>,
+    /// Empty when the calendars were read. Otherwise what is missing, in the
+    /// words the tile should say it in — "no calendar service" — so that an
+    /// empty list means *nothing ahead* and never *could not look*.
+    pub missing: String,
+}
+
+/// Claude Code's usage, as the tile says it and as the panel breaks it down.
+///
+/// The tile's two lines and bar travel ready-made, as a `Simple` would carry
+/// them: what they say depends on the mode, the budget and the user's zone,
+/// all of which the daemon holds. The four counts are what the panel adds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Claude {
+    /// One of [`claude_mode::ALL`], so the panel can say which is showing.
+    pub mode: String,
+    pub label: String,
+    pub detail: String,
+    /// The share of the budget, or [`NO_PROGRESS`] with none set.
+    pub progress: f64,
+    /// At or past the point the tile marks itself.
+    pub near: bool,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    /// When the window being counted turns over, in words — `20:30`,
+    /// `midnight` — or empty for one that rolls rather than turns.
+    pub turns: String,
+}
+
+/// One thing on the calendar, as it will be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Upcoming {
+    /// When, already in words: `19:00`, `Tue 14:00`, `today`, `now`.
+    ///
+    /// Written by the daemon rather than sent as an instant because it is
+    /// the daemon that knows the user's zone and reads the calendar in it;
+    /// a bar formatting an instant would be a second opinion on what time it
+    /// is.
+    pub when: String,
+    pub title: String,
+    /// Under way right now, which is drawn apart from what is still to come.
+    pub now: bool,
+}
+
 /// The papers a note can be written on.
 ///
 /// The primo.dock's six, kept whole rather than pruned: a post-it colour is
@@ -272,6 +334,8 @@ impl Body {
             Body::Water(_) => body_kind::WATER,
             Body::Music(_) => body_kind::MUSIC,
             Body::Note(_) => body_kind::NOTE,
+            Body::Calendar(_) => body_kind::CALENDAR,
+            Body::Claude(_) => body_kind::CLAUDE,
         }
     }
 
@@ -296,6 +360,11 @@ impl Body {
             // A post-it is a square. It is the one tile whose shape is the
             // thing it is standing for rather than a choice about room.
             Body::Note(_) => Tile::Square,
+            // The date on the left and the agenda beside it: the issue asks
+            // for the card, and a square holds the date and nothing else.
+            Body::Calendar(_) => Tile::Wide,
+            // Two lines and a bar, which is the simple tile's shape.
+            Body::Claude(_) => Tile::Wide,
         }
     }
 }
@@ -336,6 +405,8 @@ impl WidgetState {
             Body::Water(water) => OwnedValue::try_from(water),
             Body::Music(music) => OwnedValue::try_from(music),
             Body::Note(note) => OwnedValue::try_from(note),
+            Body::Calendar(calendar) => OwnedValue::try_from(calendar),
+            Body::Claude(claude) => OwnedValue::try_from(claude),
         };
         Self {
             id: id.into(),
@@ -371,6 +442,12 @@ impl WidgetState {
             body_kind::NOTE => Note::try_from(self.body.clone())
                 .map(Body::Note)
                 .map_err(|e| unreadable(e.to_string())),
+            body_kind::CALENDAR => Calendar::try_from(self.body.clone())
+                .map(Body::Calendar)
+                .map_err(|e| unreadable(e.to_string())),
+            body_kind::CLAUDE => Claude::try_from(self.body.clone())
+                .map(Body::Claude)
+                .map_err(|e| unreadable(e.to_string())),
             unknown => Err(UnreadableBody {
                 kind: unknown.to_string(),
                 why: format!("no such body; this build knows {}", body_kind::ALL.join(", ")),
@@ -385,6 +462,28 @@ impl WidgetState {
 }
 
 pub const NO_PROGRESS: f64 = -1.0;
+
+/// Tokens as a tile can show them: `950`, `12k`, `2.4M`.
+///
+/// Three significant figures at most, because a tile is read at a glance and
+/// `2412887` is read digit by digit.
+pub fn compact_tokens(tokens: u64) -> String {
+    let scaled = |value: f64, unit: &str| {
+        if value < 10.0 {
+            let tenth = format!("{value:.1}");
+            format!("{}{unit}", tenth.trim_end_matches(".0"))
+        } else {
+            format!("{value:.0}{unit}")
+        }
+    };
+    match tokens {
+        0..=999 => tokens.to_string(),
+        1_000..=999_999 => scaled(tokens as f64 / 1e3, "k"),
+        1_000_000..=999_999_999 => scaled(tokens as f64 / 1e6, "M"),
+        _ => scaled(tokens as f64 / 1e9, "B"),
+    }
+}
+
 
 /// The look of the dock as the daemon reports it.
 ///
@@ -423,6 +522,82 @@ pub struct WidgetSettings {
     pub water_bottle: u32,
     /// One of [`note_colour::ALL`].
     pub note_colour: String,
+    /// One of [`calendar_ahead::ALL`].
+    pub calendar_ahead: String,
+    /// Whether all-day events are listed.
+    pub calendar_all_day: bool,
+    /// One of [`claude_mode::ALL`].
+    pub claude_mode: String,
+    /// One of [`claude_window::ALL`]; read in the tokens mode only.
+    pub claude_window: String,
+    /// Tokens the user means to stay under; 0 for none.
+    pub claude_budget: u32,
+}
+
+/// The three views of Claude Code's usage (#32).
+pub mod claude_mode {
+    /// The five-hour session open now.
+    pub const FIVE_HOURS: &str = "five-hours";
+    /// The last seven days.
+    pub const WEEK: &str = "week";
+    /// Tokens over a window of the user's choosing.
+    pub const TOKENS: &str = "tokens";
+
+    pub const ALL: [&str; 3] = [FIVE_HOURS, WEEK, TOKENS];
+
+    /// The session: it is the limit people actually run into in a day.
+    pub const DEFAULT: &str = FIVE_HOURS;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+}
+
+/// The windows the tokens mode counts over.
+pub mod claude_window {
+    pub const FIVE_HOURS: &str = "5h";
+    pub const TODAY: &str = "today";
+    pub const WEEK: &str = "7-days";
+
+    pub const ALL: [&str; 3] = [FIVE_HOURS, TODAY, WEEK];
+
+    pub const DEFAULT: &str = TODAY;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+}
+
+/// How far ahead the calendar looks, as the issue lists them: today, three
+/// days, a week, a month.
+pub mod calendar_ahead {
+    pub const TODAY: &str = "today";
+    pub const THREE_DAYS: &str = "3-days";
+    pub const WEEK: &str = "week";
+    pub const MONTH: &str = "month";
+
+    pub const ALL: [&str; 4] = [TODAY, THREE_DAYS, WEEK, MONTH];
+
+    /// A week: a dock is for the next few things, and a week holds them
+    /// without scrolling past what matters today.
+    pub const DEFAULT: &str = WEEK;
+
+    pub fn resolve(asked: &str) -> &'static str {
+        ALL.into_iter().find(|name| *name == asked).unwrap_or(DEFAULT)
+    }
+
+    /// Whole days after today that are looked at: today alone is zero.
+    pub fn days_after_today(name: &str) -> i64 {
+        match resolve(name) {
+            TODAY => 0,
+            THREE_DAYS => 2,
+            MONTH => 30,
+            _ => 6,
+        }
+    }
+
+    /// The most days any choice looks ahead, which is what is read.
+    pub const FURTHEST: i64 = 30;
 }
 
 /// The widgets that take a setting, and what `SetWidgetSetting` calls each.
@@ -431,6 +606,8 @@ pub struct WidgetSettings {
 /// against; the daemon's own `match` is the other half of this and `docad`
 /// has a test that no pair here is refused.
 pub mod widget_key {
+    pub const CALENDAR: &str = "calendar";
+    pub const CLAUDE: &str = "claude";
     pub const COUNTDOWN: &str = "countdown";
     pub const NOTE: &str = "note";
     pub const TIMER: &str = "timer";
@@ -443,9 +620,19 @@ pub mod widget_key {
     pub const GOAL: &str = "goal";
     pub const BOTTLE: &str = "bottle";
     pub const COLOUR: &str = "colour";
+    pub const AHEAD: &str = "ahead";
+    pub const ALL_DAY: &str = "all_day";
+    pub const MODE: &str = "mode";
+    pub const WINDOW: &str = "window";
+    pub const BUDGET: &str = "budget";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 7] = [
+    pub const ALL: [(&str, &str); 12] = [
+        (CALENDAR, AHEAD),
+        (CALENDAR, ALL_DAY),
+        (CLAUDE, MODE),
+        (CLAUDE, WINDOW),
+        (CLAUDE, BUDGET),
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),
@@ -533,8 +720,9 @@ pub const THEMES: [&str; 4] = ["system", "native", "midnight", "paper"];
 /// to offer the list without writing it out by hand. `docad` has a test that
 /// every id here builds into a real widget, so a name that goes stale fails
 /// the suite rather than logging "ignoring unknown widget" at someone.
-pub const WIDGETS: [&str; 12] = [
+pub const WIDGETS: [&str; 14] = [
     "clock",
+    "calendar",
     "battery",
     "cpu",
     "network",
@@ -546,6 +734,7 @@ pub const WIDGETS: [&str; 12] = [
     "countdown",
     "water",
     "note",
+    "claude",
 ];
 
 /// The theme a config that never mentioned one gets.
@@ -618,6 +807,9 @@ pub trait Doca {
     fn current_environment(&self) -> zbus::Result<String>;
     fn set_environment(&self, name: &str) -> zbus::Result<()>;
     fn cycle_environment(&self) -> zbus::Result<String>;
+    fn cycle_environment_back(&self) -> zbus::Result<String>;
+    fn toggle_auto_hide(&self) -> zbus::Result<bool>;
+    fn toggle_widget(&self, id: &str) -> zbus::Result<bool>;
 
     fn appearance(&self) -> zbus::Result<Appearance>;
 
@@ -674,6 +866,7 @@ pub trait Doca {
     fn list_items(&self) -> zbus::Result<Vec<DockItem>>;
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
+    fn activate_position(&self, position: u32) -> zbus::Result<String>;
     fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
     fn list_folder(&self, id: &str) -> zbus::Result<Vec<FolderEntry>>;
     fn open_path(&self, path: &str) -> zbus::Result<()>;
@@ -705,6 +898,9 @@ pub trait Doca {
 
     #[zbus(signal)]
     fn items_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn item_activated(&self, id: &str, starting: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn windows_changed(&self) -> zbus::Result<()>;
@@ -819,6 +1015,33 @@ mod tests {
                     player: "rhythmbox".to_string(),
                     playing: true,
                     art: "/tmp/cover.png".to_string(),
+                }),
+            ),
+            (
+                body_kind::CALENDAR,
+                Body::Calendar(Calendar {
+                    weekday: "Sat".to_string(),
+                    day: 17,
+                    upcoming: vec![
+                        Upcoming { when: "now".to_string(), title: "Standup".to_string(), now: true },
+                        Upcoming { when: "Tue 14:00".to_string(), title: "Dentist".to_string(), now: false },
+                    ],
+                    missing: String::new(),
+                }),
+            ),
+            (
+                body_kind::CLAUDE,
+                Body::Claude(Claude {
+                    mode: claude_mode::FIVE_HOURS.to_string(),
+                    label: "80%".to_string(),
+                    detail: "2.4M of 3M".to_string(),
+                    progress: 0.8,
+                    near: true,
+                    input: 2,
+                    output: 550,
+                    cache_write: 17_842,
+                    cache_read: 28_458,
+                    turns: "20:30".to_string(),
                 }),
             ),
         ]

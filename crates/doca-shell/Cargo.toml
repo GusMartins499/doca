@@ -17,6 +17,9 @@ gtk = "0.18"
 gdk = "0.18"
 gdkx11 = "0.18"
 glib = "0.18"
+# Names for screen readers (#18, item 9). GTK 3 hands out an AtkObject per
+# widget; setting what it says needs the trait that lives in this crate.
+atk = "0.18"
 pango = "0.18"
 pangocairo = "0.18"
 x11rb = "0.13"

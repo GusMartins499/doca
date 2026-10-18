@@ -338,8 +338,31 @@ pub fn accept_file_drops(icons: &crate::row::Row) {
         });
 }
 
+/// Whether the window in front is fullscreen, and so owns the whole screen.
+///
+/// Only the active one: a fullscreen video left playing behind the window
+/// you are typing in is not in front of anything, and the dock should be.
+pub fn covered_by_fullscreen(windows: &[doca_ipc::WindowInfo]) -> bool {
+    windows.iter().any(|window| window.active && window.fullscreen)
+}
+
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn only_a_fullscreen_window_in_front_sends_the_dock_away() {
+        let window = |active: bool, fullscreen: bool| doca_ipc::WindowInfo {
+            id: 1,
+            title: String::new(),
+            app_id: "mpv".to_string(),
+            workspace: 0,
+            active,
+            fullscreen,
+        };
+        assert!(covered_by_fullscreen(&[window(false, false), window(true, true)]));
+        assert!(!covered_by_fullscreen(&[window(false, true), window(true, false)]), "fullscreen behind, not in front");
+        assert!(!covered_by_fullscreen(&[]));
+    }
+
     use super::*;
 
     const SCREEN: (i32, i32) = (1920, 1080);

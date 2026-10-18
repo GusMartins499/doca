@@ -725,6 +725,31 @@ PY
 else
     echo "  skip  xdotool or python3-gi missing: a drag to the bar is not checked"
 fi
+
+# The screen changing under a running bar (#18, item 11): a monitor swapped,
+# a resolution switched. The bar has to land on the new bottom edge, inside
+# the new width — before this it stayed where the old screen had it, which
+# on a smaller one is entirely off it.
+if command -v xrandr >/dev/null; then
+    xrandr --fb 1024x640 >/dev/null 2>&1
+    FOLLOWED=0
+    for _ in $(seq 1 30); do
+        # "WxH+X+Y" of the bar's window, as the X server has it.
+        SHAPE=$(xwininfo -root -children 2>/dev/null | grep '"Doca":' | head -1 |
+            grep -o '[0-9]*x[0-9]*+-\?[0-9]*+-\?[0-9]*' | head -1)
+        W=${SHAPE%%x*}; REST=${SHAPE#*x}; H=${REST%%+*}; Y=${SHAPE##*+}
+        if [ -n "$SHAPE" ] && [ $((Y + H)) -eq 640 ] && [ "$W" -le 1024 ]; then
+            FOLLOWED=1
+            break
+        fi
+        sleep 0.1
+    done
+    [ "$FOLLOWED" = "1" ] && ok "the bar moved to a screen that changed size under it ($SHAPE)" \
+        || fail "the screen shrank to 1024x640 and the bar stayed at $SHAPE"
+    xrandr --fb 1280x800 >/dev/null 2>&1
+else
+    echo "  skip  xrandr not installed: the screen changing is not checked"
+fi
 kill "$BAR" 2>/dev/null
 
 # The point of the whole script: somebody else writes, and the window follows.

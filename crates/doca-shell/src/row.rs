@@ -9,68 +9,12 @@ use gtk::prelude::*;
 use doca_ipc::{DockItem, DocaProxy};
 
 use crate::magnify::{self, Placement};
+use crate::motion::Life;
 
 /// Room under the icons for the running-app dot.
 pub const INDICATOR: i32 = 9;
 const DOT_WIDTH: f64 = 6.0;
 const DOT_HEIGHT: f64 = 3.0;
-
-/// How far onto the row an icon has got, and which way it is going.
-///
-/// One instant and one direction, read afresh every frame — the same shape
-/// the lens and the bar use, and for the same reason: an app that opens and
-/// closes again inside a sixth of a second must turn its icon round from
-/// wherever it had got to, and nothing can do that if the position is stored
-/// instead of derived.
-#[derive(Clone, Copy)]
-struct Life {
-    since: Instant,
-    arriving: bool,
-}
-
-impl Life {
-    /// An icon that is simply there: nothing to draw arriving, nothing to wait
-    /// for. What every icon is, except for the few frames after it joined.
-    fn settled() -> Self {
-        Self {
-            since: Instant::now() - crate::motion::ENTRY,
-            arriving: true,
-        }
-    }
-
-    fn arriving() -> Self {
-        Self {
-            since: Instant::now(),
-            arriving: true,
-        }
-    }
-
-    /// Turned round where it stands, rather than restarted.
-    fn reversed(&self) -> Self {
-        Self {
-            since: Instant::now()
-                - crate::motion::reversed_start(self.since.elapsed(), crate::motion::ENTRY),
-            arriving: !self.arriving,
-        }
-    }
-
-    fn presence(&self) -> f64 {
-        crate::motion::entry_progress(self.since.elapsed(), self.arriving)
-    }
-
-    fn leaving(&self) -> bool {
-        !self.arriving
-    }
-
-    fn moving(&self) -> bool {
-        self.since.elapsed() < crate::motion::ENTRY
-    }
-
-    /// Off the row for good: the space it was holding can be let go.
-    fn gone(&self) -> bool {
-        !self.arriving && !self.moving()
-    }
-}
 
 /// One icon, as the row needs it.
 pub struct Entry {
@@ -203,10 +147,13 @@ impl Rest {
     /// which is this run while the pointer is away and wider than it while
     /// the lens is open. See `ground::around`.
     pub fn run_width(&self, count: usize) -> i32 {
-        if count == 0 {
-            return 0;
-        }
-        (count as f64 * (self.slot + self.spacing) - self.spacing).ceil() as i32
+        self.run(count as f64).ceil() as i32
+    }
+
+    /// The run a number of slots takes, fractions of one included — which
+    /// is what a row with something arriving or leaving is made of.
+    pub fn run(&self, slots: f64) -> f64 {
+        magnify::run(slots, self.slot, self.spacing)
     }
 
     /// The surface the row is drawn on: the run, plus the room at either end
@@ -219,11 +166,17 @@ impl Rest {
     /// dock as wide as the screen with the icons adrift in the middle of it.
     /// Plank splits the two the same way — `DockWidth` is the whole monitor
     /// and `DockBackgroundWidth` the part that gets painted.
+    #[cfg(test)]
     pub fn width(&self, count: usize) -> i32 {
-        if count == 0 {
+        self.around(self.run_width(count))
+    }
+
+    /// The surface around a run of any width, a part-filled one included.
+    pub fn around(&self, run: i32) -> i32 {
+        if run <= 0 {
             return 0;
         }
-        self.run_width(count) + (self.margin * 2.0).ceil() as i32
+        run + (self.margin * 2.0).ceil() as i32
     }
 
     /// How tall the row is when nothing is magnified — the height the bar has.
@@ -261,8 +214,8 @@ pub struct Row {
     pub perch: gtk::Box,
     entries: Rc<RefCell<Vec<Entry>>>,
     rest: Rc<Cell<Rest>>,
-    /// How many icons the bar was sized for — everything in `entries` but
-    /// those on their way out, which are drawn in room the bar no longer has.
+    /// How many icons are staying — everything in `entries` but those on
+    /// their way out. The room the bar ends up holding, once nothing moves.
     settled: Rc<Cell<usize>>,
     /// Where the pointer is: what the lens is travelling towards.
     pointer: Rc<Cell<Option<f64>>>,
@@ -366,21 +319,29 @@ impl Row {
     /// windows away, took focus. What changed is which apps are running, not
     /// where the pointer is or what an icon looks like.
     pub fn fill(&self, items: &[DockItem], rest: Rest) {
+        // The row is one drawing, so a screen reader is told what is on it
+        // as the row's own description — in order, the way the keys count.
+        if let Some(accessible) = self.area.accessible() {
+            use atk::prelude::*;
+            accessible.set_name("Dock");
+            accessible.set_description(&spoken(items));
+        }
         let largest = (rest.icon * rest.scale).ceil() as i32;
         let resized = largest != self.largest.replace(largest);
-        // A row that had nothing on it, or one whose icons all just changed
-        // size, is not a row something arrived at. Without this every icon
-        // fades in together whenever the dock starts, the icon theme changes
-        // or the size slider moves a pixel — an animation that announces
-        // nothing, over and over.
-        let announcing = !self.entries.borrow().is_empty() && !resized;
+        // A row that had nothing on it is not a row something arrived at.
+        // Without this every icon fades in together whenever the dock starts
+        // or the icon theme changes — an animation that announces nothing.
+        //
+        // A row whose icons all changed size is not one either, but it is
+        // not thrown away to say so: the apps that stay keep their place and
+        // their life, and only their pictures are loaded again. Throwing it
+        // away is what made switching to a dock with more apps on it — which
+        // can take the icons down a size to fit — a bar emptied and refilled
+        // in one frame, rather than the same switch any other dock gets.
+        let announcing = !self.entries.borrow().is_empty();
 
-        let mut old: Vec<Option<Entry>> = if resized {
-            self.entries.borrow_mut().clear();
-            Vec::new()
-        } else {
-            self.entries.borrow_mut().drain(..).map(Some).collect()
-        };
+        let mut old: Vec<Option<Entry>> =
+            self.entries.borrow_mut().drain(..).map(Some).collect();
         let mut was_at: HashMap<String, usize> = old
             .iter()
             .enumerate()
@@ -397,18 +358,22 @@ impl Row {
             };
             let entry = old[at].take().expect("one id, one entry");
             survived[at] = true;
-            if entry.item.icon != item.icon {
-                // The same app wearing a different picture: a load, but not
-                // an arrival — it never left the bar.
-                staying.push(Entry::from(item, largest, false));
-                continue;
-            }
+            let entry = if resized || entry.item.icon != item.icon {
+                // The same app wearing a different picture, or the same
+                // picture at a different size: a load, but not an arrival —
+                // it never left the bar, and it goes on from where it was.
+                let loaded = Entry::from(item, largest, false);
+                loaded.life.set(entry.life.get());
+                loaded
+            } else {
+                entry.again(item)
+            };
             if entry.life.get().leaving() {
                 // Closed and reopened before its icon finished going: it
                 // comes back from the size it had shrunk to.
                 entry.life.set(entry.life.get().reversed());
             }
-            staying.push(entry.again(item));
+            staying.push(entry);
         }
 
         // Whatever the new list did not claim is on its way out. It holds its
@@ -445,18 +410,73 @@ impl Row {
 
         self.rest.set(rest);
         self.settled.set(items.len());
-        // The width the bar is given counts only the icons that are staying:
-        // a departing one is drawn in room the bar is already letting go of,
-        // and the row has margin enough at either end to draw it there. What
-        // keeps that from looking like a jump is that the run of icons is
-        // centred on the room rather than packed into the start of it — see
-        // `magnify::centres`.
-        self.perch
-            .set_size_request(rest.run_width(items.len()), rest.resting_height());
-        self.area
-            .set_size_request(rest.width(items.len()), rest.height());
+        self.hold_room();
         self.area.queue_draw();
         self.animate();
+    }
+
+    /// Give the bar the room the icons take this instant, and no more.
+    ///
+    /// It used to be handed the room for the icons that were staying, all at
+    /// once, with a departing icon drawn in the margin the row keeps for the
+    /// lens and the run centred so the icons did not see the jump. The icons
+    /// did not; everything else on the bar did. The widget tiles are laid out
+    /// after the row, and a bar that lost a slot in one frame moved them half
+    /// a slot in that frame — on a dock switch, where several icons go and
+    /// come at once, the tiles leapt sideways while the icons glided.
+    ///
+    /// So the room follows the icons, a fraction of a slot at a time, and is
+    /// let go of only as the icon that held it shrinks: the bar narrows as
+    /// one movement with the row, and what sits beside the row slides with
+    /// it. It is a layout a frame, but only for the frames something is
+    /// arriving or leaving — the lens, which is open for as long as the
+    /// pointer is on the bar, still never touches the layout.
+    fn hold_room(&self) {
+        let rest = self.rest.get();
+        let present: f64 = self
+            .entries
+            .borrow()
+            .iter()
+            .map(|entry| entry.life.get().presence())
+            .sum();
+        let run = rest.run(present).ceil() as i32;
+        if self.perch.size_request() == (run, rest.resting_height()) {
+            return;
+        }
+        self.perch.set_size_request(run, rest.resting_height());
+        self.area.set_size_request(rest.around(run), rest.height());
+    }
+
+    /// Whether anything on the row is still arriving or leaving.
+    pub fn changing(&self) -> bool {
+        self.entries
+            .borrow()
+            .iter()
+            .any(|entry| entry.life.get().moving())
+    }
+
+    /// Let go of what has finished leaving, and hand back the room it held.
+    ///
+    /// The clock does this a frame at a time; this is for whoever has to know
+    /// the row is done *now* — the bar, measuring itself once a dock switch
+    /// is over, cannot wait for a frame that a hidden window may never draw.
+    pub fn settle(&self) {
+        self.sweep();
+        self.hold_room();
+    }
+
+    /// How much wider the row would be with everything arriving already
+    /// there and everything leaving not yet gone.
+    ///
+    /// The widest the row can get in the middle of a change: an icon arriving
+    /// eases out and one leaving eases in, so halfway through a swap the two
+    /// together take more than either end of it. The window has to be that
+    /// wide for the whole of it, or the bar would outgrow the window and be
+    /// pushed off centre.
+    pub fn unfolding(&self) -> i32 {
+        let rest = self.rest.get();
+        let all = self.entries.borrow().len();
+        (rest.run_width(all) - self.perch.size_request().0).max(0)
     }
 
     /// Forget every icon, so the next fill loads them again.
@@ -501,7 +521,11 @@ impl Row {
         if entries.len() == self.settled.get() && presence.iter().all(|part| *part >= 1.0) {
             return (0..entries.len()).map(|index| rest.centre(index)).collect();
         }
-        magnify::centres(&presence, rest.slot, rest.spacing, rest.margin, self.settled.get())
+        // The room is what `hold_room` gave the bar, which is the icons as
+        // they are this instant — so the run fills it, and the bar moves with
+        // the row rather than the row moving inside a bar that jumped.
+        let room: f64 = presence.iter().sum();
+        magnify::centres(&presence, rest.slot, rest.spacing, rest.margin, room)
     }
 
     /// Note where the pointer is. Redrawing waits for the next frame.
@@ -598,6 +622,11 @@ impl Row {
         1.0 + (rest.scale - 1.0) * progress
     }
 
+    /// Where this item is in the row, if it is in it.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.entries.borrow().iter().position(|entry| entry.item.id == id)
+    }
+
     pub fn launch(&self, index: usize) {
         if let Some(entry) = self.entries.borrow().get(index) {
             entry.launched.set(Some(Instant::now()));
@@ -616,6 +645,7 @@ impl Row {
         self.area.add_tick_callback(move |area, _| {
             row.step(Instant::now());
             row.sweep();
+            row.hold_room();
             area.queue_draw();
             if let Some(follow) = row.following.borrow().as_ref() {
                 follow();
@@ -840,8 +870,38 @@ impl Row {
     }
 }
 
+/// What is on the row, in words: each item's name in order, and how many
+/// windows it has open when it has any.
+pub fn spoken(items: &[DockItem]) -> String {
+    items
+        .iter()
+        .map(|item| match item.windows.len() {
+            0 => item.name.clone(),
+            1 => format!("{} (open)", item.name),
+            n => format!("{} ({n} windows)", item.name),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn the_row_is_said_in_the_order_it_is_shown() {
+        let item = |name: &str, windows: usize| DockItem {
+            id: name.to_lowercase(),
+            name: name.to_string(),
+            icon: String::new(),
+            pinned: true,
+            windows: (0..windows as u32).collect(),
+            active: false,
+        };
+        assert_eq!(
+            super::spoken(&[item("Files", 0), item("Firefox", 2), item("Code", 1)]),
+            "Files, Firefox (2 windows), Code (open)"
+        );
+    }
+
     use super::*;
 
     fn item(id: &str) -> DockItem {
@@ -1247,12 +1307,12 @@ pub mod tests {
 
     /// Where the icons are, measured from the middle of the row.
     ///
-    /// The bar is centred on the screen and is given room for exactly the
-    /// icons that are staying, so this is the frame of reference in which the
-    /// row is judged: a position that holds here holds on screen, whatever
-    /// the bar's own width just did.
+    /// The bar is centred on the screen and is given the room the row asked
+    /// for this instant, so this is the frame of reference in which the row
+    /// is judged: a position that holds here holds on screen, whatever the
+    /// bar's own width just did.
     fn about_the_middle(row: &Row) -> Vec<f64> {
-        let half = row.rest.get().width(row.settled.get()) as f64 / 2.0;
+        let half = row.area.size_request().0 as f64 / 2.0;
         row.centres().into_iter().map(|centre| centre - half).collect()
     }
 
@@ -1280,10 +1340,10 @@ pub mod tests {
              somewhere it never stood"
         );
         assert!(row.entries.borrow()[2].life.get().leaving());
-        // The room, though, is given up at once: the bar is sized for the
-        // four that stay, and the fifth is drawn in the margin the row keeps
-        // at either end for the lens.
-        assert_eq!(row.perch.size_request().0, rest.run_width(4));
+        // And so does its room, at first: the bar lets go of it as the icon
+        // shrinks, not in the frame the app closed, so that whatever stands
+        // beside the row on the bar slides with it instead of jumping.
+        assert_eq!(row.perch.size_request().0, rest.run_width(5));
 
         // On its way out it is a picture and not a target.
         let (left, width) = row.rect_of(2);
@@ -1295,9 +1355,14 @@ pub mod tests {
         );
 
         std::thread::sleep(crate::motion::ENTRY);
-        row.sweep();
+        row.settle();
 
         assert_eq!(row.entries.borrow().len(), 4, "the space was never let go of");
+        assert_eq!(
+            row.perch.size_request().0,
+            rest.run_width(4),
+            "the icon went and the bar kept the room it had held"
+        );
         assert!(
             row.entries.borrow().iter().all(|entry| entry.item.id != "app2"),
             "the icon that left is still on the row"
@@ -1378,6 +1443,39 @@ pub mod tests {
             row.entries.borrow().iter().all(|entry| !entry.life.get().moving()),
             "a new icon theme faded the whole row in again"
         );
+    }
+
+    /// A dock switched for one with more apps on it can take the icons down a
+    /// size to fit. That is still a switch, and not a row starting over: the
+    /// apps both docks share stay on the row, and only what is new arrives.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_switch_that_took_the_icons_down_a_size_still_carries_the_shared_apps_over() {
+        let row = Row::new();
+        row.fill(&apps(5), Rest::new(ICON, 4, 4, SCALE));
+
+        let mut other = apps(3);
+        other.push(item("newcomer"));
+        row.fill(&other, Rest::new(ICON - 8, 4, 4, SCALE));
+
+        let entries = row.entries.borrow();
+        let life = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.item.id == id)
+                .map(|entry| entry.life.get())
+                .unwrap_or_else(|| panic!("{id} is not on the row at all"))
+        };
+        for shared in ["app0", "app1", "app2"] {
+            assert!(
+                !life(shared).moving(),
+                "{shared} is on both docks and was faded in again"
+            );
+        }
+        assert!(life("newcomer").moving() && !life("newcomer").leaving());
+        for gone in ["app3", "app4"] {
+            assert!(life(gone).leaving(), "{gone} was dropped instead of leaving");
+        }
     }
 
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
