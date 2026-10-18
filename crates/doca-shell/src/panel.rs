@@ -129,6 +129,8 @@ pub enum Row {
     Cover { art: String },
     /// Something you type into, rather than something you read.
     Text { value: String },
+    /// One thing on the calendar: when, and what. Added by #31.
+    Event { when: String, title: String, now: bool },
 }
 
 /// The widget's name as a person would write it: `time-progress` is
@@ -183,14 +185,13 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
         },
         Ok(Body::Calendar(calendar)) => Row::Heading {
             title: format!("{} {}", calendar.weekday, calendar.day),
-            detail: if !calendar.missing.is_empty() {
-                calendar.missing.clone()
-            } else {
-                calendar
-                    .upcoming
-                    .first()
-                    .map(|up| format!("{} {}", up.when, up.title))
-                    .unwrap_or_else(|| "nothing ahead".to_string())
+            // The list is right under it, so the heading counts rather than
+            // repeating its first line.
+            detail: match (calendar.missing.is_empty(), calendar.upcoming.len()) {
+                (false, _) => calendar.missing.clone(),
+                (true, 0) => "nothing ahead".to_string(),
+                (true, 1) => "1 coming up".to_string(),
+                (true, n) => format!("{n} coming up"),
             },
         },
         // A body this build cannot read still opens a panel that names the
@@ -215,6 +216,15 @@ pub fn rows_for(state: &WidgetState) -> Vec<Row> {
         if !music.art.is_empty() {
             rows.push(Row::Cover { art: music.art });
         }
+    }
+    // The agenda is the panel: the tile had room for three, this has room for
+    // all the daemon sent.
+    if let Ok(Body::Calendar(calendar)) = state.body() {
+        rows.extend(calendar.upcoming.into_iter().map(|up| Row::Event {
+            when: up.when,
+            title: up.title,
+            now: up.now,
+        }));
     }
     // The week sits above the controls: it is what you came to look at, and
     // the controls are what you do about it.
@@ -547,6 +557,34 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, 
             });
             (row, Some(update))
         }
+        Row::Event { when, title, now } => {
+            let at = gtk::Label::new(Some(when));
+            at.set_xalign(0.0);
+            at.set_width_chars(EVENT_WHEN_CHARS);
+            at.set_attributes(Some(&weighted(pango::Weight::Bold, 0.9)));
+            let what = gtk::Label::new(Some(title));
+            what.set_xalign(0.0);
+            what.set_ellipsize(pango::EllipsizeMode::End);
+            // The row is the panel's width like every other: the time takes
+            // its columns and the title the rest.
+            what.set_width_chars(ROW_CHARS - EVENT_WHEN_CHARS);
+            what.set_max_width_chars(ROW_CHARS - EVENT_WHEN_CHARS);
+            // Under way is the whole line in bold: the panel wears the
+            // desktop's menu colours, so weight is the emphasis it can use.
+            let weight = if *now { pango::Weight::Bold } else { pango::Weight::Normal };
+            what.set_attributes(Some(&weighted(weight, 0.9)));
+
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            line.add(&at);
+            line.add(&what);
+
+            let row = gtk::MenuItem::new();
+            row.add(&line);
+            // Something to read, not to choose — insensitive, like the week,
+            // so the keyboard does not stop on every appointment.
+            row.set_sensitive(false);
+            row
+        }
         Row::Week { days, goal } => {
             let area = gtk::DrawingArea::new();
             area.set_size_request(-1, WEEK_HEIGHT);
@@ -781,6 +819,10 @@ fn current(buffer: &gtk::TextBuffer) -> String {
 
 /// How long the typing has to stop before it is written down.
 const QUIET: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// How many of a row's characters the time of an appointment takes:
+/// `Tue 14:00` and a space.
+const EVENT_WHEN_CHARS: i32 = 9;
 
 /// How tall the note is in the panel.
 const TEXT_HEIGHT: i32 = 90;
@@ -1168,6 +1210,56 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn a_calendar_panel_lists_what_the_tile_had_no_room_for() {
+        let up = |when: &str, title: &str, now: bool| doca_ipc::Upcoming {
+            when: when.to_string(),
+            title: title.to_string(),
+            now,
+        };
+        let state = WidgetState::new(
+            "calendar",
+            Body::Calendar(doca_ipc::Calendar {
+                weekday: "Sat".to_string(),
+                day: 17,
+                upcoming: vec![
+                    up("now", "Standup", true),
+                    up("21:30", "Design review", false),
+                    up("today", "Ana birthday", false),
+                    up("Sun 10:00", "Gym", false),
+                ],
+                missing: String::new(),
+            }),
+        );
+        let rows = rows_for(&state);
+        assert_eq!(
+            rows[0],
+            Row::Heading { title: "Sat 17".to_string(), detail: "4 coming up".to_string() }
+        );
+        assert_eq!(
+            rows[1..].iter().map(|row| match row {
+                Row::Event { when, title, .. } => format!("{when} {title}"),
+                other => panic!("{other:?} in the agenda"),
+            }).collect::<Vec<_>>(),
+            vec!["now Standup", "21:30 Design review", "today Ana birthday", "Sun 10:00 Gym"],
+            "every one the daemon sent, in its order, and nothing else"
+        );
+
+        let unread = WidgetState::new(
+            "calendar",
+            Body::Calendar(doca_ipc::Calendar {
+                weekday: "Sat".to_string(),
+                day: 17,
+                upcoming: Vec::new(),
+                missing: "no calendar service".to_string(),
+            }),
+        );
+        assert_eq!(
+            rows_for(&unread),
+            vec![Row::Heading { title: "Sat 17".to_string(), detail: "no calendar service".to_string() }]
+        );
+    }
+
     /// And only water has one. A clock with a week of bars under it would be
     /// a drawer that ran on the wrong body.
     #[test]
@@ -1214,7 +1306,8 @@ pub mod tests {
                 Row::Heading { .. }
                 | Row::Week { .. }
                 | Row::Cover { .. }
-                | Row::Text { .. } => None,
+                | Row::Text { .. }
+                | Row::Event { .. } => None,
             })
             .collect();
         assert_eq!(offered, vec!["drink", "undo", "reset"]);
