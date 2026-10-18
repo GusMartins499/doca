@@ -372,6 +372,7 @@ async fn drive(
         label,
         themes: appearance::Themes::capture(),
         panels: panel::Remembered::default(),
+        showing: panel::Showing::default(),
         settling: Rc::new(RefCell::new(None)),
     };
 
@@ -435,6 +436,10 @@ async fn drive(
                 if let Some(signal) = signal {
                     if let Ok(args) = signal.args() {
                         tiles.update(&args.state);
+                        // And the panel, when it is this widget's that is
+                        // up: a panel outlives its controls, so it has to
+                        // show what they did.
+                        chrome.showing.update(&args.state);
                     }
                 }
                 continue;
@@ -617,6 +622,9 @@ struct Chrome {
     /// How big each widget's panel was the last time it was opened, so the
     /// next open does not blink — see `panel::Remembered`.
     panels: panel::Remembered,
+    /// The panel that is up, so a widget's news reaches it as well as the
+    /// tile.
+    showing: panel::Showing,
     /// The bar's second seating, once what a rebuild set moving has stopped.
     /// One at a time: a rebuild that lands mid-change starts the wait over.
     settling: Rc<RefCell<Option<glib::SourceId>>>,
@@ -698,6 +706,7 @@ fn expanding(
     window: gtk::Window,
     proxy: Rc<DocaProxy<'static>>,
     panels: panel::Remembered,
+    showing: panel::Showing,
     hide: Hide,
 ) -> widget_tile::Expand {
     let invoke: panel::Invoke = {
@@ -771,10 +780,40 @@ fn expanding(
         let closing = hide.clone();
         let dock = window.clone();
         let back_to = over.clone();
+        let going = showing.clone();
+        let gone = id.to_string();
         menu.connect_hide(move |_| {
+            going.gone(&gone);
             back_to.grab_focus();
             closing.slide(&dock, pointer_is_over(&dock));
         });
+
+        // What the rows are once they are in. None until the daemon has
+        // answered: news that arrives before then is already in the answer
+        // the panel is waiting for.
+        let live: Rc<RefCell<Option<panel::Live>>> = Rc::default();
+        {
+            let (menu, live, asks, show, panels) =
+                (menu.clone(), live.clone(), asks.clone(), show.clone(), panels.clone());
+            let widget = id.to_string();
+            showing.now(
+                id,
+                Rc::new(move |state: &doca_ipc::WidgetState| {
+                    let Some(current) = live.borrow().clone() else { return };
+                    let rows = panel::rows_for(state);
+                    if current.refresh(&rows) {
+                        return;
+                    }
+                    // A different shape — a cover that arrived — is drawn
+                    // again, which may move the panel; that is the price of a
+                    // row that was not there.
+                    panels.note(&widget, rows.len().max(1));
+                    let refilled =
+                        panel::fill(&menu, current.len(), &widget, &rows, &asks, &show, opened);
+                    live.replace(Some(refilled));
+                }),
+            );
+        }
 
         let filling = menu.clone();
         let proxy = proxy.clone();
@@ -798,7 +837,8 @@ fn expanding(
                 }
             };
             panels.note(&id, rows.len().max(1));
-            panel::fill(&filling, expected, &id, &rows, &asks, &show, opened);
+            let filled = panel::fill(&filling, expected, &id, &rows, &asks, &show, opened);
+            live.replace(Some(filled));
         });
     })
 }
@@ -837,6 +877,7 @@ async fn rebuild(
         label,
         themes,
         panels,
+        showing,
         settling,
     } = chrome;
     let appearance = proxy.appearance().await.ok();
@@ -973,7 +1014,13 @@ async fn rebuild(
     // The dock may have changed under a pointer that never moved.
     name_what_is_hovered(row, label);
 
-    let expand = expanding(window.clone(), proxy.clone(), panels.clone(), hide.clone());
+    let expand = expanding(
+        window.clone(),
+        proxy.clone(),
+        panels.clone(),
+        showing.clone(),
+        hide.clone(),
+    );
     tiles.show(
         items,
         &widgets,
@@ -1330,6 +1377,9 @@ fn on_a_display() {
     panel::tests::a_panel_opened_before_is_drawn_at_the_size_it_was();
     panel::tests::choosing_a_control_asks_the_daemon_for_it();
     panel::tests::the_keyboard_walks_the_controls_and_skips_the_heading();
+    panel::tests::choosing_a_control_leaves_the_panel_up();
+    panel::tests::the_release_of_the_click_that_opened_a_panel_chooses_nothing();
+    panel::tests::a_panel_that_is_up_takes_the_widgets_news_in_place();
     an_undefined_colour_is_not_something_gtk_reports();
     a_sheet_that_failed_to_load_leaves_the_provider_able_to_load_another();
     the_system_sheet_loads_against_a_real_gtk_theme();
