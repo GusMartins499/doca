@@ -159,6 +159,49 @@ case "$(call PinIn "Studio" "nothing.installed.here")" in
     *InvalidArgs*"no application called"*) ok "a refusal says what was wrong" ;;
     *) fail "the refusal was not something a window could show: $(call PinIn "Studio" "nothing.installed.here")" ;;
 esac
+
+# A pin that knows where: places counted from 1 in the order the bar shows,
+# which for pins is the order they were pinned in. Studio holds [$APP].
+read -r APP2 APP3 < <(call ListApplications | tr '(' '\n' \
+    | sed -n "s/^'\([^']*\)'.*/\1/p" | grep -vxF "$APP" | head -2 | tr '\n' ' ')
+studio_pins() {
+    # ('Studio', @ai [], false, ['a', 'b'], @as []) — the pins are the third
+    # field, the second list.
+    call ListEnvironments | grep -o "('Studio', [^)]*)" \
+        | sed -E "s/^\('Studio', [^]]*\], (true|false), (\[[^]]*\]).*/\2/"
+}
+if [ -n "${APP3:-}" ]; then
+    call PinInAt "Studio" "$APP2" 1 >/dev/null
+    call PinInAt "Studio" "$APP3" 2 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP2', '$APP3', '$APP']") ok "a pin given a place lands there, first and in the middle" ;;
+        *) fail "the places did not take: $(studio_pins)" ;;
+    esac
+    call PinInAt "Studio" "$APP3" 2 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP2', '$APP3', '$APP']") ok "the same place twice is the same dock" ;;
+        *) fail "a second identical pin changed something: $(studio_pins)" ;;
+    esac
+    call PinInAt "Studio" "$APP2" 3 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP3', '$APP', '$APP2']") ok "a pin moved to the end is moved, not doubled" ;;
+        *) fail "moving a pin went wrong: $(studio_pins)" ;;
+    esac
+    case "$(call PinInAt "Studio" "$APP" 9)" in
+        *InvalidArgs*"from 1 to 3"*) ok "a place past the pins is refused in words" ;;
+        *) fail "the refusal was not showable: $(call PinInAt "Studio" "$APP" 9)" ;;
+    esac
+    case "$(cat "$XDG_CONFIG_HOME/doca/config.toml")" in
+        *"# Kept by hand. The daemon must not eat this."*) ok "the comment outlived the pins" ;;
+        *) fail "a pin took the comment with it" ;;
+    esac
+    case "$(call PinIn "Studio" "$APP")" in
+        *error*) fail "PinIn lost its old signature: $(call PinIn "Studio" "$APP")" ;;
+        *) ok "PinIn still answers to the call it always did" ;;
+    esac
+else
+    fail "fewer than three applications installed; PinInAt went unchecked"
+fi
 # The cycle order, which is the order of this list. Only an order: a name
 # nobody knows is refused, and a dock left out keeps its place at the end, so a
 # window working from a list drawn before a rename cannot delete a dock.
