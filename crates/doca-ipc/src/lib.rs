@@ -860,6 +860,7 @@ pub trait Doca {
     fn list_items(&self) -> zbus::Result<Vec<DockItem>>;
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
+    fn activate_position(&self, position: u32) -> zbus::Result<String>;
     fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
     fn list_folder(&self, id: &str) -> zbus::Result<Vec<FolderEntry>>;
     fn open_path(&self, path: &str) -> zbus::Result<()>;
@@ -891,6 +892,9 @@ pub trait Doca {
 
     #[zbus(signal)]
     fn items_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn item_activated(&self, id: &str, starting: bool) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn windows_changed(&self) -> zbus::Result<()>;

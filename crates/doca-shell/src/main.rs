@@ -399,6 +399,7 @@ async fn drive(
     let mut environment_changed = proxy.receive_environment_changed().await?;
     let mut widget_changed = proxy.receive_widget_changed().await?;
     let mut config_changed = proxy.receive_config_changed().await?;
+    let mut item_activated = proxy.receive_item_activated().await?;
 
     loop {
         futures_util::select! {
@@ -426,6 +427,19 @@ async fn drive(
                 if redo.icons {
                     chrome.row.reload_icons();
                 }
+            }
+            signal = futures_util::StreamExt::next(&mut item_activated) => {
+                // A key chose an item. It gets the bounce a click gets, by
+                // the same rule — only when it started something — and
+                // nothing else about the bar moves.
+                if let Some(args) = signal.as_ref().and_then(|signal| signal.args().ok()) {
+                    if args.starting {
+                        if let Some(index) = chrome.row.index_of(args.id) {
+                            chrome.row.launch(index);
+                        }
+                    }
+                }
+                continue;
             }
             signal = futures_util::StreamExt::next(&mut widget_changed) => {
                 // A widget's new value touches its own tile and nothing

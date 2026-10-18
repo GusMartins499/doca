@@ -615,6 +615,11 @@ impl Row {
         1.0 + (rest.scale - 1.0) * progress
     }
 
+    /// Where this item is in the row, if it is in it.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.entries.borrow().iter().position(|entry| entry.item.id == id)
+    }
+
     pub fn launch(&self, index: usize) {
         if let Some(entry) = self.entries.borrow().get(index) {
             entry.launched.set(Some(Instant::now()));
