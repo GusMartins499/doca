@@ -123,7 +123,14 @@ struct Hide {
     /// crosses the edge and leaves again has asked for both, and should get
     /// neither.
     intent: Rc<RefCell<Option<glib::SourceId>>>,
+    /// A drag from another app is over the dock. Held once per drag, however
+    /// many motion events it sends.
+    dragging: Rc<Cell<bool>>,
 }
+
+/// How long after a drag leaves the dock it is asked whether it really left:
+/// long enough for the next widget of the dock to have taken it, if one did.
+const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl Default for Hide {
     fn default() -> Self {
@@ -139,6 +146,7 @@ impl Default for Hide {
             holds: Rc::new(Cell::new(0)),
             held_back: Rc::new(Cell::new(false)),
             intent: Rc::new(RefCell::new(None)),
+            dragging: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -233,6 +241,57 @@ impl Hide {
         let releasing = self.clone();
         let window = window.clone();
         menu.connect_unmap(move |_| releasing.release(&window));
+    }
+
+    /// Keep the bar for a drag, and bring it up for one.
+    ///
+    /// #18, item 12: "never hide while a drag is in progress". It was worse
+    /// than that: while another app drags, the pointer is that app's, and
+    /// the dock gets none of the enter and leave events auto-hide runs on —
+    /// so a file dragged to a hidden bar's edge never brought it up, and
+    /// nothing kept a shown one from going while the file was over it. A
+    /// drag says where it is through its own events, so those are listened
+    /// to on every widget a drag can be over, the window's sliver included.
+    fn follows_drags(&self, window: &gtk::Window, over: &[gtk::Widget]) {
+        for widget in over {
+            let holding = self.clone();
+            let dock = window.clone();
+            widget.connect_drag_motion(move |_, _, _, _, _| {
+                if !holding.dragging.replace(true) {
+                    tracing::debug!("drag over the dock: held");
+                    holding.hold();
+                    holding.intend(&dock, true);
+                }
+                // Not a claim on the drop: whichever widget takes files
+                // says so for itself.
+                false
+            });
+            let releasing = self.clone();
+            let dock = window.clone();
+            widget.connect_drag_leave(move |_, _, _| {
+                if !releasing.dragging.replace(false) {
+                    return;
+                }
+                tracing::debug!(over = pointer_is_over(&dock), "drag left a widget of the dock");
+                releasing.release(&dock);
+                // The leave a drag ends with is the only leave the dock
+                // gets: the ordinary one never came while the drag had the
+                // pointer. But a drag also "leaves" the row for the air
+                // above it, still inside the window, so whether it left the
+                // dock is asked a moment later, once nothing has taken it
+                // back — and only if no drag is over the dock by then. A drop
+                // lands with the pointer on the bar, which then goes the
+                // usual way once it moves off.
+                let settling = releasing.clone();
+                let dock = dock.clone();
+                glib::timeout_add_local_once(DRAG_SETTLES, move || {
+                    tracing::debug!(dragging = settling.dragging.get(), over = pointer_is_over(&dock), holds = settling.holds.get(), "drag settled");
+                    if !settling.dragging.get() && !pointer_is_over(&dock) {
+                        settling.intend(&dock, false);
+                    }
+                });
+            });
+        }
     }
 
     fn hold(&self) {
@@ -338,6 +397,11 @@ async fn drive(
         showing.intend(window, true);
         glib::Propagation::Proceed
     });
+
+    // The whole window takes part in a drag, so that a drag reaching the
+    // sliver of a hidden bar is heard; the row is a drop target of its own.
+    window.drag_dest_set(gtk::DestDefaults::empty(), &[], gdk::DragAction::COPY);
+    hide.follows_drags(&window, &[window.clone().upcast(), icons.area.clone().upcast()]);
 
     icons.serve(proxy.clone());
     wire(
