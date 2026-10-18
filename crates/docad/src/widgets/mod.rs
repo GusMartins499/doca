@@ -1,4 +1,7 @@
+pub mod agenda;
 pub mod battery;
+pub mod calendar;
+pub mod claude;
 pub mod clock;
 pub mod countdown;
 pub mod cover;
@@ -11,6 +14,7 @@ pub mod network;
 pub mod pomodoro;
 pub mod stopwatch;
 pub mod time_progress;
+pub mod usage;
 
 use std::time::{Duration, Instant};
 
@@ -96,6 +100,14 @@ impl Drawn for WidgetState {
     fn simple(&self) -> doca_ipc::Simple {
         match self.body().expect("a body that reads back") {
             doca_ipc::Body::Simple(simple) => simple,
+            // The usage tile is the simple tile with a breakdown beside it,
+            // and its tests read it as one.
+            doca_ipc::Body::Claude(claude) => doca_ipc::Simple {
+                label: claude.label,
+                detail: claude.detail,
+                progress: claude.progress,
+                active: claude.near,
+            },
             other => panic!("a {other:?} body does not draw two lines and a bar"),
         }
     }
@@ -387,6 +399,10 @@ pub fn build(
                 Some(Box::new(water::Water::new(settings.water.clone())) as Box<dyn Widget>)
             }
             "clock" => Some(Box::new(clock::Clock::new()) as Box<dyn Widget>),
+            "claude" => Some(Box::new(claude::Claude::new(settings.claude.clone())) as Box<dyn Widget>),
+            "calendar" => Some(Box::new(calendar::Calendar::new(
+                settings.calendar.clone(),
+            )) as Box<dyn Widget>),
             "battery" => Some(Box::new(battery::Battery::new()) as Box<dyn Widget>),
             "cpu" => Some(Box::new(cpu::Cpu::new()) as Box<dyn Widget>),
             "music" => Some(Box::new(music::Music::new()) as Box<dyn Widget>),
@@ -482,6 +498,8 @@ mod tests {
             doca_ipc::Body::Note(note) => note.text,
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
+            doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
+            doca_ipc::Body::Claude(claude) => claude.label,
         }
     }
 
@@ -498,6 +516,8 @@ mod tests {
             doca_ipc::Body::Note(note) => note.text,
             doca_ipc::Body::Music(music) => music.title,
             doca_ipc::Body::Water(water) => water.drunk.to_string(),
+            doca_ipc::Body::Calendar(calendar) => format!("{} {}", calendar.weekday, calendar.day),
+            doca_ipc::Body::Claude(claude) => claude.label,
         }
     }
 

@@ -107,6 +107,7 @@ impl Link {
         let (widget, key, value) = match wrote {
             Wrote::Text { widget, key, text } => (widget, key, Value::from(text)),
             Wrote::Count { widget, key, count } => (widget, key, Value::from(count)),
+            Wrote::Flag { widget, key, flag } => (widget, key, Value::from(flag)),
         };
         let value = OwnedValue::try_from(value)
             .map_err(|e| format!("{widget}.{key} could not be put on the bus: {e}"))?;
