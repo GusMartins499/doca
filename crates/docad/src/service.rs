@@ -298,6 +298,20 @@ impl DockService {
         Ok(item.id)
     }
 
+    /// Give the dock the keyboard (#18, item 9) — what a key bound to "focus
+    /// the dock" calls.
+    ///
+    /// The daemon only passes it on: the keyboard, the bar and its auto-hide
+    /// are all the bar's, and the bar is the one listening. A bus with no bar
+    /// on it hears the signal and nobody acts, which is no worse than a dock
+    /// that is not running.
+    async fn focus_dock(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        Self::focus_requested(&emitter).await.map_err(failed)
+    }
+
     async fn launch_item(&self, id: &str) -> zbus::fdo::Result<()> {
         self.spawn(id)
     }
@@ -727,6 +741,10 @@ impl DockService {
     /// and whether that started it, which is when the bar bounces it.
     #[zbus(signal)]
     pub async fn item_activated(emitter: &SignalEmitter<'_>, id: &str, starting: bool) -> zbus::Result<()>;
+
+    /// The keyboard was asked for on the dock's behalf; the bar takes it.
+    #[zbus(signal)]
+    pub async fn focus_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn windows_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;

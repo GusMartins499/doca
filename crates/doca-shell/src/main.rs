@@ -2,6 +2,7 @@ mod appearance;
 mod dock;
 mod fit;
 mod ground;
+mod keys;
 mod magnify;
 mod motion;
 mod panel;
@@ -354,6 +355,16 @@ impl Hide {
     /// this did — left the pointer inside a bar that stayed hidden until the
     /// mouse moved again.
     fn slide(&self, window: &gtk::Window, to_shown: bool) {
+        // Held is held, whoever asks: a panel closing used to send the bar
+        // away directly, which under the keyboard (#18, item 9) is a bar
+        // sliding off with the focus still on it. Deferred like a pointer's
+        // departure, so the last thing to let go still sends it.
+        if !to_shown && self.holds.get() > 0 {
+            if self.enabled.get() && self.shown.get() {
+                self.held_back.set(true);
+            }
+            return;
+        }
         if self.turn(to_shown, Instant::now()) {
             self.run(window);
         }
@@ -441,6 +452,7 @@ async fn drive(
     hide.follows_drags(&window, &[window.clone().upcast(), icons.area.clone().upcast()]);
 
     icons.serve(proxy.clone());
+    let keys = keys::Keyboard::new(&window, &icons, tiles.clone(), &label, hide.clone());
     wire(
         &icons,
         &label,
@@ -448,12 +460,14 @@ async fn drive(
         stack::Remembered::default(),
         window.clone(),
         hide.clone(),
+        &keys,
     );
 
     let chrome = Chrome {
         style: Style { css, applied },
         row: icons.clone(),
         hide,
+        keys,
         label,
         themes: appearance::Themes::capture(),
         panels: panel::Remembered::default(),
@@ -513,6 +527,7 @@ async fn drive(
     let mut widget_changed = proxy.receive_widget_changed().await?;
     let mut config_changed = proxy.receive_config_changed().await?;
     let mut item_activated = proxy.receive_item_activated().await?;
+    let mut focus_requested = proxy.receive_focus_requested().await?;
 
     loop {
         futures_util::select! {
@@ -575,6 +590,12 @@ async fn drive(
                 }
                 continue;
             }
+            // A key asked for the dock (#18, item 9). Nothing about what is
+            // on the bar changed, so nothing is rebuilt.
+            _ = futures_util::StreamExt::next(&mut focus_requested) => {
+                chrome.keys.take();
+                continue;
+            }
             signal = futures_util::StreamExt::next(&mut widget_changed) => {
                 // A widget's new value touches its own tile and nothing
                 // else — never the row of icons, which is the tightest thing
@@ -614,6 +635,11 @@ fn name_what_is_hovered(icons: &row::Row, label: &tooltip::Tooltip) {
         label.hide();
         return;
     };
+    name_at(icons, label, index, &item.name);
+}
+
+/// Put an icon's name over it — the pointer resting on it, or the keyboard.
+fn name_at(icons: &row::Row, label: &tooltip::Tooltip, index: usize, name: &str) {
     let origin = icons
         .area
         .toplevel()
@@ -625,7 +651,7 @@ fn name_what_is_hovered(icons: &row::Row, label: &tooltip::Tooltip) {
     label.point_at(
         (origin.0 + allocation.x() + left, origin.1 + allocation.y()),
         width,
-        &item.name,
+        name,
     );
 }
 
@@ -636,6 +662,7 @@ fn wire(
     folders: stack::Remembered,
     window: gtk::Window,
     hide: Hide,
+    keys: &keys::Keyboard,
 ) {
     let naming = icons.clone();
     let naming_label = label.clone();
@@ -653,6 +680,13 @@ fn wire(
         glib::Propagation::Proceed
     });
 
+    // What a click does and what a key does are one closure each, handed to
+    // the keyboard as well as run here — so `Enter` cannot do something a
+    // left click would not, nor `Menu` something a right click would not.
+    let choose = choosing(icons, proxy.clone(), folders, window.clone(), hide.clone(), keys.clone());
+    let offer = offering(icons, proxy, window, hide, keys.clone());
+    keys.acts(choose.clone(), offer.clone());
+
     let clicked = icons.clone();
     let clicked_label = label.clone();
     icons.area.connect_button_press_event(move |_, event| {
@@ -660,66 +694,109 @@ fn wire(
         let Some((index, item)) = clicked.item_at(event.position().0) else {
             return glib::Propagation::Stop;
         };
-        let proxy = proxy.clone();
-        let trigger = event.clone();
-
         match event.button() {
-            1 if stack::is_folder(&item.id) => {
-                // The grid goes up on the click, not on the answer: reading a
-                // folder is the one thing a click can start that has no
-                // bounded cost — a sleeping disk, a mount that is not local —
-                // and nothing on the drawing path may wait on it.
-                let expected = folders.of(&item.id);
-                let grid = stack::opening(expected);
-                hide.holds_for(&window, &grid);
-                // One closure opens the grid and, if what arrives does not fit
-                // what it was opened for, opens it again. It anchors on the
-                // icon rather than on the click: a grid that has to come back
-                // comes back a moment later, and an event that old no longer
-                // places a menu — it put the second one in the screen's top
-                // corner, and sometimes failed to put it up at all. The icon
-                // is still where it was, and a stack belongs over the thing it
-                // belongs to anyway.
-                let show = over(&clicked, index);
-                show(&grid);
-                let opened = Instant::now();
-                let folders = folders.clone();
-                glib::spawn_future_local(async move {
-                    let entries = proxy.list_folder(&item.id).await.unwrap_or_default();
-                    folders.note(&item.id, entries.len());
-                    stack::fill(
-                        &grid,
-                        expected,
-                        &entries,
-                        &opens_with(proxy.clone()),
-                        &show,
-                        opened,
-                    );
-                });
-            }
-            1 => {
-                if item.windows.is_empty() && !stack::is_folder(&item.id) {
-                    clicked.launch(index);
-                }
-                glib::spawn_future_local(async move {
-                    let _ = proxy.activate_item(&item.id).await;
-                });
-            }
-            3 => {
-                let (holding, under) = (hide.clone(), window.clone());
-                glib::spawn_future_local(async move {
-                    let windows = proxy.item_windows(&item.id).await.unwrap_or_default();
-                    let menu = dock::context_menu(&item, &windows, proxy.clone());
-                    holding.holds_for(&under, &menu);
-                    menu.popup_at_pointer(Some(&trigger));
-                });
-            }
+            1 => choose(index, item, Some((**event).clone())),
+            3 => offer(index, item, Some((**event).clone())),
             _ => {}
         }
         glib::Propagation::Stop
     });
 
     dock::accept_file_drops(icons);
+}
+
+/// What choosing an icon does: a folder opens its grid over the icon, and
+/// anything else comes forward or starts.
+///
+/// An app chosen with the dock holding the keyboard is the hand moving on,
+/// so the keyboard goes back before the app is asked to come forward — the
+/// app is about to want it. A folder keeps it: its grid is the dock's.
+fn choosing(
+    icons: &row::Row,
+    proxy: Rc<DocaProxy<'static>>,
+    folders: stack::Remembered,
+    window: gtk::Window,
+    hide: Hide,
+    keys: keys::Keyboard,
+) -> keys::Act {
+    let icons = icons.clone();
+    Rc::new(move |index: usize, item: doca_ipc::DockItem, _: Option<gdk::Event>| {
+        let proxy = proxy.clone();
+        if stack::is_folder(&item.id) {
+            // The grid goes up on the click, not on the answer: reading a
+            // folder is the one thing a click can start that has no
+            // bounded cost — a sleeping disk, a mount that is not local —
+            // and nothing on the drawing path may wait on it.
+            let expected = folders.of(&item.id);
+            let grid = stack::opening(expected);
+            hide.holds_for(&window, &grid);
+            keys.watches(&grid);
+            // One closure opens the grid and, if what arrives does not fit
+            // what it was opened for, opens it again. It anchors on the
+            // icon rather than on the click: a grid that has to come back
+            // comes back a moment later, and an event that old no longer
+            // places a menu — it put the second one in the screen's top
+            // corner, and sometimes failed to put it up at all. The icon
+            // is still where it was, and a stack belongs over the thing it
+            // belongs to anyway.
+            let show = over(&icons, index);
+            show(&grid);
+            let opened = Instant::now();
+            let folders = folders.clone();
+            glib::spawn_future_local(async move {
+                let entries = proxy.list_folder(&item.id).await.unwrap_or_default();
+                folders.note(&item.id, entries.len());
+                stack::fill(
+                    &grid,
+                    expected,
+                    &entries,
+                    &opens_with(proxy.clone()),
+                    &show,
+                    opened,
+                );
+            });
+            return;
+        }
+        keys.leave();
+        if item.windows.is_empty() {
+            icons.launch(index);
+        }
+        glib::spawn_future_local(async move {
+            let _ = proxy.activate_item(&item.id).await;
+        });
+    })
+}
+
+/// What offering an icon's menu does: its windows and its actions, under
+/// the pointer for a click and over the icon for a key — a key has no
+/// pointer to put a menu under, and the icon is where the eye already is.
+fn offering(
+    icons: &row::Row,
+    proxy: Rc<DocaProxy<'static>>,
+    window: gtk::Window,
+    hide: Hide,
+    keys: keys::Keyboard,
+) -> keys::Act {
+    let icons = icons.clone();
+    Rc::new(move |index: usize, item: doca_ipc::DockItem, trigger: Option<gdk::Event>| {
+        let (proxy, holding, under, keys) = (proxy.clone(), hide.clone(), window.clone(), keys.clone());
+        let show = over(&icons, index);
+        glib::spawn_future_local(async move {
+            let windows = proxy.item_windows(&item.id).await.unwrap_or_default();
+            let menu = dock::context_menu(&item, &windows, proxy.clone());
+            holding.holds_for(&under, &menu);
+            keys.watches(&menu);
+            match &trigger {
+                Some(click) => menu.popup_at_pointer(Some(click)),
+                None => {
+                    show(&menu);
+                    // Something chosen already, so the arrows move from it
+                    // and Enter has something to choose.
+                    menu.select_first(false);
+                }
+            }
+        });
+    })
 }
 
 /// Put a menu above the icon it belongs to.
@@ -764,6 +841,8 @@ struct Chrome {
     style: Style,
     row: row::Row,
     hide: Hide,
+    /// The keyboard, while a key has handed it to the dock.
+    keys: keys::Keyboard,
     label: tooltip::Tooltip,
     /// None when GTK has no settings to override, which no real session is.
     themes: Option<appearance::Themes>,
@@ -856,6 +935,7 @@ fn expanding(
     panels: panel::Remembered,
     showing: panel::Showing,
     hide: Hide,
+    keys: keys::Keyboard,
 ) -> widget_tile::Expand {
     let invoke: panel::Invoke = {
         let asking = proxy.clone();
@@ -917,6 +997,7 @@ fn expanding(
     Rc::new(move |id: &str, over: &gtk::Widget| {
         let menu = panel::opening(panels.of(id));
         hide.holds_for(&window, &menu);
+        keys.watches(&menu);
 
         // Over the tile that asked, and the same way every time it is
         // reopened — including the reopen `panel::fill` does when the panel
@@ -1039,6 +1120,7 @@ async fn rebuild(
         style,
         row,
         hide,
+        keys,
         label,
         themes,
         panels,
@@ -1153,7 +1235,7 @@ async fn rebuild(
             );
             let control = dock::overflow_control(over.len(), fitted.icon);
             let (over, asking) = (over.to_vec(), proxy.clone());
-            let (holding, under) = (hide.clone(), window.clone());
+            let (holding, under, watching) = (hide.clone(), window.clone(), keys.clone());
             let icon_size = fitted.icon;
             let activate: stack::Open = Rc::new(move |id: &str| {
                 let (id, proxy) = (id.to_string(), asking.clone());
@@ -1166,6 +1248,7 @@ async fn rebuild(
             control.connect_button_press_event(move |control, _| {
                 let grid = dock::overflow_grid(&over, icon_size, &activate);
                 holding.holds_for(&under, &grid);
+                watching.watches(&grid);
                 grid.popup_at_widget(
                     control,
                     gdk::Gravity::NorthWest,
@@ -1181,6 +1264,7 @@ async fn rebuild(
         let (running, active) =
             theme::dots_for(&style.applied.borrow(), &row.area.style_context());
         row.dot_colours(running, active);
+        row.ring_colour(theme::ring_for(&style.applied.borrow(), &row.area.style_context()));
     }
 
     // The dock may have changed under a pointer that never moved.
@@ -1192,6 +1276,7 @@ async fn rebuild(
         panels.clone(),
         showing.clone(),
         hide.clone(),
+        keys.clone(),
     );
     tiles.show(
         items,
@@ -1223,6 +1308,8 @@ async fn rebuild(
     // After `show_all`, which shows every child — including a progress bar a
     // tile had hidden for having no progress to report.
     tiles.refresh(&widgets);
+    // The keyboard stays on what it was on, wherever the rebuild moved it.
+    keys.refresh();
 
     let width = if covered {
         step_aside(window)
@@ -1539,6 +1626,12 @@ fn on_a_display() {
     hide_tests::an_open_menu_keeps_the_bar_where_it_is();
     hide_tests::the_first_menu_to_close_does_not_release_the_second();
     hide_tests::switching_auto_hide_off_drops_a_move_nobody_wants_any_more();
+    hide_tests::a_slide_away_asked_for_while_held_waits_for_the_hold();
+    keys::tests::the_dock_takes_the_keyboard_and_keeps_the_bar_up();
+    keys::tests::the_arrows_walk_the_icons_and_then_the_tiles();
+    keys::tests::enter_chooses_and_the_menu_key_offers();
+    keys::tests::a_rebuild_keeps_the_ring_on_the_same_app();
+    keys::tests::esc_out_of_a_menu_comes_back_to_the_bar();
     dock::tests::every_app_that_did_not_fit_is_in_the_grid();
     dock::tests::the_control_says_how_many_it_is_hiding();
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
@@ -1936,6 +2029,26 @@ pub mod hide_tests {
         second.popdown();
         waiting(motion::HIDE_AFTER * 2);
         assert!(!hide.shown.get(), "the bar stayed after everything closed");
+        window.close();
+    }
+
+    /// A slide away asked for directly — what a panel closing asks for — is
+    /// held like a pointer's departure while something holds the bar, and
+    /// still lands once the last hold lets go.
+    pub fn a_slide_away_asked_for_while_held_waits_for_the_hold() {
+        let (window, hide) = hidden_bar();
+        hide.slide(&window, true);
+        waiting(motion::SLIDE * 2);
+        assert!(hide.shown.get());
+
+        hide.hold();
+        hide.slide(&window, false);
+        waiting(motion::SLIDE * 2);
+        assert!(hide.shown.get(), "the bar slid away from under a hold");
+
+        hide.release(&window);
+        waiting(motion::HIDE_AFTER * 2);
+        assert!(!hide.shown.get(), "the slide asked for under the hold never landed");
         window.close();
     }
 

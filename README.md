@@ -311,6 +311,7 @@ the script is the same thing for automation, and writes the same slots:
 ./scripts/bind-key.sh --back                       # <Shift><Super>e, the other way
 ./scripts/bind-key.sh --auto-hide '<Super><Alt>h'  # auto-hide on and off
 ./scripts/bind-key.sh --widget water '<Super><Alt>w'   # one widget on and off
+./scripts/bind-key.sh --focus '<Super><Alt>d'      # the keyboard to the dock
 ```
 
 GNOME binds `<Super>1..9` to its own dash out of the box
@@ -322,6 +323,20 @@ the keys being bound, and nothing else. `gsettings reset` gives them back.
 A chosen item behaves as if clicked: an open app comes forward, and one that
 is not running starts, with the same bounce on the bar a click gives.
 
+`FocusDock` hands the keyboard to the dock. The bar comes up even with
+auto-hide on, and stays up for as long as it has the keyboard:
+
+| key | does |
+|---|---|
+| `←` `→`, `Tab` `Shift+Tab` | the icon or tile before or after; stops at the ends |
+| `Home` `End` | the first or the last |
+| `Enter`, `Space` | as a left click: an app comes forward or starts, a folder or a tile opens |
+| `Menu`, `Shift+F10` | as a right click: the icon's menu, or the tile's panel |
+| `Esc` | the keyboard back to the app that had it, and the bar hides again |
+
+`Esc` inside a menu or a panel steps back to the bar rather than out of it.
+Choosing an app, or clicking outside the dock, gives the keyboard back too.
+
 Every action a key can call, for binding by hand:
 
 | method | arguments | does |
@@ -332,6 +347,7 @@ Every action a key can call, for binding by hand:
 | `ToggleWidget` | `id` | that widget on or off the dock showing; answers which |
 | `SetEnvironment` | `name` | that dock |
 | `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
+| `FocusDock` | — | the keyboard to the dock: the bar comes up, first item focused |
 | `ActivateItem` | `id` | that item, as a click would |
 | `InvokeWidget` | `id`, `action` | a widget's action — `water drink`, `music next` |
 | `SetAppearance` | `{key: value}` | e.g. `{'auto_hide': <true>}` |
