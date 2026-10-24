@@ -124,6 +124,46 @@ struct Hide {
     /// A drag from another app is over the dock. Held once per drag, however
     /// many motion events it sends.
     dragging: Rc<Cell<bool>>,
+    /// The bar, for telling the window which part of it takes the pointer.
+    /// `None` until the bar is handed over, and in tests that have only a
+    /// window: those keep the whole of it, as every window does.
+    bar: Rc<RefCell<Option<gtk::Widget>>>,
+    /// The pointer is on the window, the air over the bar included.
+    inside: Rc<Cell<bool>>,
+}
+
+/// Which part of the dock's window answers the pointer.
+///
+/// The window is the bar and a good deal of air: the room a magnified icon
+/// rises into above it and spreads into either side of it. That air is
+/// drawn transparent, and without this it was not transparent to the hand —
+/// a click on the bottom of a maximised window, or on a scrollbar under the
+/// air beside the bar, went to the dock and did nothing. Measured in the
+/// sandbox before any of this was written: a click 20px above a resting
+/// bar, and one at its left end, both landed on the dock.
+///
+/// The air is the dock's only while the dock is in use. Once the pointer is
+/// on the bar the lens opens into it, and an icon drawn out there has to be
+/// one the pointer can stay on; until then nothing is drawn in it, and it
+/// is somebody else's screen. Plank draws the same line, between its
+/// hovered input region and its resting one.
+///
+/// A hidden bar takes the whole window, because what is left on screen of
+/// it is air: the peek is the top of the window, and the bar is below the
+/// edge. A slide away takes it at once rather than at the end, so the bar
+/// is not unreachable for the length of the slide.
+#[derive(Debug, PartialEq, Eq)]
+enum Reach {
+    Bar,
+    Whole,
+}
+
+fn reach(shown: bool, inside: bool) -> Reach {
+    if !shown || inside {
+        Reach::Whole
+    } else {
+        Reach::Bar
+    }
 }
 
 /// How often a drag over the dock is asked whether it is still there.
@@ -144,12 +184,19 @@ impl Default for Hide {
             held_back: Rc::new(Cell::new(false)),
             intent: Rc::new(RefCell::new(None)),
             dragging: Rc::new(Cell::new(false)),
+            bar: Rc::new(RefCell::new(None)),
+            inside: Rc::new(Cell::new(false)),
         }
     }
 }
 
 impl Hide {
     fn place(&self, window: &gtk::Window, x: i32, shown_y: i32, height: i32, enabled: bool) {
+        self.put(window, x, shown_y, height, enabled);
+        self.reach(window);
+    }
+
+    fn put(&self, window: &gtk::Window, x: i32, shown_y: i32, height: i32, enabled: bool) {
         self.x.set(x);
         self.shown_y.set(shown_y);
         self.height.set(height);
@@ -366,8 +413,50 @@ impl Hide {
             return;
         }
         if self.turn(to_shown, Instant::now()) {
+            self.reach(window);
             self.run(window);
         }
+    }
+
+    /// Hand over the bar, and keep the part of the window that takes the
+    /// pointer fitted to it. Fitted on every allocation rather than when the
+    /// bar is seated: `seat` asks for a size, and the bar has it a frame
+    /// later.
+    fn reaches_through(&self, window: &gtk::Window, bar: &gtk::Box) {
+        self.bar.replace(Some(bar.clone().upcast()));
+        let reaching = self.clone();
+        let window = window.clone();
+        bar.connect_size_allocate(move |_, _| reaching.reach(&window));
+    }
+
+    /// The pointer came onto the window, or left it.
+    fn pointing(&self, window: &gtk::Window, inside: bool) {
+        if self.inside.replace(inside) != inside {
+            self.reach(window);
+        }
+    }
+
+    /// Tell the window which part of it answers the pointer. See [`Reach`].
+    fn reach(&self, window: &gtk::Window) {
+        let Some(bar) = self.bar.borrow().clone() else {
+            return;
+        };
+        let region = match reach(self.shown.get(), self.inside.get()) {
+            Reach::Whole => None,
+            Reach::Bar => {
+                let Some((x, y)) = bar.translate_coordinates(window, 0, 0) else {
+                    return;
+                };
+                let rectangle = gtk::cairo::RectangleInt::new(
+                    x,
+                    y,
+                    bar.allocated_width(),
+                    bar.allocated_height(),
+                );
+                Some(gtk::cairo::Region::create_rectangle(&rectangle))
+            }
+        };
+        window.input_shape_combine_region(region.as_ref());
     }
 
     /// Point the slide the other way at `now`, from where it is. `false` when
@@ -436,15 +525,18 @@ async fn drive(
             return glib::Propagation::Proceed;
         }
         leaving.aim(None);
+        hiding.pointing(window, false);
         hiding.intend(window, false);
         hiding_label.hide();
         glib::Propagation::Proceed
     });
     let showing = hide.clone();
     window.connect_enter_notify_event(move |window, _| {
+        showing.pointing(window, true);
         showing.intend(window, true);
         glib::Propagation::Proceed
     });
+    hide.reaches_through(&window, &bar);
 
     // The whole window takes part in a drag, so that a drag reaching the
     // sliver of a hidden bar is heard; the row is a drop target of its own.
@@ -1632,6 +1724,7 @@ fn on_a_display() {
     keys::tests::enter_chooses_and_the_menu_key_offers();
     keys::tests::a_rebuild_keeps_the_ring_on_the_same_app();
     keys::tests::esc_out_of_a_menu_comes_back_to_the_bar();
+    hide_tests::the_air_over_a_resting_bar_lets_the_pointer_through();
     dock::tests::every_app_that_did_not_fit_is_in_the_grid();
     dock::tests::the_control_says_how_many_it_is_hiding();
     dock::tests::measuring_a_bar_twice_gives_the_same_answer_both_times();
@@ -2068,5 +2161,109 @@ pub mod hide_tests {
             "the bar hid itself after auto-hide was switched off"
         );
         window.close();
+    }
+    /// What the X server says the pointer would hit on this window, as
+    /// rectangles in its own coordinates.
+    fn reachable(window: &gtk::Window) -> Vec<(i16, i16, u16, u16)> {
+        use x11rb::protocol::shape::{self, ConnectionExt as _};
+        let xid = window
+            .window()
+            .expect("a window that was never realised")
+            .downcast::<gdkx11::X11Window>()
+            .expect("not an X11 window")
+            .xid() as u32;
+        // GTK sends the shape down its own connection; this one has to be
+        // sure it has arrived before asking.
+        gdk::Display::default().unwrap().sync();
+        let (conn, _) = x11rb::connect(None).expect("no X display");
+        conn.shape_get_rectangles(xid, shape::SK::INPUT)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .rectangles
+            .into_iter()
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect()
+    }
+
+    /// The air over a resting bar is the screen's, not the dock's: only the
+    /// bar takes the pointer until the pointer is on it, and then the whole
+    /// window does, for the lens to open into. Hidden, the whole window
+    /// again, because the sliver left on screen is air.
+    pub fn the_air_over_a_resting_bar_lets_the_pointer_through() {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_size_request(400, 100);
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        bar.set_size_request(200, 40);
+        bar.set_halign(gtk::Align::Center);
+        bar.set_valign(gtk::Align::End);
+        window.add(&bar);
+        window.show_all();
+        let hide = Hide::default();
+        hide.reaches_through(&window, &bar);
+        hide.place(&window, 0, 500, 100, false);
+        waiting(motion::FRAME * 4);
+
+        let whole = vec![(0, 0, 400, 100)];
+        let resting = vec![(100, 60, 200, 40)];
+        assert_eq!(
+            reachable(&window),
+            resting,
+            "the air over the bar took the pointer"
+        );
+
+        hide.pointing(&window, true);
+        assert_eq!(
+            reachable(&window),
+            whole,
+            "the lens has no room to open into"
+        );
+        hide.pointing(&window, false);
+        assert_eq!(
+            reachable(&window),
+            resting,
+            "the air stayed taken after the pointer left"
+        );
+
+        hide.place(&window, 0, 500, 100, true);
+        assert!(!hide.shown.get());
+        assert_eq!(
+            reachable(&window),
+            whole,
+            "a bar going away left only itself to reach, and it is below the edge"
+        );
+
+        hide.pointing(&window, true);
+        hide.intend(&window, true);
+        waiting(motion::REVEAL_AFTER * 3);
+        assert!(hide.shown.get());
+        assert_eq!(
+            reachable(&window),
+            whole,
+            "the bar that came up for a pointer shut it out"
+        );
+        window.close();
+        waiting(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    #[test]
+    fn a_resting_bar_takes_only_itself() {
+        assert_eq!(reach(true, false), Reach::Bar);
+    }
+
+    #[test]
+    fn a_bar_in_use_takes_the_air_its_lens_opens_into() {
+        assert_eq!(reach(true, true), Reach::Whole);
+    }
+
+    #[test]
+    fn a_hidden_bar_takes_the_sliver_that_is_left_of_it() {
+        assert_eq!(reach(false, false), Reach::Whole);
+        assert_eq!(reach(false, true), Reach::Whole);
     }
 }

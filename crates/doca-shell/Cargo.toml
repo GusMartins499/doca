@@ -25,3 +25,8 @@ pangocairo = "0.18"
 x11rb = "0.13"
 futures-util = "0.3"
 async-channel = "2"
+
+[dev-dependencies]
+# For reading back the window's input shape, which GTK sets and has no
+# getter for — only the X server can say what the pointer will hit.
+x11rb = { version = "0.13", features = ["shape"] }
