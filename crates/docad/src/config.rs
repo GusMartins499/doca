@@ -672,6 +672,53 @@ impl Config {
         Ok(())
     }
 
+    /// Pin an app to a dock at a place in it — or, if it is pinned there
+    /// already, move it to that place.
+    ///
+    /// The place is counted the way `ActivatePosition` counts: from one, in
+    /// the order the bar shows. The bar draws a dock's pins first and in the
+    /// order of this list (`model::build`), so place *n* on the bar is entry
+    /// *n* here; a running app nobody pinned only ever comes after them. That
+    /// is why the range stops at one past the last pin, not at the end of the
+    /// bar: a pin put on a running app's place would be drawn somewhere else.
+    ///
+    /// A place outside that range is refused in words rather than clamped. A
+    /// key or a script asking for place 9 in a dock of three pins has
+    /// miscounted, and a pin quietly landing at 4 would teach it nothing.
+    ///
+    /// Moving what is already pinned, rather than refusing it, is what makes
+    /// this the one call a drag needs (#18, P3): a drop is "this id, here",
+    /// whether the icon came from the pins or from a running app. And it keeps
+    /// the call idempotent — sent twice, the second finds the pin where the
+    /// first put it and leaves the list as it was.
+    pub fn pin_at(&mut self, name: &str, id: &str, position: u32) -> Result<()> {
+        let id = Self::usable_id(id)?;
+        let environment = self.named_mut(name)?;
+        let mut others: Vec<String> = environment
+            .pinned
+            .iter()
+            .filter(|existing| **existing != id)
+            .cloned()
+            .collect();
+        let last = others.len() + 1;
+        let Some(at) = usize::try_from(position)
+            .ok()
+            .and_then(|position| position.checked_sub(1))
+            .filter(|at| *at < last)
+        else {
+            if position == 0 {
+                anyhow::bail!("places in a dock are counted from 1; there is no place 0");
+            }
+            anyhow::bail!(
+                "{id} can go at a place from 1 to {last} in {name}, \
+                 and {position} is past the last pin"
+            );
+        };
+        others.insert(at, id);
+        environment.pinned = others;
+        Ok(())
+    }
+
     fn environment_mut(&mut self, name: &str) -> Option<&mut Environment> {
         self.environments
             .iter_mut()
@@ -712,6 +759,15 @@ impl Config {
     /// unpin whatever it had not heard about yet. So the set is fixed here. Ids
     /// the caller names are taken in the order given, anything it left out
     /// keeps its place at the end, and anything it invented is refused.
+    ///
+    /// This is also the `ReorderItems(ids)` #18 asked for, and why there is no
+    /// method by that name. Of everything the bar shows, only the pins have an
+    /// order anyone chose: running apps follow the windows, folders and the
+    /// trash come after. An order over "items" could only ever be an order
+    /// over pins wearing another name, with a second set of rules for the ids
+    /// that are not pins. And moving a single icon — what a drag does — is
+    /// [`Self::pin_at`] with an id already pinned, which does not need the
+    /// caller to hold the whole list and so cannot be stale about it.
     pub fn reorder_pinned(&mut self, name: &str, order: Vec<String>) -> Result<()> {
         let environment = self.named_mut(name)?;
         if let Some(unknown) = order
@@ -1569,6 +1625,168 @@ mod tests {
             config.environment_named("Work").unwrap().pinned,
             vec!["firefox", "code", "discord"],
             "a stale list from a window must not unpin what it had not heard about"
+        );
+    }
+
+    fn three_pins() -> Config {
+        config(
+            "[[environments]]\n\
+             name = \"Work\"\n\
+             pinned = [\"code\", \"discord\", \"firefox\"]\n\
+             \n\
+             [[environments]]\n\
+             name = \"Home\"\n\
+             pinned = [\"spotify\"]\n",
+        )
+    }
+
+    fn pins(config: &Config, name: &str) -> Vec<String> {
+        config.environment_named(name).unwrap().pinned.clone()
+    }
+
+    #[test]
+    fn a_pin_given_a_place_in_the_middle_lands_there() {
+        let mut config = three_pins();
+
+        config.pin_at("Work", "gimp", 2).unwrap();
+
+        assert_eq!(pins(&config, "Work"), ["code", "gimp", "discord", "firefox"]);
+        assert_eq!(pins(&config, "Home"), ["spotify"], "the other dock was not touched");
+    }
+
+    #[test]
+    fn place_one_is_the_first_icon_on_the_bar() {
+        let mut config = three_pins();
+
+        config.pin_at("Work", "gimp", 1).unwrap();
+
+        assert_eq!(pins(&config, "Work"), ["gimp", "code", "discord", "firefox"]);
+    }
+
+    #[test]
+    fn one_past_the_last_pin_is_the_end() {
+        let mut config = three_pins();
+
+        config.pin_at("Work", "gimp", 4).unwrap();
+
+        assert_eq!(pins(&config, "Work"), ["code", "discord", "firefox", "gimp"]);
+    }
+
+    #[test]
+    fn a_place_past_the_pins_is_refused_in_words() {
+        let mut config = three_pins();
+
+        let refused = config.pin_at("Work", "gimp", 9).unwrap_err().to_string();
+
+        assert!(
+            refused.contains("from 1 to 4") && refused.contains('9'),
+            "the refusal should say what range there is: {refused}"
+        );
+        assert_eq!(
+            pins(&config, "Work"),
+            ["code", "discord", "firefox"],
+            "nothing is written on a refusal, not even clamped to the end"
+        );
+    }
+
+    #[test]
+    fn there_is_no_place_zero() {
+        let mut config = three_pins();
+
+        let refused = config.pin_at("Work", "gimp", 0).unwrap_err().to_string();
+
+        assert!(refused.contains("counted from 1"), "{refused}");
+        assert_eq!(pins(&config, "Work"), ["code", "discord", "firefox"]);
+    }
+
+    #[test]
+    fn a_place_in_a_dock_that_is_gone_is_refused() {
+        let mut config = three_pins();
+
+        assert!(config.pin_at("Renamed yesterday", "gimp", 1).is_err());
+        assert!(config.pin_at("Work", "  ", 1).is_err(), "and so is a pin with no app");
+    }
+
+    #[test]
+    fn pinning_what_is_pinned_already_moves_it() {
+        let mut config = three_pins();
+
+        config.pin_at("Work", "firefox", 1).unwrap();
+
+        assert_eq!(pins(&config, "Work"), ["firefox", "code", "discord"]);
+    }
+
+    #[test]
+    fn a_move_counts_its_range_without_itself() {
+        let mut config = three_pins();
+
+        // Three pins, one of them the one moving: it can go at 1 to 3, and 4
+        // would be a place that does not exist once it has left its own.
+        config.pin_at("Work", "code", 3).unwrap();
+        assert_eq!(pins(&config, "Work"), ["discord", "firefox", "code"]);
+
+        let refused = config.pin_at("Work", "code", 4).unwrap_err().to_string();
+        assert!(refused.contains("from 1 to 3"), "{refused}");
+    }
+
+    #[test]
+    fn a_pin_sent_twice_lands_once() {
+        let mut once = three_pins();
+        once.pin_at("Work", "gimp", 2).unwrap();
+
+        let mut twice = once.clone();
+        twice.pin_at("Work", "gimp", 2).unwrap();
+
+        assert_eq!(pins(&twice, "Work"), pins(&once, "Work"));
+        assert!(
+            twice.says_the_same_as(&once),
+            "a second identical call is nothing new, so nothing is announced as one"
+        );
+    }
+
+    #[test]
+    fn a_pin_given_a_place_keeps_the_comments_around_it() {
+        let scratch = Scratch::new("pin-at");
+        let path = scratch.file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# My docks. Hands off.\n\
+             \n\
+             # The one I work in.\n\
+             [[environments]]\n\
+             name = \"Work\"\n\
+             # editor first, always\n\
+             pinned = [\"code\", \"discord\", \"firefox\"]\n\
+             \n\
+             # Evenings.\n\
+             [[environments]]\n\
+             name = \"Home\"\n\
+             pinned = [\"spotify\"]\n",
+        )
+        .unwrap();
+
+        let mut config = Config::load_from(&path);
+        config.pin_at("Work", "gimp", 2).unwrap();
+        config.save_to(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        for comment in [
+            "# My docks. Hands off.",
+            "# The one I work in.",
+            "# editor first, always",
+            "# Evenings.",
+        ] {
+            assert!(written.contains(comment), "lost {comment:?}: {written}");
+        }
+        assert!(
+            written.find("name = \"Work\"") < written.find("name = \"Home\""),
+            "the docks kept their order: {written}"
+        );
+        assert_eq!(
+            pins(&Config::load_from(&path), "Work"),
+            ["code", "gimp", "discord", "firefox"],
+            "and the place is the place on disk, not just in memory"
         );
     }
 

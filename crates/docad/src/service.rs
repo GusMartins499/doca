@@ -512,6 +512,42 @@ impl DockService {
         self.commit(&emitter, |config| config.unpin(name, id)).await
     }
 
+    /// Pin to the dock on screen, at a place in it — the bar's `PinItem`,
+    /// knowing where. See [`Self::pin_in_at`] for the contract.
+    async fn pin_item_at(
+        &self,
+        id: &str,
+        position: u32,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let name = self.shown().await?.name;
+        // No index check, as for `PinItem`: the ids the bar sends came out of
+        // the index, or are a running window's, which is pinnable too.
+        self.commit(&emitter, |config| config.pin_at(&name, id, position))
+            .await
+    }
+
+    /// Pin to the dock named, at a place in it, or move a pin already there.
+    ///
+    /// New methods beside `PinItem`/`PinIn` rather than a position added to
+    /// them: a D-Bus signature is the method, and `PinIn(s, s)` turning into
+    /// `PinIn(s, s, u)` would break every `gdbus call` and keybinding written
+    /// against it with a "no such method" — found by the caller least able to
+    /// say so, at the moment it runs. Places are counted as `ActivatePosition`
+    /// counts them, from one, in the order the bar shows; [`Config::pin_at`]
+    /// says why that order is the order of the pins.
+    async fn pin_in_at(
+        &self,
+        name: &str,
+        id: &str,
+        position: u32,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.with_config(|config| pinnable(&self.index, config, name, id))??;
+        self.commit(&emitter, |config| config.pin_at(name, id, position))
+            .await
+    }
+
     async fn list_widgets(&self) -> zbus::fdo::Result<Vec<WidgetState>> {
         let wanted = self.shown().await?.widgets;
         let available = self.widgets.list().await.map_err(failed)?;
@@ -699,6 +735,27 @@ impl DockService {
     pub async fn workspace_changed(emitter: &SignalEmitter<'_>, index: i32) -> zbus::Result<()>;
 }
 
+/// Whether `PinInAt` may pin this id in this dock.
+///
+/// The same refusal as `PinIn` — a pin no `.desktop` file answers to draws
+/// nothing — with one exception: an id already pinned there is being moved,
+/// not pinned, and an app uninstalled since it was pinned must still be
+/// movable, the same way `UnpinIn` lets it out.
+fn pinnable(index: &DesktopIndex, config: &Config, name: &str, id: &str) -> zbus::fdo::Result<()> {
+    let id = id.trim();
+    if id.is_empty() {
+        // `Config::pin_at` has the better sentence for this one.
+        return Ok(());
+    }
+    let already = config
+        .environment_named(name)
+        .is_some_and(|environment| environment.pinned.iter().any(|pinned| pinned == id));
+    if already || index.get(id).is_some() {
+        return Ok(());
+    }
+    Err(rejected(format!("no application called {id}")))
+}
+
 /// The look of the dock as the bus reports it: sanitised, never raw.
 /// The daemon's settings in the flat shape the bus carries, already clamped.
 fn widget_settings_of(config: &Config) -> WidgetSettings {
@@ -730,5 +787,94 @@ fn appearance_of(config: &Config) -> Appearance {
         icon_theme: appearance.icon_theme,
         gtk_theme: appearance.gtk_theme,
         cursor_theme: appearance.cursor_theme,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desktop::DesktopEntry;
+
+    fn installed(id: &str) -> DesktopEntry {
+        DesktopEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            icon: id.to_string(),
+            exec: format!("/usr/bin/{id}"),
+            startup_wm_class: None,
+            no_display: false,
+            path: std::path::PathBuf::from(format!("/usr/share/applications/{id}.desktop")),
+        }
+    }
+
+    /// `code` and `gimp` are installed; `old-thing` is pinned in Work but was
+    /// uninstalled since.
+    fn setup() -> (DesktopIndex, Config) {
+        let index = DesktopIndex::from_entries(vec![installed("code"), installed("gimp")]);
+        let config = Config::parse(
+            "[[environments]]\n\
+             name = \"Work\"\n\
+             pinned = [\"code\", \"old-thing\"]\n\
+             \n\
+             [[environments]]\n\
+             name = \"Home\"\n",
+        )
+        .unwrap();
+        (index, config)
+    }
+
+    #[test]
+    fn an_installed_app_can_be_pinned_at_a_place() {
+        let (index, config) = setup();
+
+        assert!(pinnable(&index, &config, "Work", "gimp").is_ok());
+        assert!(pinnable(&index, &config, "Home", "code").is_ok());
+    }
+
+    #[test]
+    fn an_app_nobody_installed_is_refused_as_pin_in_refuses_it() {
+        let (index, config) = setup();
+
+        let refused = pinnable(&index, &config, "Work", "nothing.here").unwrap_err();
+
+        match refused {
+            zbus::fdo::Error::InvalidArgs(reason) => {
+                assert!(reason.contains("no application called nothing.here"), "{reason}");
+            }
+            other => panic!("a typo is the caller's, not a failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pin_whose_app_went_away_can_still_be_moved() {
+        let (index, config) = setup();
+
+        assert!(
+            pinnable(&index, &config, "Work", "old-thing").is_ok(),
+            "moving is not pinning, and the way out of the config must stay open"
+        );
+        assert!(
+            pinnable(&index, &config, "Home", "old-thing").is_err(),
+            "but it cannot be pinned anew somewhere it never was"
+        );
+    }
+
+    #[test]
+    fn a_place_given_twice_writes_the_same_file_twice() {
+        let (index, mut config) = setup();
+
+        // What `PinInAt` does once the check passes, run twice, as a key
+        // pressed twice would: the second is a write of nothing new.
+        pinnable(&index, &config, "Work", "gimp").unwrap();
+        config.pin_at("Work", "gimp", 1).unwrap();
+        let once = toml::to_string_pretty(&config).unwrap();
+        pinnable(&index, &config, "Work", "gimp").unwrap();
+        config.pin_at("Work", "gimp", 1).unwrap();
+
+        assert_eq!(toml::to_string_pretty(&config).unwrap(), once);
+        assert_eq!(
+            config.environment_named("Work").unwrap().pinned,
+            ["gimp", "code", "old-thing"]
+        );
     }
 }
