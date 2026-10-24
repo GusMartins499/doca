@@ -726,6 +726,44 @@ else
     echo "  skip  xdotool or python3-gi missing: a drag to the bar is not checked"
 fi
 
+# The air over a resting bar is the screen's. The window is the bar plus the
+# room a magnified icon rises and spreads into, drawn transparent — and until
+# the window was given an input shape, a click there went to the dock and did
+# nothing, however plainly it was aimed at the window underneath. `xev` is
+# that window: if it hears the press, the press went through.
+if command -v xdotool >/dev/null && command -v xev >/dev/null; then
+    xev -geometry 1280x800+0+0 -event button > "$WORK/behind.log" 2>&1 &
+    BEHIND=$!
+    sleep 0.8
+    DOCK=$(xdotool search --name '^Doca$' 2>/dev/null | head -1)
+    xdotool windowraise "$DOCK"
+    xdotool mousemove 20 20
+    sleep 0.6
+    eval "$(xwininfo -id "$DOCK" | awk '/Absolute upper-left X/ {print "DX="$4} /Absolute upper-left Y/ {print "DY="$4} /Width/ {print "DW="$2} /Height/ {print "DH="$2}')"
+    heard_behind() {
+        : > "$WORK/behind.log"
+        xdotool mousemove "$1" "$2"; sleep 0.3
+        xdotool mousedown 1; xdotool mouseup 1; sleep 0.3
+        grep -q ButtonPress "$WORK/behind.log"
+    }
+    heard_behind $((DX + 4)) $((DY + 4)) \
+        && ok "a click in the air over the resting bar reached the window behind it" \
+        || fail "a click in the air over the resting bar was taken by the dock"
+    # With the pointer on the bar, the lens opens into that air, and the
+    # pointer has to be able to stay on what it draws there.
+    xdotool mousemove $((DX + DW / 2)) $((DY + DH - 3)); sleep 0.4
+    heard_behind $((DX + 4)) $((DY + 4)) \
+        && fail "with the pointer on the bar, the air its lens opens into let the pointer fall through" \
+        || ok "with the pointer on the bar, the air over it is the dock's"
+    xdotool mousemove 20 20; sleep 0.4
+    heard_behind $((DX + 4)) $((DY + 4)) \
+        && ok "the pointer gone, the air is the screen's again" \
+        || fail "the air stayed the dock's after the pointer left"
+    kill "$BEHIND" 2>/dev/null
+else
+    echo "  skip  xdotool or xev missing: what the air over the bar takes is not checked"
+fi
+
 # The screen changing under a running bar (#18, item 11): a monitor swapped,
 # a resolution switched. The bar has to land on the new bottom edge, inside
 # the new width — before this it stayed where the old screen had it, which
