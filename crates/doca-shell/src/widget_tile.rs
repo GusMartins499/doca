@@ -66,6 +66,10 @@ pub struct WidgetTile {
     /// shrank was the part of the switch that still read as a rebuild.
     life: Rc<Cell<Life>>,
     ticking: Rc<Cell<bool>>,
+    /// What choosing the tile does — a click, or `Enter` while it has the
+    /// keyboard. One closure for both, so the two cannot open different
+    /// things.
+    opens: Rc<dyn Fn()>,
 }
 
 impl WidgetTile {
@@ -101,11 +105,13 @@ impl WidgetTile {
         let id = state.id.clone();
         let root: gtk::Widget = tile.clone().upcast();
         let opening = root.clone();
+        let opens: Rc<dyn Fn()> = Rc::new(move || expand(&id, &opening));
+        let clicked = opens.clone();
         tile.connect_button_press_event(move |_, _| {
             // Either button, and nothing else: the controls live in the panel
             // now, so there is one way in rather than a left click that does
             // one thing and a right click that undoes it.
-            expand(&id, &opening);
+            clicked();
             glib::Propagation::Stop
         });
 
@@ -116,6 +122,7 @@ impl WidgetTile {
             look: held,
             life,
             ticking: Rc::new(Cell::new(false)),
+            opens,
         };
         tile.resize();
         tile.mark();
@@ -135,6 +142,11 @@ impl WidgetTile {
             accessible.set_role(atk::Role::PushButton);
             accessible.set_name(&spoken(&self.shown.borrow()));
         }
+    }
+
+    /// Open this widget's panel over the tile, as a click on it does.
+    pub fn open(&self) {
+        (self.opens)();
     }
 
     /// Start from nothing and grow onto the bar.
@@ -1237,6 +1249,13 @@ impl Shelf {
             .chain(self.leaving.borrow().iter())
             .map(|(_, tile)| tile.unfolding())
             .sum()
+    }
+
+    /// The tiles on the bar and staying, in the order they stand — where the
+    /// keyboard can go once it is past the icons. A tile on its way off is
+    /// not somewhere to go.
+    pub fn on_the_bar(&self) -> Vec<(String, WidgetTile)> {
+        self.tiles.borrow().clone()
     }
 
     /// Say again what every tile is showing, after the bar's `show_all`.

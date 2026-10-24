@@ -860,6 +860,23 @@ pub trait Doca {
     fn pin_in(&self, name: &str, id: &str) -> zbus::Result<()>;
     fn unpin_in(&self, name: &str, id: &str) -> zbus::Result<()>;
 
+    /// Pin at a place in a dock, or move a pin already there to it.
+    ///
+    /// Places are counted as `activate_position` counts them, from one, in
+    /// the order the bar shows — which for pins is the order they are
+    /// pinned in, since the bar draws them first. A place from 1 to one past
+    /// the last pin is taken; anything else is refused in words, not
+    /// clamped. Sent twice, the second changes nothing.
+    ///
+    /// Methods of their own rather than a position added to `pin_in` and
+    /// `pin_item`, so that a binding written against those keeps working.
+    /// And with no `ReorderItems` beside them: `reorder_pinned` is that
+    /// method, and moving one icon — what a drag does — is this one with an
+    /// id already pinned.
+    fn pin_in_at(&self, name: &str, id: &str, position: u32) -> zbus::Result<()>;
+    /// `pin_in_at` in the dock on screen, as `pin_item` is `pin_in`.
+    fn pin_item_at(&self, id: &str, position: u32) -> zbus::Result<()>;
+
     fn list_widgets(&self) -> zbus::Result<Vec<WidgetState>>;
     fn invoke_widget(&self, id: &str, action: &str) -> zbus::Result<()>;
 
@@ -867,6 +884,11 @@ pub trait Doca {
     fn activate_item(&self, id: &str) -> zbus::Result<()>;
     fn launch_item(&self, id: &str) -> zbus::Result<()>;
     fn activate_position(&self, position: u32) -> zbus::Result<String>;
+
+    /// Hand the keyboard to the dock: the bar comes up, auto-hide or not,
+    /// with the first item focused, and stays up until `Esc` gives the
+    /// keyboard back. Answered by `FocusRequested`, which the bar acts on.
+    fn focus_dock(&self) -> zbus::Result<()>;
     fn open_with(&self, id: &str, paths: &[&str]) -> zbus::Result<()>;
     fn list_folder(&self, id: &str) -> zbus::Result<Vec<FolderEntry>>;
     fn open_path(&self, path: &str) -> zbus::Result<()>;
@@ -901,6 +923,10 @@ pub trait Doca {
 
     #[zbus(signal)]
     fn item_activated(&self, id: &str, starting: bool) -> zbus::Result<()>;
+
+    /// Something asked for the keyboard to go to the dock — `FocusDock`.
+    #[zbus(signal)]
+    fn focus_requested(&self) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn windows_changed(&self) -> zbus::Result<()>;

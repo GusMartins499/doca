@@ -311,6 +311,7 @@ the script is the same thing for automation, and writes the same slots:
 ./scripts/bind-key.sh --back                       # <Shift><Super>e, the other way
 ./scripts/bind-key.sh --auto-hide '<Super><Alt>h'  # auto-hide on and off
 ./scripts/bind-key.sh --widget water '<Super><Alt>w'   # one widget on and off
+./scripts/bind-key.sh --focus '<Super><Alt>d'      # the keyboard to the dock
 ```
 
 GNOME binds `<Super>1..9` to its own dash out of the box
@@ -322,6 +323,20 @@ the keys being bound, and nothing else. `gsettings reset` gives them back.
 A chosen item behaves as if clicked: an open app comes forward, and one that
 is not running starts, with the same bounce on the bar a click gives.
 
+`FocusDock` hands the keyboard to the dock. The bar comes up even with
+auto-hide on, and stays up for as long as it has the keyboard:
+
+| key | does |
+|---|---|
+| `←` `→`, `Tab` `Shift+Tab` | the icon or tile before or after; stops at the ends |
+| `Home` `End` | the first or the last |
+| `Enter`, `Space` | as a left click: an app comes forward or starts, a folder or a tile opens |
+| `Menu`, `Shift+F10` | as a right click: the icon's menu, or the tile's panel |
+| `Esc` | the keyboard back to the app that had it, and the bar hides again |
+
+`Esc` inside a menu or a panel steps back to the bar rather than out of it.
+Choosing an app, or clicking outside the dock, gives the keyboard back too.
+
 Every action a key can call, for binding by hand:
 
 | method | arguments | does |
@@ -332,6 +347,7 @@ Every action a key can call, for binding by hand:
 | `ToggleWidget` | `id` | that widget on or off the dock showing; answers which |
 | `SetEnvironment` | `name` | that dock |
 | `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
+| `FocusDock` | — | the keyboard to the dock: the bar comes up, first item focused |
 | `ActivateItem` | `id` | that item, as a click would |
 | `InvokeWidget` | `id`, `action` | a widget's action — `water drink`, `music next` |
 | `SetAppearance` | `{key: value}` | e.g. `{'auto_hide': <true>}` |
@@ -494,8 +510,9 @@ the trash on the window already on screen.
 | `SetEnvironmentWorkspaces(s, ai)` | which workspaces a dock claims, tidied: sorted, deduplicated, negatives dropped. An empty list makes it the catch-all. |
 | `SetEnvironmentWidgets(s, as)` | the widgets a dock shows, in the order it shows them. |
 | `ReorderEnvironments(as)` | reorders the docks themselves, which is the order a key cycles through them. Same contract as `ReorderPinned`: a name nobody knows is refused, and a dock left out keeps its place at the end. |
-| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. |
+| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. There is no `ReorderItems`: of everything on the bar only the pins have an order anyone chose, so this is that method, and moving a single icon is `PinInAt` with an id already pinned. |
 | `PinIn(s, s)` / `UnpinIn(s, s)` | pin and unpin in the dock named, which need not be the one on screen — that is the whole difference from `PinItem`/`UnpinItem`, which act where the user is looking because that is what a click on the bar means. `PinIn` refuses an id no `.desktop` file answers to; `UnpinIn` does not, since that is how an uninstalled app gets out of the config. |
+| `PinInAt(s, s, u)` / `PinItemAt(s, u)` | pin at a place — in the dock named, or in the one on screen — counted as `ActivatePosition` counts: from 1, in the order the bar shows. The bar draws a dock's pins first, so place 2 is between the first pin and the second, and one past the last pin is the end. Anything else is refused in words, never clamped. An id already pinned there is moved rather than refused, which is what makes it the one call a drag needs; sent twice, the second changes nothing. New methods rather than a position added to `PinIn`/`PinItem`, so a binding written against those keeps working. `PinInAt` refuses a new id no `.desktop` file answers to, as `PinIn` does, but still moves one already pinned. |
 | `ListEnvironments()` → `a(saibasas)` | every dock: its name, the workspaces it claims, whether it is the one on screen, what it pins and which widgets it shows. Everything a writer can change about a dock is something a reader can see. |
 | `ListApplications()` → `a(sss)` | every installed application — id, name, icon — sorted by name, for a window that has to offer a choice of them. Entries marked `NoDisplay` are left out, the same ones a desktop menu leaves out. |
 

@@ -207,6 +207,25 @@ mod tests {
         windows.iter().collect()
     }
 
+    /// What `PinAt` leans on to count places the way `ActivatePosition` does:
+    /// the pins come first and in their own order, whatever is running, so
+    /// place *n* on the bar is pin *n* in the config.
+    #[test]
+    fn the_pins_hold_the_first_places_on_the_bar_in_their_own_order() {
+        let windows = vec![focused(1, "brave-browser"), window_on(2, "discord", 0)];
+        let pinned = ["discord".to_string(), "code".to_string()];
+
+        let items = build(&index(), &pinned, &everywhere(&windows));
+
+        assert_eq!(at_position(&items, 1).map(|i| i.id.as_str()), Some("discord"));
+        assert_eq!(at_position(&items, 2).map(|i| i.id.as_str()), Some("code"));
+        assert_eq!(
+            at_position(&items, 3).map(|i| i.id.as_str()),
+            Some("brave-browser"),
+            "a running app nobody pinned only ever comes after the pins"
+        );
+    }
+
     #[test]
     fn a_pinned_app_with_no_windows_still_appears_in_the_dock() {
         let items = build(&index(), &["code".into()], &[]);

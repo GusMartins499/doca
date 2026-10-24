@@ -159,6 +159,49 @@ case "$(call PinIn "Studio" "nothing.installed.here")" in
     *InvalidArgs*"no application called"*) ok "a refusal says what was wrong" ;;
     *) fail "the refusal was not something a window could show: $(call PinIn "Studio" "nothing.installed.here")" ;;
 esac
+
+# A pin that knows where: places counted from 1 in the order the bar shows,
+# which for pins is the order they were pinned in. Studio holds [$APP].
+read -r APP2 APP3 < <(call ListApplications | tr '(' '\n' \
+    | sed -n "s/^'\([^']*\)'.*/\1/p" | grep -vxF "$APP" | head -2 | tr '\n' ' ')
+studio_pins() {
+    # ('Studio', @ai [], false, ['a', 'b'], @as []) — the pins are the third
+    # field, the second list.
+    call ListEnvironments | grep -o "('Studio', [^)]*)" \
+        | sed -E "s/^\('Studio', [^]]*\], (true|false), (\[[^]]*\]).*/\2/"
+}
+if [ -n "${APP3:-}" ]; then
+    call PinInAt "Studio" "$APP2" 1 >/dev/null
+    call PinInAt "Studio" "$APP3" 2 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP2', '$APP3', '$APP']") ok "a pin given a place lands there, first and in the middle" ;;
+        *) fail "the places did not take: $(studio_pins)" ;;
+    esac
+    call PinInAt "Studio" "$APP3" 2 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP2', '$APP3', '$APP']") ok "the same place twice is the same dock" ;;
+        *) fail "a second identical pin changed something: $(studio_pins)" ;;
+    esac
+    call PinInAt "Studio" "$APP2" 3 >/dev/null
+    case "$(studio_pins)" in
+        "['$APP3', '$APP', '$APP2']") ok "a pin moved to the end is moved, not doubled" ;;
+        *) fail "moving a pin went wrong: $(studio_pins)" ;;
+    esac
+    case "$(call PinInAt "Studio" "$APP" 9)" in
+        *InvalidArgs*"from 1 to 3"*) ok "a place past the pins is refused in words" ;;
+        *) fail "the refusal was not showable: $(call PinInAt "Studio" "$APP" 9)" ;;
+    esac
+    case "$(cat "$XDG_CONFIG_HOME/doca/config.toml")" in
+        *"# Kept by hand. The daemon must not eat this."*) ok "the comment outlived the pins" ;;
+        *) fail "a pin took the comment with it" ;;
+    esac
+    case "$(call PinIn "Studio" "$APP")" in
+        *error*) fail "PinIn lost its old signature: $(call PinIn "Studio" "$APP")" ;;
+        *) ok "PinIn still answers to the call it always did" ;;
+    esac
+else
+    fail "fewer than three applications installed; PinInAt went unchecked"
+fi
 # The cycle order, which is the order of this list. Only an order: a name
 # nobody knows is refused, and a dock left out keeps its place at the end, so a
 # window working from a list drawn before a rename cannot delete a dock.
@@ -724,6 +767,118 @@ PY
         --method "$INTERFACE.SetAppearance" "{'auto_hide': <false>}" >/dev/null 2>&1
 else
     echo "  skip  xdotool or python3-gi missing: a drag to the bar is not checked"
+fi
+
+# The dock with the keyboard on it (#18, item 9). The bar is a DOCK window, so
+# whether real keys reach it at all is the whole question, and only real key
+# presses on a real X server answer it. On the bar: the folder, then the
+# water and clock tiles. Where the keys went is read out of the bar's log.
+keyboard_on() {
+    grep -a "the keyboard is on" "$WORK/shell.log" | tail -1 | sed 's/\x1b\[[0-9;]*m//g'
+}
+held_since() {
+    tail -c +"$1" "$WORK/shell.log" | grep -ac "the dock has the keyboard"
+}
+some_menu_up() {
+    xwininfo -root -children 2>/dev/null | grep '"doca-shell":' | grep -v '"Doca":' |
+        grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' | awk -F'x' '$1 >= 100 { print; exit }'
+}
+if command -v xdotool >/dev/null && python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    call SetAppearance "{'auto_hide': <true>}" >/dev/null
+    xdotool mousemove 100 100
+    # The drag check above has just switched auto-hide off, and that rebuild
+    # may still be on its way: settled first, so it cannot pass for this one.
+    sleep 1.5
+    for _ in $(seq 1 30); do [ "$(bar_y)" -ge 790 ] 2>/dev/null && break; sleep 0.1; done
+    HIDDEN_Y=$(bar_y)
+
+    MARK=$(( $(stat -c %s "$WORK/shell.log") + 1 ))
+    call FocusDock >/dev/null
+    for _ in $(seq 1 30); do [ "$(held_since "$MARK")" -ge 1 ] && break; sleep 0.1; done
+    sleep 0.4
+    UP_Y=$(bar_y)
+    [ -n "$UP_Y" ] && [ "$UP_Y" -lt "$HIDDEN_Y" ] \
+        && ok "FocusDock brought a hidden bar up (y $HIDDEN_Y → $UP_Y)" \
+        || fail "FocusDock left the hidden bar where it was (y $HIDDEN_Y → $UP_Y)"
+    case "$(keyboard_on)" in
+        *'Icon("folder:'*) ok "the first item has the keyboard" ;;
+        *) fail "the keyboard did not land on the first item: $(keyboard_on)" ;;
+    esac
+    # Longer than auto-hide waits for a pointer that left, with the pointer
+    # nowhere near: held is held.
+    sleep 1
+    [ "$(bar_y)" = "$UP_Y" ] && ok "the bar stays up while the keyboard is on it" \
+        || fail "the bar hid with the keyboard on it (y $(bar_y))"
+
+    xdotool key Right
+    sleep 0.3
+    case "$(keyboard_on)" in
+        *'Tile("water")'*) ok "a real Right reached the dock and walked onto the tile" ;;
+        *) fail "Right did not move the keyboard: $(keyboard_on)" ;;
+    esac
+    xdotool key Return
+    PANEL=""
+    for _ in $(seq 1 20); do PANEL=$(some_menu_up); [ -n "$PANEL" ] && break; sleep 0.15; done
+    [ -n "$PANEL" ] && ok "Enter on a tile opened its panel ($PANEL)" \
+        || fail "Enter on a tile opened nothing"
+    xdotool key Escape
+    for _ in $(seq 1 20); do [ -z "$(some_menu_up)" ] && break; sleep 0.15; done
+    sleep 0.6
+    xdotool key Right
+    sleep 0.3
+    case "$(keyboard_on)" in
+        *'Tile("clock")'*) ok "Esc out of the panel came back to the bar, keys and all" ;;
+        *) fail "after Esc out of the panel the keys went nowhere: $(keyboard_on)" ;;
+    esac
+    [ "$(bar_y)" = "$UP_Y" ] && ok "the bar stayed up under the panel and after it" \
+        || fail "the panel closing took the bar away from the keyboard (y $(bar_y))"
+
+    xdotool key Escape
+    for _ in $(seq 1 30); do [ "$(bar_y)" -ge "$HIDDEN_Y" ] 2>/dev/null && break; sleep 0.1; done
+    [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "Esc gave the keyboard back and the bar hid again" \
+        || fail "after Esc the bar stayed at y $(bar_y)"
+
+    # A key bound on the desktop holds the keyboard from its press to its
+    # release, so FocusDock usually lands while somebody else still has it.
+    # Another client holds a grab across the call and lets go a moment later.
+    cat > "$WORK/hold_keys.py" <<'PY'
+import gi
+gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0')
+from gi.repository import Gtk, Gdk, GLib
+w = Gtk.Window(title="holding the keys"); w.move(10, 10); w.set_default_size(40, 40); w.show_all()
+def grab():
+    s = Gdk.Display.get_default().get_default_seat()
+    print(s.grab(w.get_window(), Gdk.SeatCapabilities.KEYBOARD, False, None, None, None, None), flush=True)
+    GLib.timeout_add(400, lambda: (s.ungrab(), Gtk.main_quit()))
+GLib.timeout_add(300, grab)
+Gtk.main()
+PY
+    python3 -I "$WORK/hold_keys.py" > "$WORK/hold_keys.log" 2>/dev/null &
+    HOLDER=$!
+    for _ in $(seq 1 30); do grep -q SUCCESS "$WORK/hold_keys.log" && break; sleep 0.05; done
+    MARK=$(( $(stat -c %s "$WORK/shell.log") + 1 ))
+    call FocusDock >/dev/null
+    wait "$HOLDER"
+    sleep 0.4
+    xdotool key Right
+    sleep 0.3
+    if ! grep -q SUCCESS "$WORK/hold_keys.log"; then
+        echo "  skip  the other client never got its grab, so there was nothing to wait out"
+    elif ! tail -c +"$MARK" "$WORK/shell.log" | grep -aq "the keyboard is someone else's"; then
+        echo "  skip  the keyboard was free again before FocusDock asked, so nothing was waited out"
+    elif [ "$(held_since "$MARK")" -ge 1 ]; then
+        case "$(keyboard_on)" in
+            *'Tile("water")'*) ok "the dock waited out a keyboard someone else held, then took it" ;;
+            *) fail "with the keyboard held elsewhere at the call, the dock never got it: $(keyboard_on)" ;;
+        esac
+    else
+        fail "FocusDock went unanswered while the keyboard was held elsewhere"
+    fi
+    xdotool key Escape
+    sleep 0.3
+    call SetAppearance "{'auto_hide': <false>}" >/dev/null
+else
+    echo "  skip  xdotool or python3-gi missing: the keyboard on the dock is not checked"
 fi
 
 # The air over a resting bar is the screen's. The window is the bar plus the
