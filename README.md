@@ -81,6 +81,7 @@ show_trash = true
 icon_theme = ""       # empty follows the system
 gtk_theme = ""
 cursor_theme = ""
+monitor = ""          # empty is the primary; or an output, as xrandr names it
 
 [[environments]]
 name = "Work"
@@ -112,6 +113,7 @@ other environment claims.
 | `icon_theme` | an icon theme for the dock alone. Empty follows `gtk-icon-theme-name`, which is what GNOME Tweaks → Appearance → Icons sets. |
 | `gtk_theme` | a GTK theme for the dock alone, which is what `theme = "system"` reads its colours from. Empty follows the system. |
 | `cursor_theme` | a cursor theme for the dock's own windows. Empty follows the system. |
+| `monitor` | the monitor the dock stands on, by the name of its output as `xrandr --listmonitors` shows it (`eDP-1`, `DisplayPort-0`). Empty is the primary. A named monitor that is unplugged hands the dock to the primary until it comes back; the name stays in the config. |
 
 A name no theme answers to is not an error: GTK falls back on its own and the
 log says what was asked for, so the dock stays usable. Clearing an override
@@ -501,7 +503,7 @@ the trash on the window already on screen.
 
 | method | |
 |---|---|
-| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
+| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`, `monitor`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
 | `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written, announced, and handed to the widget that is already running — which keeps whatever it was counting. A key nobody knows is refused rather than ignored, and a value out of range is brought back in. |
 | `WidgetSettings()` → `(sssuu)` | what every widget setting is, already clamped. The counterpart of `SetWidgetSetting`, flat and named the same way, so a window can put them straight on its controls. |
 | `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |

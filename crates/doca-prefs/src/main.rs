@@ -307,6 +307,7 @@ fn on_a_display() {
     appearance::on_a_display::a_lens_turned_off_shows_as_a_switch_that_is_off();
     appearance::on_a_display::moving_a_control_sends_exactly_the_key_that_moved();
     appearance::on_a_display::turning_the_lens_on_sends_a_scale_that_is_really_on();
+    appearance::on_a_display::choosing_a_screen_sends_its_name();
 
     docks::on_a_display::showing_what_the_daemon_said_asks_for_nothing();
     docks::on_a_display::selecting_a_dock_shows_what_that_dock_holds();

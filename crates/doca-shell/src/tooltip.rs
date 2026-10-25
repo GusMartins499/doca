@@ -12,15 +12,20 @@ pub const GAP: i32 = 10;
 /// The bar is centred on the screen and an item near either end would push its
 /// label off the edge, so the label is kept inside the screen rather than
 /// centred at any cost.
+/// `screen` is the left edge and the width of the monitor the item is on:
+/// the label is kept inside that one, which on a dock standing on the
+/// second of two monitors does not start at zero.
 pub fn place(
     item: (i32, i32),
     item_width: i32,
     size: (i32, i32),
-    screen_width: i32,
+    screen: (i32, i32),
 ) -> (i32, i32) {
     let (item_x, item_y) = item;
+    let (left, width) = screen;
     let centred = item_x + (item_width - size.0) / 2;
-    let x = centred.clamp(crate::dock::SCREEN_MARGIN, (screen_width - size.0 - crate::dock::SCREEN_MARGIN).max(crate::dock::SCREEN_MARGIN));
+    let first = left + crate::dock::SCREEN_MARGIN;
+    let x = centred.clamp(first, (left + width - size.0 - crate::dock::SCREEN_MARGIN).max(first));
     (x, item_y - size.1 - GAP)
 }
 
@@ -101,17 +106,15 @@ impl Tooltip {
     fn show_now(&self, text: &str, anchor: (i32, i32), item_width: i32) {
         self.label.set_text(text);
         let (_, natural) = self.window.preferred_size();
-        let screen_width = gdk::Display::default()
-            .and_then(|display| display.primary_monitor())
-            .map(|monitor| monitor.geometry().width())
-            .unwrap_or(natural.width);
+        // The monitor the icon is on, which is the dock's — whichever one
+        // it was given, and not the primary.
+        let screen = gdk::Display::default()
+            .and_then(|display| display.monitor_at_point(anchor.0, anchor.1))
+            .map(|monitor| monitor.geometry())
+            .map(|area| (area.x(), area.width()))
+            .unwrap_or((0, natural.width));
 
-        let (x, y) = place(
-            anchor,
-            item_width,
-            (natural.width, natural.height),
-            screen_width,
-        );
+        let (x, y) = place(anchor, item_width, (natural.width, natural.height), screen);
         tracing::info!(x, y, w = natural.width, h = natural.height, "tooltip shown");
         self.window.move_(x, y);
         self.window.show();
@@ -149,14 +152,14 @@ pub mod tests {
 
     #[test]
     fn a_label_sits_centred_over_the_icon_it_names() {
-        let (x, _) = place((900, 1000), 64, (120, 30), SCREEN);
+        let (x, _) = place((900, 1000), 64, (120, 30), (0, SCREEN));
 
         assert_eq!(x + 60, 900 + 32);
     }
 
     #[test]
     fn a_label_sits_clear_above_the_bar_rather_than_over_it() {
-        let (_, y) = place((900, 1000), 64, (120, 30), SCREEN);
+        let (_, y) = place((900, 1000), 64, (120, 30), (0, SCREEN));
 
         assert!(y + 30 < 1000, "the label would cover the icon it names");
         assert_eq!(y, 1000 - 30 - GAP);
@@ -164,22 +167,37 @@ pub mod tests {
 
     #[test]
     fn a_label_for_the_first_icon_is_not_pushed_off_the_left_edge() {
-        let (x, _) = place((10, 1000), 48, (300, 30), SCREEN);
+        let (x, _) = place((10, 1000), 48, (300, 30), (0, SCREEN));
 
         assert!(x >= crate::dock::SCREEN_MARGIN);
     }
 
     #[test]
     fn a_label_for_the_last_icon_is_not_pushed_off_the_right_edge() {
-        let (x, _) = place((1880, 1000), 48, (300, 30), SCREEN);
+        let (x, _) = place((1880, 1000), 48, (300, 30), (0, SCREEN));
 
         assert!(x + 300 <= SCREEN - crate::dock::SCREEN_MARGIN);
     }
 
     #[test]
     fn a_label_wider_than_the_screen_still_starts_on_it() {
-        let (x, _) = place((900, 1000), 48, (4000, 30), SCREEN);
+        let (x, _) = place((900, 1000), 48, (4000, 30), (0, SCREEN));
 
         assert_eq!(x, crate::dock::SCREEN_MARGIN);
+    }
+
+    /// A dock on the second of two monitors: the label is kept on that one,
+    /// not clamped to the first one's width and pushed onto the other screen.
+    #[test]
+    fn a_label_on_the_second_monitor_stays_on_it() {
+        let second = (SCREEN, SCREEN);
+        let (x, _) = place((SCREEN + 10, 1000), 48, (300, 30), second);
+        assert!(x >= SCREEN + crate::dock::SCREEN_MARGIN, "pushed back onto the first monitor: {x}");
+
+        let (x, _) = place((SCREEN + 900, 1000), 64, (120, 30), second);
+        assert_eq!(x + 60, SCREEN + 900 + 32, "not centred over its icon any more");
+
+        let (x, _) = place((2 * SCREEN - 20, 1000), 48, (300, 30), second);
+        assert!(x + 300 <= 2 * SCREEN - crate::dock::SCREEN_MARGIN);
     }
 }
