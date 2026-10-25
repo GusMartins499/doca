@@ -67,6 +67,15 @@ pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 
 `Ctrl+Alt+F2` returns to the desktop.
 
+## On the bar
+
+Drag a pinned icon along the bar to give it another place: the icons it
+passes make way, and it is pinned where you let go — written to the config,
+comments and all, through `PinItemAt`. Only the pins move, because they are
+the one part of the bar in an order somebody chose; running apps follow
+their windows, and folders and the trash come after. A left click is chosen
+when the button comes up, so the same press can pick an icon up instead.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/doca/config.toml`:
