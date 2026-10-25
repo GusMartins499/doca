@@ -856,9 +856,17 @@ fn wire(
             match releasing.drop_held() {
                 Some(row::Dropped::Moved(id, position)) => {
                     tracing::info!(id, position, "an icon was dragged to a new place");
+                    let row = releasing.clone();
                     glib::spawn_future_local(async move {
                         if let Err(e) = proxy.pin_item_at(&id, position).await {
+                            // A running app no `.desktop` file answers to
+                            // cannot be pinned. The row already shows it
+                            // among the pins, and no rebuild is coming to
+                            // say otherwise — so it is told the truth here.
                             tracing::warn!("the dock refused the new place for {id}: {e}");
+                            if let Ok(items) = proxy.list_items().await {
+                                row.refill(&items);
+                            }
                         }
                     });
                 }
@@ -1873,6 +1881,9 @@ fn on_a_display() {
     row::tests::an_icon_that_makes_way_glides_rather_than_jumps();
     row::tests::a_drag_stays_among_the_pins();
     row::tests::a_pin_put_back_where_it_was_asks_for_nothing();
+    row::tests::a_running_app_carried_in_among_the_pins_is_pinned_there();
+    row::tests::a_running_app_goes_among_the_pins_or_back_home();
+    row::tests::a_running_app_pulled_up_does_not_come_off();
     row::tests::a_rebuild_mid_drag_leaves_the_icon_in_the_hand();
     row::tests::a_pin_pulled_off_the_bar_and_let_go_of_is_unpinned();
     row::tests::a_pin_brought_back_onto_the_bar_is_not_unpinned();

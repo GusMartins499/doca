@@ -44,12 +44,16 @@ struct Held {
     /// Pulled up off the bar: let go of out here, it is unpinned. Its slot
     /// closes behind it while it is away and opens again if it comes back.
     away: bool,
+    /// A pin, rather than an app that is running unpinned and is being
+    /// carried in among the pins to be pinned there.
+    pinned: bool,
 }
 
 /// What letting go of a held icon came to.
 #[derive(Debug, PartialEq)]
 pub enum Dropped {
-    /// Put down in a new place, counted from 1 the way `PinItemAt` counts.
+    /// Put down among the pins, counted from 1 the way `PinItemAt` counts:
+    /// a pin moved, or a running app carried in and pinned there.
     Moved(String, u32),
     /// Let go of off the bar: no longer pinned.
     Unpinned(String),
@@ -473,8 +477,7 @@ impl Row {
         // icon it holds stays in the slot it was carried to.
         if let Some(held) = self.held.borrow().as_ref() {
             if let Some(now) = row.iter().position(|entry| entry.item.id == held.id) {
-                let pins = pinned_run(&row);
-                let carried = held_at.unwrap_or(now).min(pins.saturating_sub(1));
+                let carried = held_at.unwrap_or(now).min(row.len() - 1);
                 let entry = row.remove(now);
                 if held.away && !entry.life.get().leaving() {
                     // Taken back as "an app that reopened" by the loop
@@ -492,6 +495,11 @@ impl Row {
         self.speak();
         self.area.queue_draw();
         self.animate();
+    }
+
+    /// Take a list of items at the size the row already has.
+    pub fn refill(&self, items: &[DockItem]) {
+        self.fill(items, self.rest.get());
     }
 
     /// Tell a screen reader what the row is saying now.
@@ -786,16 +794,20 @@ impl Row {
     /// Take hold of the icon at `index`, the pointer at `x`, to drag it into
     /// a new place. P3 of #18: "reorder by dragging".
     ///
-    /// Only a pin: the pins are the one part of the row anyone put in an
-    /// order. An app that is running and not pinned follows its windows, and
-    /// folders and the trash come after — there is no order of theirs to
-    /// change. `false` when there is nothing here to take.
+    /// A pin, to move among the pins — the one part of the row anyone put
+    /// in an order — or an app that is running, to carry in among them and
+    /// pin there. Not a folder or the trash, which come after everything and
+    /// have no order of theirs to change; they are the items with neither a
+    /// pin nor a window. `false` when there is nothing here to take.
     pub fn pick(&self, index: usize, x: f64) -> bool {
-        let id = {
+        let (id, pinned) = {
             let entries = self.entries.borrow();
             match entries.get(index) {
-                Some(entry) if entry.item.pinned && !entry.life.get().leaving() => {
-                    entry.item.id.clone()
+                Some(entry)
+                    if (entry.item.pinned || !entry.item.windows.is_empty())
+                        && !entry.life.get().leaving() =>
+                {
+                    (entry.item.id.clone(), entry.item.pinned)
                 }
                 _ => return false,
             }
@@ -807,6 +819,7 @@ impl Row {
             x,
             grab: x - centre,
             away: false,
+            pinned,
         }));
         self.animate();
         true
@@ -855,8 +868,10 @@ impl Row {
     /// where it left, and the room opens again.
     pub fn drag_to(&self, x: f64, y: f64) {
         let rest = self.rest.get();
-        let away = y < rest.overhead() as f64 - rest.icon;
-        let (id, turned) = {
+        // Only a pin comes off: a running app pulled up has no pin to lose.
+        let away = y < rest.overhead() as f64 - rest.icon
+            && self.held.borrow().as_ref().is_some_and(|held| held.pinned);
+        let (id, turned, from) = {
             let mut held = self.held.borrow_mut();
             let Some(held) = held.as_mut() else {
                 return;
@@ -864,7 +879,7 @@ impl Row {
             held.x = x;
             let turned = held.away != away;
             held.away = away;
-            (held.id.clone(), turned)
+            (held.id.clone(), turned, held.from)
         };
         if turned {
             if let Some(entry) = self
@@ -895,8 +910,8 @@ impl Row {
         let Some(now) = entries.iter().position(|entry| entry.item.id == id) else {
             return;
         };
-        let pins = pinned_run(&entries);
-        let Some(to) = nearest(&centres[..pins.min(centres.len())], x - grab) else {
+        let places = places(&entries, &id, from);
+        let Some(to) = nearest(&centres, &places, x - grab) else {
             return;
         };
         if to == now {
@@ -1255,23 +1270,37 @@ impl Row {
     }
 }
 
-/// How many icons at the front of the row are pins. The pins come first and
-/// in their own order — `model::build` puts them there — so this is also the
-/// last place a dragged pin can be taken to.
-fn pinned_run(entries: &[Entry]) -> usize {
-    entries
+/// The slots the held icon can be put down in: anywhere among the pins, and
+/// the slot it was picked up from.
+///
+/// The pins come first and in their own order — `model::build` puts them
+/// there — so "among the pins" is the first slots of the row, one more than
+/// there are other pins: before the first, between any two, after the last.
+/// For a pin that is everywhere it could be, its own slot included. For a
+/// running app it is everywhere it could be pinned, plus home: carried back
+/// out among the running apps it goes back where it was, because their
+/// order is their windows', not anyone's to change.
+fn places(entries: &[Entry], held: &str, from: usize) -> Vec<usize> {
+    let others = entries
         .iter()
-        .position(|entry| !entry.item.pinned)
-        .unwrap_or(entries.len())
+        .filter(|entry| entry.item.pinned && entry.item.id != held)
+        .count();
+    let mut places: Vec<usize> = (0..=others)
+        .filter(|place| *place < entries.len())
+        .collect();
+    if !places.contains(&from) && from < entries.len() {
+        places.push(from);
+    }
+    places
 }
 
-/// The slot whose centre is nearest `x`.
-fn nearest(centres: &[f64], x: f64) -> Option<usize> {
-    centres
+/// Of these slots, the one whose centre is nearest `x`.
+fn nearest(centres: &[f64], places: &[usize], x: f64) -> Option<usize> {
+    places
         .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| (*a - x).abs().total_cmp(&(*b - x).abs()))
-        .map(|(index, _)| index)
+        .copied()
+        .filter(|place| *place < centres.len())
+        .min_by(|a, b| (centres[*a] - x).abs().total_cmp(&(centres[*b] - x).abs()))
 }
 
 /// What is on the row, in words: each item's name in order, and how many
@@ -1517,11 +1546,14 @@ pub mod tests {
     /// unpinned is not picked up, and no pin is carried in among the apps
     /// that are.
     pub fn a_drag_stays_among_the_pins() {
+        // A folder is neither pinned nor running, and has no order to change.
+        let folders = Row::new();
+        let mut folder = item("folder:/home/me/Downloads");
+        folder.pinned = false;
+        folders.fill(&[item("a"), folder], Rest::new(ICON, 4, 4, SCALE));
+        assert!(!folders.pick(1, 0.0), "a folder was picked up");
+
         let (row, rest) = pins_and_a_stranger();
-        assert!(
-            !row.pick(4, rest.centre(4)),
-            "an unpinned app was picked up"
-        );
 
         row.pick(1, rest.centre(1));
         row.drag_to(rest.centre(4) + 200.0, on_the_bar(&rest));
@@ -1531,6 +1563,60 @@ pub mod tests {
             "a pin went past the last pin"
         );
         assert_eq!(row.drop_held(), Some(Dropped::Moved("b".to_string(), 4)));
+    }
+
+    /// A running app carried in among the pins is pinned where it is let go.
+    pub fn a_running_app_carried_in_among_the_pins_is_pinned_there() {
+        let (row, rest) = pins_and_a_stranger();
+        assert!(
+            row.pick(4, rest.centre(4)),
+            "a running app could not be picked up"
+        );
+        row.drag_to(rest.centre(1), on_the_bar(&rest));
+        assert_eq!(order(&row), ["a", "running", "b", "c", "d"]);
+        assert_eq!(
+            row.drop_held(),
+            Some(Dropped::Moved("running".to_string(), 2))
+        );
+    }
+
+    /// Among several running apps, the one carried out of their midst can be
+    /// pinned at the end — or taken back home, which is nothing. Their order
+    /// is their windows', so there is no third place for it among them.
+    pub fn a_running_app_goes_among_the_pins_or_back_home() {
+        let (row, rest) = pins_and_a_stranger();
+        let mut items = row.items();
+        let mut second = item("second");
+        second.pinned = false;
+        second.windows = vec![9];
+        items.push(second);
+        row.fill(&items, rest);
+
+        row.pick(5, rest.centre(5));
+        row.drag_to(rest.centre(4), on_the_bar(&rest));
+        assert_eq!(order(&row), ["a", "b", "c", "d", "second", "running"]);
+        row.drag_to(rest.centre(5), on_the_bar(&rest));
+        assert_eq!(order(&row), ["a", "b", "c", "d", "running", "second"]);
+        assert_eq!(row.drop_held(), None, "taken back home and still written");
+
+        row.pick(5, rest.centre(5));
+        row.drag_to(rest.centre(4), on_the_bar(&rest));
+        assert_eq!(
+            row.drop_held(),
+            Some(Dropped::Moved("second".to_string(), 5))
+        );
+    }
+
+    /// Pulled up off the bar, a running app has no pin to lose.
+    pub fn a_running_app_pulled_up_does_not_come_off() {
+        let (row, rest) = pins_and_a_stranger();
+        row.pick(4, rest.centre(4));
+        row.drag_to(rest.centre(4), OFF_THE_BAR);
+        assert!(
+            !row.away(),
+            "a running app came off the bar as if it were a pin"
+        );
+        assert_eq!(row.drop_held(), None);
     }
 
     /// Picked up and put back where it was is nothing to write.
