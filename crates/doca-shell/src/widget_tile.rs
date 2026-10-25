@@ -52,6 +52,24 @@ pub struct Look {
 /// the other end cannot be checked without one either.
 pub type Expand = Rc<dyn Fn(&str, &gtk::Widget)>;
 
+/// What a tile's left button does once the hand has moved it past the drag
+/// threshold: #18, P3, "reorder by dragging, items and widgets".
+///
+/// Points are root coordinates. `Lift` also says where on the tile it was
+/// taken hold of, so what is carried stays under the hand where it took it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    Lift { at: (f64, f64), grab: (f64, f64) },
+    Carry { at: (f64, f64) },
+    Drop { at: (f64, f64) },
+}
+
+/// How much of the bar's card shows round a tile being carried.
+pub const CARRY_PAD: i32 = 6;
+
+/// Whoever moves tiles: told which tile, and what the hand did with it.
+pub type Grip = Rc<dyn Fn(&str, Gesture)>;
+
 #[derive(Clone)]
 pub struct WidgetTile {
     pub root: gtk::Widget,
@@ -70,6 +88,14 @@ pub struct WidgetTile {
     /// keyboard. One closure for both, so the two cannot open different
     /// things.
     opens: Rc<dyn Fn()>,
+    /// In the hand: the tile is a hole the size of itself, and a picture of
+    /// it is carried at the pointer.
+    held: Rc<Cell<bool>>,
+    /// How much of its room the tile holds, besides arriving and leaving:
+    /// less than all of it for the frames after it moved slot, while the
+    /// room it left closes over the same frames. See `Shelf::carry_to`.
+    room: Rc<Cell<f64>>,
+    grip: Rc<RefCell<Option<Grip>>>,
 }
 
 impl WidgetTile {
@@ -106,12 +132,64 @@ impl WidgetTile {
         let root: gtk::Widget = tile.clone().upcast();
         let opening = root.clone();
         let opens: Rc<dyn Fn()> = Rc::new(move || expand(&id, &opening));
+        let grip: Rc<RefCell<Option<Grip>>> = Rc::default();
+        tile.add_events(gdk::EventMask::BUTTON_RELEASE_MASK | gdk::EventMask::BUTTON1_MOTION_MASK);
+        // Either button opens the panel, and nothing else does: the controls
+        // live in the panel, so there is one way in rather than a left click
+        // that does one thing and a right click that undoes it. The left one
+        // opens it on the release, so the same press can pick the tile up —
+        // the rule the icons follow.
+        let pressed: Rc<Cell<Option<(f64, f64)>>> = Rc::default();
+        let moved = Rc::new(Cell::new(false));
         let clicked = opens.clone();
-        tile.connect_button_press_event(move |_, _| {
-            // Either button, and nothing else: the controls live in the panel
-            // now, so there is one way in rather than a left click that does
-            // one thing and a right click that undoes it.
-            clicked();
+        let pressing = pressed.clone();
+        tile.connect_button_press_event(move |_, event| {
+            match event.button() {
+                1 if event.event_type() == gdk::EventType::ButtonPress => {
+                    pressing.set(Some(event.position()));
+                }
+                1 => {}
+                _ => clicked(),
+            }
+            glib::Propagation::Stop
+        });
+        let (lifting, carrying, moving) = (grip.clone(), pressed.clone(), moved.clone());
+        let named = state.id.clone();
+        tile.connect_motion_notify_event(move |tile, event| {
+            let Some(from) = carrying.get() else {
+                return glib::Propagation::Proceed;
+            };
+            let at = event.root();
+            if !moving.get() {
+                let (x, y) = event.position();
+                if !tile.drag_check_threshold(from.0 as i32, from.1 as i32, x as i32, y as i32) {
+                    return glib::Propagation::Proceed;
+                }
+                moving.set(true);
+                if let Some(grip) = lifting.borrow().clone() {
+                    grip(&named, Gesture::Lift { at, grab: from });
+                }
+            }
+            if let Some(grip) = lifting.borrow().clone() {
+                grip(&named, Gesture::Carry { at });
+            }
+            glib::Propagation::Proceed
+        });
+        let clicked = opens.clone();
+        let dropping = grip.clone();
+        let named = state.id.clone();
+        tile.connect_button_release_event(move |_, event| {
+            if event.button() != 1 {
+                return glib::Propagation::Stop;
+            }
+            let was = pressed.replace(None);
+            if moved.replace(false) {
+                if let Some(grip) = dropping.borrow().clone() {
+                    grip(&named, Gesture::Drop { at: event.root() });
+                }
+            } else if was.is_some() {
+                clicked();
+            }
             glib::Propagation::Stop
         });
 
@@ -123,6 +201,9 @@ impl WidgetTile {
             life,
             ticking: Rc::new(Cell::new(false)),
             opens,
+            held: Rc::new(Cell::new(false)),
+            room: Rc::new(Cell::new(1.0)),
+            grip,
         };
         tile.resize();
         tile.mark();
@@ -147,6 +228,48 @@ impl WidgetTile {
     /// Open this widget's panel over the tile, as a click on it does.
     pub fn open(&self) {
         (self.opens)();
+    }
+
+    /// Hand the tile to whoever moves tiles.
+    fn grip_with(&self, grip: Option<Grip>) {
+        self.grip.replace(grip);
+    }
+
+    /// The tile as it is drawn now, on a card of the bar's own, for carrying
+    /// at the pointer.
+    ///
+    /// The card is the point: on the bar a tile has no background of its
+    /// own — the bar is its background — so the tile alone, lifted off it,
+    /// was its words floating over whatever was under the pointer. Seen in
+    /// the sandbox. The card is painted from the same `#ground` rules the bar
+    /// is, so it is the bar's colour, edge and corners in every theme, with
+    /// `CARRY_PAD` of it showing round the tile.
+    fn snapshot(&self) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+        let (width, height) = (self.area.allocated_width(), self.area.allocated_height());
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let (outer_w, outer_h) = (width + CARRY_PAD * 2, height + CARRY_PAD * 2);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, outer_w, outer_h).ok()?;
+        {
+            let cr = cairo::Context::new(&surface).ok()?;
+            let card = gtk::DrawingArea::new();
+            card.set_widget_name("ground");
+            let context = card.style_context();
+            let (w, h) = (outer_w as f64, outer_h as f64);
+            gtk::render_background(&context, &cr, 0.0, 0.0, w, h);
+            gtk::render_frame(&context, &cr, 0.0, 0.0, w, h);
+            cr.translate(CARRY_PAD as f64, CARRY_PAD as f64);
+            self.root.draw(&cr);
+        }
+        gdk::pixbuf_get_from_surface(&surface, 0, 0, outer_w, outer_h)
+    }
+
+    /// Picked up, or put down. A tile in the hand is drawn by nothing: the
+    /// room it holds is where it will go.
+    fn hold(&self, held: bool) {
+        self.held.set(held);
+        self.pass();
     }
 
     /// Start from nothing and grow onto the bar.
@@ -186,7 +309,12 @@ impl WidgetTile {
     /// scaled the way an arriving icon is and faded with it.
     fn pass(&self) {
         self.resize();
-        self.root.set_opacity(self.life.get().presence());
+        let shown = if self.held.get() {
+            0.0
+        } else {
+            self.life.get().presence()
+        };
+        self.root.set_opacity(shown);
         self.area.queue_draw();
     }
 
@@ -257,7 +385,8 @@ impl WidgetTile {
     /// text is ellipsised into the declared width instead.
     fn resize(&self) {
         let look = self.look.get();
-        let width = (self.declared() as f64 * self.life.get().presence()).round() as i32;
+        let width =
+            (self.declared() as f64 * self.life.get().presence() * self.room.get()).round() as i32;
         let size = (width, height_of(look.icon_size));
         if self.area.size_request() != size {
             self.area.set_size_request(size.0, size.1);
@@ -1021,6 +1150,19 @@ pub struct Shelf {
     /// Whether the bar has been shown before. The first time is the dock
     /// starting, and tiles that were there all along do not *arrive*.
     shown_before: Cell<bool>,
+    /// Whoever moves tiles, handed to every tile the shelf makes.
+    grip: RefCell<Option<Grip>>,
+    /// The order the tiles stood in when one was picked up, so putting it
+    /// back where it was is nothing to write.
+    lifted: RefCell<Option<Vec<String>>>,
+    /// The room a tile in the hand just left, closing as the room where it
+    /// went opens: the neighbour it passed glides across rather than jumps.
+    gap: RefCell<Option<Gap>>,
+}
+
+/// The room a held tile left when it moved slot, closing on its own clock.
+struct Gap {
+    filler: gtk::DrawingArea,
 }
 
 impl Shelf {
@@ -1039,6 +1181,15 @@ impl Shelf {
             .borrow()
             .as_ref()
             .is_some_and(|divider| divider.clone().upcast::<gtk::Widget>() == *child)
+        {
+            return true;
+        }
+        // The room a tile in the hand just left, still closing.
+        if self
+            .gap
+            .borrow()
+            .as_ref()
+            .is_some_and(|gap| gap.filler.clone().upcast::<gtk::Widget>() == *child)
         {
             return true;
         }
@@ -1077,6 +1228,16 @@ impl Shelf {
     ) -> Reconciled {
         self.settle();
         let announcing = self.shown_before.replace(true);
+        // A rebuild that lands while a tile is in the hand brings the order
+        // the config still has; the hand has not let go yet, so the tiles
+        // stay in the order it has made so far.
+        let carried;
+        let widgets = if self.lifting() {
+            carried = in_the_order_of(widgets, &self.order());
+            carried.as_slice()
+        } else {
+            widgets
+        };
 
         // The order the tiles stand in now, leaving ones included: where a
         // tile that is going goes from is worked out from its neighbours.
@@ -1116,6 +1277,7 @@ impl Shelf {
                     None => {
                         did.made += 1;
                         let tile = WidgetTile::new(state, look, expand.clone());
+                        tile.grip_with(self.grip.borrow().clone());
                         items.add(&tile.root);
                         if announcing {
                             tile.arrive();
@@ -1283,6 +1445,189 @@ impl Shelf {
             None => false,
         }
     }
+
+    /// Who moves tiles. Every tile on the shelf is told, and every one it
+    /// makes from now on.
+    pub fn grips(&self, grip: Grip) {
+        for (_, tile) in self.tiles.borrow().iter() {
+            tile.grip_with(Some(grip.clone()));
+        }
+        self.grip.replace(Some(grip));
+    }
+
+    fn order(&self) -> Vec<String> {
+        self.tiles
+            .borrow()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn tile(&self, id: &str) -> Option<WidgetTile> {
+        self.tiles
+            .borrow()
+            .iter()
+            .find(|(seen, _)| seen == id)
+            .map(|(_, tile)| tile.clone())
+    }
+
+    /// Pick a tile up: a picture of it to carry, and a hole where it stood.
+    pub fn lift(&self, id: &str) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+        let tile = self.tile(id)?;
+        let picture = tile.snapshot();
+        self.lifted.replace(Some(self.order()));
+        tile.hold(true);
+        picture
+    }
+
+    /// Whether a tile is in the hand.
+    pub fn lifting(&self) -> bool {
+        self.lifted.borrow().is_some()
+    }
+
+    /// Carry the held tile to `x`, along the screen, and move its hole to the
+    /// slot it is over: before the first tile whose middle is past `x`.
+    ///
+    /// The hole moves in one frame and the room follows over `SHUFFLE`: it
+    /// grows in its new place as a filler the same width shrinks in the old
+    /// one, so the total never changes and the tile passed glides across.
+    /// One glide at a time — a second move before the first has finished
+    /// finishes it at once — which a hand only ever sees on a very quick
+    /// sweep across several tiles. Answers whether the hole moved.
+    pub fn carry_to(&self, items: &gtk::Box, id: &str, x: f64) -> bool {
+        let Some(held) = self.tile(id) else {
+            return false;
+        };
+        let to = self
+            .tiles
+            .borrow()
+            .iter()
+            .filter(|(seen, _)| seen != id)
+            .filter_map(|(_, tile)| {
+                let (_, left, _) = tile.root.window()?.origin();
+                Some(left as f64 + tile.root.allocated_width() as f64 / 2.0)
+            })
+            .filter(|middle| *middle < x)
+            .count();
+        let now = self.order().iter().position(|seen| seen == id).unwrap_or(0);
+        if to == now {
+            return false;
+        }
+
+        self.close_gap();
+        // The room the tile is leaving, as a filler of the same width where
+        // it stood.
+        let width = held.area.size_request().0;
+        let filler = gtk::DrawingArea::new();
+        filler.set_size_request(width, held.area.size_request().1);
+        items.add(&filler);
+        if let Some(at) = place_of(items, &held.root) {
+            items.reorder_child(&filler, at as i32);
+        }
+        filler.show();
+
+        // And the tile itself, next to the neighbour it now stands beside.
+        {
+            let mut tiles = self.tiles.borrow_mut();
+            let entry = tiles.remove(now);
+            tiles.insert(to, entry);
+        }
+        let (before, after) = {
+            let tiles = self.tiles.borrow();
+            let root = |at: usize| tiles.get(at).map(|(_, tile)| tile.root.clone());
+            (root(to + 1), to.checked_sub(1).and_then(root))
+        };
+        let mine = place_of(items, &held.root);
+        let position = match (before, after, mine) {
+            (Some(next), _, Some(mine)) => {
+                place_of(items, &next).map(|at| if mine < at { at - 1 } else { at })
+            }
+            (None, Some(previous), Some(mine)) => {
+                place_of(items, &previous).map(|at| if mine < at { at } else { at + 1 })
+            }
+            _ => None,
+        };
+        if let Some(position) = position {
+            items.reorder_child(&held.root, position as i32);
+        }
+
+        held.room.set(0.0);
+        held.resize();
+        let since = std::time::Instant::now();
+        self.gap.replace(Some(Gap {
+            filler: filler.clone(),
+        }));
+        let tile = held.clone();
+        filler.add_tick_callback(move |filler, _| {
+            let left = motion::glide_left(since.elapsed());
+            tile.room.set(1.0 - left);
+            tile.resize();
+            let width = (tile.declared() as f64 * left).round() as i32;
+            filler.set_size_request(width, filler.size_request().1);
+            if left > 0.0 {
+                return glib::ControlFlow::Continue;
+            }
+            unpack(filler.upcast_ref());
+            glib::ControlFlow::Break
+        });
+        true
+    }
+
+    /// Finish the glide in progress at once: the filler goes and every tile
+    /// takes all of its room.
+    fn close_gap(&self) {
+        if let Some(gap) = self.gap.replace(None) {
+            unpack(gap.filler.upcast_ref());
+        }
+        for (_, tile) in self.tiles.borrow().iter() {
+            if tile.room.get() < 1.0 {
+                tile.room.set(1.0);
+                tile.resize();
+            }
+        }
+    }
+
+    /// Put the held tile down where its hole is. The new order, when it is
+    /// not the order it was picked up from.
+    pub fn put_down(&self, id: &str) -> Option<Vec<String>> {
+        let before = self.lifted.replace(None)?;
+        if let Some(tile) = self.tile(id) {
+            tile.hold(false);
+        }
+        let after = self.order();
+        (after != before).then_some(after)
+    }
+}
+
+/// These widgets, the ones in `order` first and in that order, then the rest
+/// as they came.
+fn in_the_order_of(widgets: &[WidgetState], order: &[String]) -> Vec<WidgetState> {
+    let mut placed: Vec<WidgetState> = order
+        .iter()
+        .filter_map(|id| widgets.iter().find(|state| &state.id == id).cloned())
+        .collect();
+    placed.extend(
+        widgets
+            .iter()
+            .filter(|state| !order.contains(&state.id))
+            .cloned(),
+    );
+    placed
+}
+
+/// Where a child stands in the box, counting every child.
+fn place_of(items: &gtk::Box, child: &gtk::Widget) -> Option<usize> {
+    items.children().iter().position(|seen| seen == child)
+}
+
+/// Off whatever it is packed in, if anything.
+fn unpack(widget: &gtk::Widget) {
+    if let Some(parent) = widget
+        .parent()
+        .and_then(|parent| parent.downcast::<gtk::Container>().ok())
+    {
+        parent.remove(widget);
+    }
 }
 
 #[cfg(test)]
@@ -1407,6 +1752,175 @@ pub mod tests {
             Shelf::new(),
             Rc::new(|_: &str, _: &gtk::Widget| {}),
         )
+    }
+
+    /// Let GTK draw and lay out whatever is due, for about this long.
+    fn pumping(span: std::time::Duration) {
+        let until = std::time::Instant::now() + span;
+        while std::time::Instant::now() < until {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Two tiles on a bar that is on screen, so that each tile has a window
+    /// with a place on the screen to be measured by.
+    fn a_bar_on_screen() -> (gtk::Window, gtk::Box, Shelf, Expand) {
+        let (items, _, shelf, expand) = bar();
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.add(&items);
+        shelf.show(
+            &items,
+            &[simple("clock"), simple("cpu")],
+            look(ICON),
+            &expand,
+        );
+        window.show_all();
+        pumping(std::time::Duration::from_millis(60));
+        (window, items, shelf, expand)
+    }
+
+    fn middle_of(shelf: &Shelf, id: &str) -> f64 {
+        let tile = shelf.tile(id).expect("a tile with that id");
+        let (_, left, _) = tile.root.window().expect("a tile on screen").origin();
+        left as f64 + tile.root.allocated_width() as f64 / 2.0
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_tile_dragged_past_its_neighbour_takes_its_place() {
+        let (window, items, shelf, _) = a_bar_on_screen();
+        let past_cpu = middle_of(&shelf, "cpu") + 1.0;
+
+        assert!(shelf.lift("clock").is_some(), "nothing to carry");
+        assert_eq!(
+            shelf.tile("clock").unwrap().root.opacity(),
+            0.0,
+            "the tile in the hand is still drawn on the bar"
+        );
+        assert!(
+            shelf.carry_to(&items, "clock", past_cpu),
+            "the hole did not move"
+        );
+        assert_eq!(shelf.order(), ["cpu", "clock"]);
+        let at = |id: &str| place_of(&items, &shelf.tile(id).unwrap().root);
+        assert!(
+            at("cpu") < at("clock"),
+            "the bar's own children were not reordered"
+        );
+
+        // The neighbour glides: the room the held tile left is a filler
+        // that closes over the glide, while its new room opens.
+        assert!(shelf.owns(&shelf.gap.borrow().as_ref().unwrap().filler.clone().upcast()));
+        pumping(motion::SHUFFLE + std::time::Duration::from_millis(60));
+        let filler = shelf.gap.borrow().as_ref().map(|gap| gap.filler.clone());
+        assert!(
+            filler.is_none_or(|filler| filler.parent().is_none()),
+            "the room the tile left never closed"
+        );
+        assert_eq!(
+            shelf.tile("clock").unwrap().room.get(),
+            1.0,
+            "the room it went to never opened"
+        );
+
+        assert_eq!(
+            shelf.put_down("clock"),
+            Some(vec!["cpu".to_string(), "clock".to_string()])
+        );
+        assert_eq!(
+            shelf.tile("clock").unwrap().root.opacity(),
+            1.0,
+            "put down and still a hole"
+        );
+        window.close();
+    }
+
+    /// Picked up and put back where it was is nothing to write.
+    pub fn a_tile_put_back_where_it_was_asks_for_nothing() {
+        let (window, items, shelf, _) = a_bar_on_screen();
+        let past_cpu = middle_of(&shelf, "cpu") + 1.0;
+        shelf.lift("clock");
+        shelf.carry_to(&items, "clock", past_cpu);
+        let before_cpu = middle_of(&shelf, "cpu") - 200.0;
+        shelf.carry_to(&items, "clock", before_cpu);
+        assert_eq!(shelf.order(), ["clock", "cpu"]);
+        assert_eq!(shelf.put_down("clock"), None);
+        window.close();
+    }
+
+    /// A rebuild while a tile is in the hand brings the old order; the tiles
+    /// stay in the order the hand has made.
+    pub fn a_rebuild_mid_drag_keeps_the_order_the_hand_made() {
+        let (window, items, shelf, expand) = a_bar_on_screen();
+        let past_cpu = middle_of(&shelf, "cpu") + 1.0;
+        shelf.lift("clock");
+        shelf.carry_to(&items, "clock", past_cpu);
+
+        shelf.show(
+            &items,
+            &[simple("clock"), simple("cpu")],
+            look(ICON),
+            &expand,
+        );
+
+        assert_eq!(
+            shelf.order(),
+            ["cpu", "clock"],
+            "the rebuild took the tile back"
+        );
+        assert!(shelf.lifting(), "the rebuild let go of the tile");
+        assert!(shelf.put_down("clock").is_some());
+        window.close();
+    }
+
+    /// A press that does not travel is still a click, and opens the panel —
+    /// on the release, so the same press could have picked the tile up.
+    pub fn a_left_click_on_a_tile_opens_it_when_the_button_comes_up() {
+        let (items, _, shelf, _) = bar();
+        let opened = Rc::new(Cell::new(0));
+        let counting = opened.clone();
+        let expand: Expand =
+            Rc::new(move |_: &str, _: &gtk::Widget| counting.set(counting.get() + 1));
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.add(&items);
+        shelf.show(&items, &[simple("clock")], look(ICON), &expand);
+        window.show_all();
+        pumping(std::time::Duration::from_millis(40));
+        let tile = shelf.tile("clock").unwrap().root;
+
+        tile.event(&a_button(&tile, gdk::EventType::ButtonPress, 1));
+        assert_eq!(opened.get(), 0, "the panel opened on the press");
+        tile.event(&a_button(&tile, gdk::EventType::ButtonRelease, 1));
+        assert_eq!(opened.get(), 1, "the click never opened the panel");
+
+        tile.event(&a_button(&tile, gdk::EventType::ButtonPress, 3));
+        assert_eq!(
+            opened.get(),
+            2,
+            "the right button stopped opening the panel on the press"
+        );
+        window.close();
+    }
+
+    /// A button event on this widget's window.
+    fn a_button(widget: &gtk::Widget, kind: gdk::EventType, button: u32) -> gdk::Event {
+        use glib::translate::{ToGlibPtr, ToGlibPtrMut};
+        let window = widget.window().expect("a widget on screen has a window");
+        let mut event = gdk::Event::new(kind);
+        // SAFETY: a button event is a GdkEventButton; the window reference
+        // handed over is the one `gdk_event_free` gives back.
+        unsafe {
+            let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+            let raw = raw as *mut gdk::ffi::GdkEventButton;
+            (*raw).window = window.to_glib_full();
+            (*raw).send_event = 1;
+            (*raw).button = button;
+            (*raw).x = 10.0;
+            (*raw).y = 10.0;
+        }
+        event
     }
 
     fn roots(shelf: &Shelf) -> Vec<gtk::Widget> {
