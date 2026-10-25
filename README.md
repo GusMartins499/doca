@@ -71,10 +71,12 @@ pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 
 Drag a pinned icon along the bar to give it another place: the icons it
 passes make way, and it is pinned where you let go — written to the config,
-comments and all, through `PinItemAt`. Only the pins move, because they are
-the one part of the bar in an order somebody chose; running apps follow
-their windows, and folders and the trash come after. A left click is chosen
-when the button comes up, so the same press can pick an icon up instead.
+comments and all, through `PinItemAt`. A running app that is not pinned can
+be dragged in among the pins the same way, and is pinned where you let go;
+taken back out among the running apps it goes back where it was, because
+their order is their windows'. Folders and the trash come after everything
+and do not move. A left click is chosen when the button comes up, so the
+same press can pick an icon up instead.
 
 Pull a pin up off the bar — an icon's height above it — and let go to unpin
 it. The bar closes the gap behind it while you carry it, and it goes up in a
