@@ -30,6 +30,7 @@ pub struct Tab {
     magnify: gtk::Switch,
     auto_hide: gtk::Switch,
     show_trash: gtk::Switch,
+    monitor: gtk::ComboBoxText,
     /// Setting a widget's value fires its own `changed` handler, which here
     /// really would send the value that had just arrived straight back —
     /// every control in this tab writes on a value changing, because that is
@@ -39,6 +40,32 @@ pub struct Tab {
     /// Kept because the lens switch makes it insensitive, and wiring happens
     /// after the widgets are built.
     lens_slider: RefCell<Option<gtk::Scale>>,
+}
+
+/// What the Screen list offers: the primary, whichever monitor that is, then
+/// every monitor connected by its output's name — and the one the config
+/// names when it is not connected, so the list can show what is set rather
+/// than pretend the dock is on the primary by choice.
+///
+/// Ids are what is written; the primary's is the empty name.
+pub fn screens(connected: &[String], configured: &str) -> Vec<(String, String)> {
+    let mut offered = vec![(String::new(), "Primary".to_string())];
+    offered.extend(connected.iter().map(|name| (name.clone(), name.clone())));
+    if !configured.is_empty() && !connected.iter().any(|name| name == configured) {
+        offered.push((configured.to_string(), format!("{configured} (not connected)")));
+    }
+    offered
+}
+
+/// The monitors GDK can see, by the name the shell chooses them by.
+fn connected() -> Vec<String> {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return Vec::new();
+    };
+    (0..display.n_monitors())
+        .filter_map(|index| display.monitor(index))
+        .filter_map(|monitor| monitor.model().map(|name| name.to_string()))
+        .collect()
 }
 
 /// The lens value a switch turned on should land on.
@@ -99,6 +126,7 @@ impl Tab {
         let magnify = gtk::Switch::new();
         let auto_hide = gtk::Switch::new();
         let show_trash = gtk::Switch::new();
+        let monitor = gtk::ComboBoxText::new();
 
         let mut row = 0;
         row = add(&grid, row, "Theme", &theme, Some(
@@ -133,7 +161,11 @@ impl Tab {
             "On, the dock slides away and gives maximised windows the screen back, \
              leaving a sliver to point at. Off, it keeps its space reserved.",
         ));
-        add(&grid, row, "Show the trash", &show_trash, None);
+        row = add(&grid, row, "Show the trash", &show_trash, None);
+        add(&grid, row, "Screen", &monitor, Some(
+            "The monitor the dock stands on. A monitor that is unplugged hands the \
+             dock to the primary until it is back.",
+        ));
 
         let tab = Self {
             root: grid.upcast(),
@@ -143,6 +175,7 @@ impl Tab {
             magnify,
             auto_hide,
             show_trash,
+            monitor,
             filling,
             lens_slider: RefCell::new(None),
         };
@@ -206,6 +239,17 @@ impl Tab {
             glib::Propagation::Proceed
         });
 
+        let writing = send.clone();
+        let filling = self.filling.clone();
+        self.monitor.connect_changed(move |monitor| {
+            if filling.is_filling() {
+                return;
+            }
+            if let Some(name) = monitor.active_id() {
+                writing(key::MONITOR, Value::from(name.to_string()));
+            }
+        });
+
         for (switch, name) in [
             (&self.auto_hide, key::AUTO_HIDE),
             (&self.show_trash, key::SHOW_TRASH),
@@ -242,7 +286,18 @@ impl Tab {
                 switch.set_active(on);
                 switch.set_state(on);
             }
+            self.show_screens(&connected(), &appearance.monitor);
         });
+    }
+
+    /// Refill the Screen list and pick what the config says. Refilled every
+    /// time, because monitors come and go while the window is open.
+    fn show_screens(&self, connected: &[String], configured: &str) {
+        self.monitor.remove_all();
+        for (id, label) in screens(connected, configured) {
+            self.monitor.append(Some(&id), &label);
+        }
+        self.monitor.set_active_id(Some(configured));
     }
 }
 
@@ -313,6 +368,7 @@ pub mod on_a_display {
             icon_theme: String::new(),
             gtk_theme: String::new(),
             cursor_theme: String::new(),
+            monitor: String::new(),
         }
     }
 
@@ -390,6 +446,32 @@ pub mod on_a_display {
         );
     }
 
+    /// The Screen list shows a monitor that is not connected as what is set,
+    /// and choosing one sends its name — the primary's being the empty one.
+    pub fn choosing_a_screen_sends_its_name() {
+        let (tab, sent) = watched();
+        let mut look = appearance("native", 48, 1.6, false, true);
+        look.monitor = "HDMI-9".to_string();
+        tab.show(&look);
+        assert_eq!(
+            tab.monitor.active_id().map(|id| id.to_string()).as_deref(),
+            Some("HDMI-9"),
+            "a monitor that is unplugged showed as some other choice"
+        );
+        assert!(sent.borrow().is_empty(), "showing the screens wrote one back");
+
+        tab.show_screens(&["eDP".to_string()], "HDMI-9");
+        sent.borrow_mut().clear();
+        tab.monitor.set_active_id(Some("eDP"));
+        tab.monitor.set_active_id(Some(""));
+
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 2, "sent {sent:?}");
+        assert_eq!(sent[0].0, key::MONITOR);
+        assert!(sent[0].1.contains("eDP"), "sent {:?}", sent[0].1);
+        assert_eq!(sent[1].1, "\"\"", "the primary is the empty name, sent {:?}", sent[1].1);
+    }
+
     /// Named here so the assertions above read in terms of the contract.
     const MIN_MAGNIFICATION_HERE: f64 = doca_ipc::MIN_MAGNIFICATION;
 }
@@ -397,6 +479,24 @@ pub mod on_a_display {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_primary_comes_first_and_then_every_monitor_by_name() {
+        let offered = screens(&["DisplayPort-0".to_string(), "eDP".to_string()], "");
+        let ids: Vec<&str> = offered.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["", "DisplayPort-0", "eDP"]);
+        assert_eq!(offered[0].1, "Primary");
+    }
+
+    #[test]
+    fn a_monitor_that_is_set_and_not_connected_is_offered_as_what_it_is() {
+        let offered = screens(&["eDP".to_string()], "HDMI-1");
+        assert_eq!(
+            offered.last(),
+            Some(&("HDMI-1".to_string(), "HDMI-1 (not connected)".to_string()))
+        );
+        assert_eq!(screens(&["eDP".to_string()], "eDP").len(), 2, "eDP offered twice");
+    }
 
     #[test]
     fn a_lens_at_one_is_a_lens_turned_off() {

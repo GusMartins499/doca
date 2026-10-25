@@ -502,6 +502,9 @@ pub struct Appearance {
     pub icon_theme: String,
     pub gtk_theme: String,
     pub cursor_theme: String,
+    /// The monitor the dock stands on, by the name RandR gives its output
+    /// (`eDP-1`, `DisplayPort-0`: what `xrandr` lists). Empty is the primary.
+    pub monitor: String,
 }
 
 /// The settings the widgets take, as the daemon reports them.
@@ -777,8 +780,9 @@ pub mod appearance_key {
     pub const ICON_THEME: &str = "icon_theme";
     pub const GTK_THEME: &str = "gtk_theme";
     pub const CURSOR_THEME: &str = "cursor_theme";
+    pub const MONITOR: &str = "monitor";
 
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 9] = [
         THEME,
         ICON_SIZE,
         MAGNIFICATION,
@@ -787,6 +791,7 @@ pub mod appearance_key {
         ICON_THEME,
         GTK_THEME,
         CURSOR_THEME,
+        MONITOR,
     ];
 }
 

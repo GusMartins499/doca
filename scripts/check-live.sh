@@ -919,6 +919,43 @@ else
     echo "  skip  xdotool or xev missing: what the air over the bar takes is not checked"
 fi
 
+# The monitor the dock was given, by name (#18, item 11). Xvfb has one output,
+# `screen`, and lists no monitor `xrandr --setmonitor` adds, so moving between
+# two is the unit tests' (`screen::choose`); what is checked here is the way
+# there — the name going from the bus through GDK to where the bar stands —
+# and a name nothing answers to. Before the screen is resized below: an Xvfb
+# whose framebuffer `xrandr --fb` changed has no output left that GDK can
+# name, and the one it makes up in its place is called nothing at all.
+bar_geometry() {
+    xwininfo -root -children 2>/dev/null | grep '"Doca":' | head -1 |
+        grep -o '[0-9]*x[0-9]*+-\?[0-9]*+-\?[0-9]*' | head -1
+}
+missing_said() {
+    grep -ac "is not connected" "$WORK/shell.log"
+}
+STOOD=$(bar_geometry)
+call SetAppearance "{'monitor': <'screen'>}" >/dev/null
+sleep 1
+[ "$(bar_geometry)" = "$STOOD" ] && [ "$(missing_said)" = "0" ] \
+    && ok "the monitor named by its output is the one the bar stands on ($STOOD)" \
+    || fail "naming the monitor the bar was on moved it to $(bar_geometry), or called it missing"
+call SetAppearance "{'monitor': <'HDMI-9'>}" >/dev/null
+sleep 1
+call SetAppearance "{'icon_size': <int32 60>}" >/dev/null
+sleep 1
+WHERE=$(bar_geometry)
+WHERE_Y=${WHERE##*+}; WHERE_H=${WHERE#*x}; WHERE_H=${WHERE_H%%+*}
+[ -n "$WHERE" ] && [ $((WHERE_Y + WHERE_H)) -eq 800 ] \
+    && ok "a monitor that is not connected leaves the bar on the primary ($WHERE)" \
+    || fail "with its monitor unplugged the bar went to $WHERE"
+[ "$(missing_said)" = "1" ] \
+    && ok "the missing monitor was said once, not on every rebuild" \
+    || fail "the missing monitor was logged $(missing_said) times over two rebuilds"
+call SetAppearance "{'monitor': <''>, 'icon_size': <int32 64>}" >/dev/null
+sleep 1
+grep -q '^monitor = ""' "$XDG_CONFIG_HOME/doca/config.toml" \
+    && ok "the primary again is the empty name in the file" \
+    || fail "the file says $(grep '^monitor' "$XDG_CONFIG_HOME/doca/config.toml")"
 # The screen changing under a running bar (#18, item 11): a monitor swapped,
 # a resolution switched. The bar has to land on the new bottom edge, inside
 # the new width — before this it stayed where the old screen had it, which
@@ -943,6 +980,7 @@ if command -v xrandr >/dev/null; then
 else
     echo "  skip  xrandr not installed: the screen changing is not checked"
 fi
+
 kill "$BAR" 2>/dev/null
 
 # The point of the whole script: somebody else writes, and the window follows.

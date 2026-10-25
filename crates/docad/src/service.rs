@@ -805,6 +805,7 @@ fn appearance_of(config: &Config) -> Appearance {
         icon_theme: appearance.icon_theme,
         gtk_theme: appearance.gtk_theme,
         cursor_theme: appearance.cursor_theme,
+        monitor: appearance.monitor,
     }
 }
 

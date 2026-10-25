@@ -36,6 +36,10 @@ pub struct Appearance {
     pub gtk_theme: String,
     #[serde(default)]
     pub cursor_theme: String,
+    /// The monitor the dock stands on, by its output's name. Empty is the
+    /// primary — empty for the reason the three themes above are.
+    #[serde(default)]
+    pub monitor: String,
 }
 
 fn default_show_trash() -> bool {
@@ -65,6 +69,7 @@ impl Default for Appearance {
             icon_theme: String::new(),
             gtk_theme: String::new(),
             cursor_theme: String::new(),
+            monitor: String::new(),
         }
     }
 }
@@ -84,6 +89,7 @@ impl Appearance {
             icon_theme: self.icon_theme.trim().to_string(),
             gtk_theme: self.gtk_theme.trim().to_string(),
             cursor_theme: self.cursor_theme.trim().to_string(),
+            monitor: self.monitor.trim().to_string(),
         }
     }
 }
@@ -1452,6 +1458,7 @@ mod tests {
             icon_theme: "  Papirus-Dark  ".to_string(),
             gtk_theme: String::new(),
             cursor_theme: String::new(),
+            monitor: " eDP-1 ".to_string(),
         });
         config.save_to(&path).unwrap();
 
@@ -1469,6 +1476,7 @@ mod tests {
             reloaded.icon_theme, "Papirus-Dark",
             "a theme name is looked up verbatim, so stray spaces would simply miss"
         );
+        assert_eq!(reloaded.monitor, "eDP-1", "and so is a monitor's");
     }
 
     #[test]

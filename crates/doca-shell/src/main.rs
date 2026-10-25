@@ -7,6 +7,7 @@ mod magnify;
 mod motion;
 mod panel;
 mod row;
+mod screen;
 mod stack;
 mod strut;
 mod theme;
@@ -565,6 +566,7 @@ async fn drive(
         panels: panel::Remembered::default(),
         showing: panel::Showing::default(),
         settling: Rc::new(RefCell::new(None)),
+        stand: screen::Stand::new(screen),
     };
 
     // A theme switched in GNOME Tweaks arrives as a GtkSettings notification,
@@ -587,8 +589,8 @@ async fn drive(
     // The screen the bar is measured against, measured again whenever it
     // changes: a monitor plugged in or out, a resolution switched. #18, item
     // 11 — without this the bar stayed the width and in the place it had on
-    // the screen it started on.
-    let mut screen = screen;
+    // the screen it started on. Which monitor it is comes with the look, so
+    // each rebuild measures it; `screen::Stand` keeps where that was.
     let (screen_moved, screen_moves) = async_channel::unbounded::<()>();
     let mut screen_moves = Box::pin(screen_moves);
     if let Some(display_screen) = gdk::Screen::default() {
@@ -612,7 +614,7 @@ async fn drive(
             let _ = stillness_moved.send_blocking(());
         });
     }
-    rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
+    rebuild(&window, &bar, &items, proxy.clone(), tiles.clone(), &chrome).await;
 
     let mut items_changed = proxy.receive_items_changed().await?;
     let mut environment_changed = proxy.receive_environment_changed().await?;
@@ -632,23 +634,9 @@ async fn drive(
             // possible without asking anyone to restart the dock.
             _ = futures_util::StreamExt::next(&mut config_changed) => {}
             _ = futures_util::StreamExt::next(&mut screen_moves) => {
-                match measured() {
-                    Some(now) if now != screen => {
-                        tracing::info!(
-                            width = now.width(),
-                            height = now.height(),
-                            x = now.x(),
-                            y = now.y(),
-                            "the screen changed under the dock"
-                        );
-                        screen = now;
-                    }
-                    // Told twice for one change, which X does: nothing moved.
-                    Some(_) => continue,
-                    None => {
-                        tracing::warn!("no monitor left to put the dock on; staying where it is");
-                        continue;
-                    }
+                // Told twice for one change, which X does: nothing moved.
+                if !chrome.stand.moved() {
+                    continue;
                 }
             }
             _ = futures_util::StreamExt::next(&mut stillness_moves) => {}
@@ -707,7 +695,7 @@ async fn drive(
             }
             complete => break,
         }
-        rebuild(&window, &bar, &items, &screen, proxy.clone(), tiles.clone(), &chrome).await;
+        rebuild(&window, &bar, &items, proxy.clone(), tiles.clone(), &chrome).await;
     }
     Ok(())
 }
@@ -947,6 +935,8 @@ struct Chrome {
     /// The bar's second seating, once what a rebuild set moving has stopped.
     /// One at a time: a rebuild that lands mid-change starts the wait over.
     settling: Rc<RefCell<Option<glib::SourceId>>>,
+    /// The monitor the bar stands on, as of the last rebuild.
+    stand: screen::Stand,
 }
 
 impl Style {
@@ -1203,7 +1193,6 @@ async fn rebuild(
     window: &gtk::Window,
     bar: &gtk::Box,
     items: &gtk::Box,
-    screen: &gdk::Rectangle,
     proxy: Rc<DocaProxy<'static>>,
     tiles: Tiles,
     chrome: &Chrome,
@@ -1218,8 +1207,15 @@ async fn rebuild(
         panels,
         showing,
         settling,
+        stand,
     } = chrome;
     let appearance = proxy.appearance().await.ok();
+    let screen = &stand.measure(
+        appearance
+            .as_ref()
+            .map(|appearance| appearance.monitor.as_str())
+            .unwrap_or(""),
+    );
     if let Some(appearance) = &appearance {
         // The overrides go first: the `system` sheet reads named colours out
         // of the GTK theme in force, so loading it before switching themes
@@ -1530,7 +1526,12 @@ fn seat(
     // nobody is looking at. So the strut is the bar, not the window it is in.
     let bar_x = x + margin;
     let reserved = BottomStrut {
-        height: strut::reserved_height(bar_height, auto_hide),
+        // Counted from the bottom of the whole X screen, which is what the
+        // EWMH measures a strut from — not the monitor's. They are the same
+        // edge unless the dock stands on a monitor shorter than its
+        // neighbour, which is when this matters.
+        height: strut::reserved_height(bar_height, auto_hide)
+            + screen::below(screen, &screen::connected()) as u32,
         start_x: bar_x.max(0) as u32,
         end_x: (bar_x + width).max(0) as u32,
     };
@@ -1681,17 +1682,13 @@ mod slide_tests {
     }
 }
 
-/// The monitor the dock lives on, as a rectangle of the whole X screen.
-///
-/// The primary one — and the first there is when none is primary, which is
-/// what a bare X server, or `xrandr` with no `--primary`, leaves you with:
-/// a dock that refused to start there was a dock missing for no reason.
+/// The monitor the dock starts on, as a rectangle of the whole X screen,
+/// before the daemon has said which one it was given: the primary, as
+/// `screen::choose` picks it. The first rebuild moves it if the config
+/// names another.
 fn measured() -> Option<gdk::Rectangle> {
-    let display = gdk::Display::default()?;
-    display
-        .primary_monitor()
-        .or_else(|| display.monitor(0))
-        .map(|monitor| monitor.geometry())
+    let monitors = screen::connected();
+    screen::choose(&monitors, "").map(|choice| monitors[choice.index()].area)
 }
 
 /// The checks that need a real X display, run in the order GTK demands.

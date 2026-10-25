@@ -36,6 +36,7 @@ pub fn appearance<'a>(
             key::ICON_THEME => patched.icon_theme = text(value).context("icon_theme")?,
             key::GTK_THEME => patched.gtk_theme = text(value).context("gtk_theme")?,
             key::CURSOR_THEME => patched.cursor_theme = text(value).context("cursor_theme")?,
+            key::MONITOR => patched.monitor = text(value).context("monitor")?,
             unknown => bail!(
                 "no appearance key {unknown}; known keys are {}",
                 key::ALL.join(", ")
@@ -140,6 +141,7 @@ mod tests {
             icon_theme: String::new(),
             gtk_theme: String::new(),
             cursor_theme: String::new(),
+            monitor: String::new(),
         }
     }
 
@@ -191,6 +193,15 @@ mod tests {
         assert_eq!(patched.icon_theme, "Papirus-Dark");
         assert_eq!(patched.gtk_theme, "Adwaita-dark");
         assert_eq!(patched.cursor_theme, "McMojave-cursors");
+    }
+
+    #[test]
+    fn a_monitor_is_named_and_given_back_to_the_primary_with_an_empty_name() {
+        let named = patch(vec![(key::MONITOR, Value::from("eDP-1"))]).unwrap();
+        assert_eq!(named.monitor, "eDP-1");
+
+        let given_back = appearance(&named, vec![(key::MONITOR, &Value::from(""))]).unwrap();
+        assert!(given_back.monitor.is_empty(), "there has to be a way back to the primary");
     }
 
     #[test]
