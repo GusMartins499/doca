@@ -27,6 +27,8 @@ use gtk::prelude::*;
 pub struct Float {
     window: gtk::Window,
     picture: Rc<std::cell::RefCell<Option<gdk_pixbuf::Pixbuf>>>,
+    /// Where on the picture the pointer holds it.
+    grab: Rc<Cell<(f64, f64)>>,
 }
 
 /// A window that takes no part in anything: no input, no focus, no taskbar.
@@ -68,11 +70,23 @@ impl Float {
             }
             glib::Propagation::Stop
         });
-        Self { window, picture }
+        Self {
+            window,
+            picture,
+            grab: Rc::new(Cell::new((0.0, 0.0))),
+        }
     }
 
     /// Carry this picture with its centre at `at`, in root coordinates.
     pub fn carry(&self, picture: gdk_pixbuf::Pixbuf, at: (f64, f64)) {
+        let grab = (picture.width() as f64 / 2.0, picture.height() as f64 / 2.0);
+        self.carry_from(picture, at, grab);
+    }
+
+    /// Carry this picture held at `grab` on it, with that point at `at`: a
+    /// tile picked up by its end stays held by its end.
+    pub fn carry_from(&self, picture: gdk_pixbuf::Pixbuf, at: (f64, f64), grab: (f64, f64)) {
+        self.grab.set(grab);
         let size = (picture.width(), picture.height());
         self.picture.replace(Some(picture));
         self.window.set_size_request(size.0, size.1);
@@ -84,14 +98,15 @@ impl Float {
         self.window.queue_draw();
     }
 
-    /// Keep the picture centred on the pointer.
+    /// Keep the picture where the pointer holds it.
     pub fn follow(&self, at: (f64, f64)) {
-        let Some(picture) = self.picture.borrow().clone() else {
+        if self.picture.borrow().is_none() {
             return;
-        };
+        }
+        let grab = self.grab.get();
         self.window.move_(
-            (at.0 - picture.width() as f64 / 2.0).round() as i32,
-            (at.1 - picture.height() as f64 / 2.0).round() as i32,
+            (at.0 - grab.0).round() as i32,
+            (at.1 - grab.1).round() as i32,
         );
     }
 

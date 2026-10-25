@@ -95,6 +95,19 @@ FAILED=0
 ok()   { echo "  ok    $1"; }
 fail() { echo "  FAIL  $1"; FAILED=1; }
 
+# "WxH+X+Y" of every window of the bar's on screen, besides the bar itself.
+# Mapped, not merely there: the window that carries a dragged pin or tile is
+# kept, hidden, between drags, and is not a panel or a menu.
+shown_shell_windows() {
+    local line id
+    xwininfo -root -children 2>/dev/null | grep '"doca-shell":' | grep -v '"Doca":' |
+        while read -r line; do
+            id=${line%% *}
+            xwininfo -id "$id" 2>/dev/null | grep -q 'IsViewable' || continue
+            echo "$line" | grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' | head -1
+        done
+}
+
 "$ROOT/target/release/docad" > "$WORK/docad.log" 2>&1 &
 DAEMON=$!
 for _ in $(seq 1 60); do
@@ -678,12 +691,7 @@ if [ "$BAR_UP" = "1" ]; then
             # small ones GTK keeps off screen. The panel is the only thing
             # that can be.
             panel_size() {
-                xwininfo -root -children 2>/dev/null \
-                    | grep '"doca-shell":' \
-                    | grep -v '"Doca":' \
-                    | grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' \
-                    | awk -F'x' '$1 >= 100 { print; exit }' \
-                    | cut -d+ -f1
+                shown_shell_windows | awk -F'x' '$1 >= 100 { print; exit }' | cut -d+ -f1
             }
 
             xdotool mousemove "$AT_X" "$AT_Y"
@@ -710,6 +718,30 @@ if [ "$BAR_UP" = "1" ]; then
             [ -z "$(panel_size)" ] && ok "Esc closed the panel" \
                 || fail "the panel ignored Esc, so it never had the keyboard"
             [ "$CLOSED" = "1" ] || true
+
+            # A tile dragged to a new place (#18, P3): the clock, last on the
+            # bar, carried left past the water and let go. The order is read
+            # back from the daemon, the last list in the dock's entry.
+            work_widgets() {
+                call ListEnvironments | grep -o "('Work', [^)]*)" \
+                    | grep -oE "\[[^]]*\]\)$" | tr -d ')'
+            }
+            xdotool mousemove "$AT_X" "$AT_Y"; sleep 0.3
+            xdotool mousedown 1; sleep 0.1
+            for step in 4 12 30 60 100 150 200 260 320; do
+                xdotool mousemove $((AT_X - step)) "$AT_Y"; sleep 0.05
+            done
+            sleep 0.4
+            xdotool mouseup 1; sleep 1
+            case "$(work_widgets)" in
+                "['clock', 'water']") ok "a tile dragged past its neighbour took its place" ;;
+                *) fail "after dragging the clock the tiles are $(work_widgets)" ;;
+            esac
+            [ -z "$(panel_size)" ] \
+                && ok "a tile that was dragged did not open its panel as well" \
+                || { fail "letting go of a dragged tile opened its panel"; xdotool key Escape; }
+            call SetEnvironmentWidgets "Work" "['water', 'clock']" >/dev/null
+            sleep 0.5
         fi
     fi
 else
@@ -780,8 +812,7 @@ held_since() {
     tail -c +"$1" "$WORK/shell.log" | grep -ac "the dock has the keyboard"
 }
 some_menu_up() {
-    xwininfo -root -children 2>/dev/null | grep '"doca-shell":' | grep -v '"Doca":' |
-        grep -oE '[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+' | awk -F'x' '$1 >= 100 { print; exit }'
+    shown_shell_windows | awk -F'x' '$1 >= 100 { print; exit }'
 }
 if command -v xdotool >/dev/null && python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
     call SetAppearance "{'auto_hide': <true>}" >/dev/null

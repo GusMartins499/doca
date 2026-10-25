@@ -539,6 +539,13 @@ async fn drive(
         glib::Propagation::Proceed
     });
     hide.reaches_through(&window, &bar);
+    tiles.grips(moving_tiles(
+        &tiles,
+        &items,
+        proxy.clone(),
+        hide.clone(),
+        &window,
+    ));
 
     // The whole window takes part in a drag, so that a drag reaching the
     // sliver of a hidden bar is heard; the row is a drop target of its own.
@@ -903,6 +910,66 @@ fn wire(
     });
 
     dock::accept_file_drops(icons);
+}
+
+/// What the hand does with a tile: #18, P3, "reorder by dragging, items and
+/// widgets". Picked up, it leaves a hole the size of itself and a picture of
+/// it is carried at the pointer; carried, its hole moves to the slot under
+/// the pointer; put down, the new order is written for the dock on screen.
+/// The bar is held up from the lift to the drop, as it is for an icon.
+fn moving_tiles(
+    tiles: &Tiles,
+    items: &gtk::Box,
+    proxy: Rc<DocaProxy<'static>>,
+    hide: Hide,
+    window: &gtk::Window,
+) -> widget_tile::Grip {
+    let shelf = Rc::downgrade(tiles);
+    let (items, window) = (items.clone(), window.clone());
+    let float = poof::Float::new();
+    Rc::new(move |id: &str, gesture: widget_tile::Gesture| {
+        let Some(shelf) = shelf.upgrade() else {
+            return;
+        };
+        match gesture {
+            widget_tile::Gesture::Lift { at, grab } => {
+                if let Some(picture) = shelf.lift(id) {
+                    let pad = widget_tile::CARRY_PAD as f64;
+                    float.carry_from(picture, at, (grab.0 + pad, grab.1 + pad));
+                }
+                hide.hold();
+                tracing::debug!(id, "a tile was picked up");
+            }
+            widget_tile::Gesture::Carry { at } => {
+                if !shelf.lifting() {
+                    return;
+                }
+                float.follow(at);
+                shelf.carry_to(&items, id, at.0);
+            }
+            widget_tile::Gesture::Drop { .. } => {
+                float.put_down();
+                hide.release(&window);
+                let Some(order) = shelf.put_down(id) else {
+                    return;
+                };
+                tracing::info!(?order, "a tile was dragged to a new place");
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    let dock = match proxy.current_environment().await {
+                        Ok(dock) => dock,
+                        Err(e) => {
+                            tracing::warn!("no dock to write the tiles' order to: {e}");
+                            return;
+                        }
+                    };
+                    if let Err(e) = proxy.set_environment_widgets(&dock, order).await {
+                        tracing::warn!("the dock refused the tiles' new order: {e}");
+                    }
+                });
+            }
+        }
+    })
 }
 
 /// Draw the held icon at the pointer while it is off the bar, and stop once it
@@ -1916,6 +1983,10 @@ fn on_a_display() {
     widget_tile::tests::a_tile_asked_for_again_while_leaving_turns_round();
     widget_tile::tests::a_widget_that_joined_leaves_the_others_alone();
     widget_tile::tests::a_reorder_moves_the_tiles_rather_than_remaking_them();
+    widget_tile::tests::a_tile_dragged_past_its_neighbour_takes_its_place();
+    widget_tile::tests::a_tile_put_back_where_it_was_asks_for_nothing();
+    widget_tile::tests::a_rebuild_mid_drag_keeps_the_order_the_hand_made();
+    widget_tile::tests::a_left_click_on_a_tile_opens_it_when_the_button_comes_up();
     widget_tile::tests::the_divider_only_stands_where_there_is_something_to_divide();
     widget_tile::tests::the_divider_that_comes_back_is_the_one_that_left();
     widget_tile::tests::the_shelf_knows_what_is_its_own();
