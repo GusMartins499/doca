@@ -53,6 +53,13 @@ pub const ENTRY: Duration = SLIDE;
 /// is the same distance an arrival opens.
 pub const SHUFFLE: Duration = SLIDE;
 
+/// How long a pin let go of off the bar takes to go up in smoke.
+///
+/// Longer than an icon leaving the row, because it is the only thing on
+/// screen telling you the pin is gone: the row closed the room behind it
+/// while it was being carried.
+pub const POOF: Duration = Duration::from_millis(350);
+
 /// How much of a glide is still to go, `elapsed` after it began: all of it at
 /// the start, none once it is over.
 ///

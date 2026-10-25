@@ -41,6 +41,18 @@ struct Held {
     /// How far from the icon's centre it was taken hold of. The icon is held
     /// where the hand took it, not jumped to centre under the pointer.
     grab: f64,
+    /// Pulled up off the bar: let go of out here, it is unpinned. Its slot
+    /// closes behind it while it is away and opens again if it comes back.
+    away: bool,
+}
+
+/// What letting go of a held icon came to.
+#[derive(Debug, PartialEq)]
+pub enum Dropped {
+    /// Put down in a new place, counted from 1 the way `PinItemAt` counts.
+    Moved(String, u32),
+    /// Let go of off the bar: no longer pinned.
+    Unpinned(String),
 }
 
 impl Entry {
@@ -464,6 +476,11 @@ impl Row {
                 let pins = pinned_run(&row);
                 let carried = held_at.unwrap_or(now).min(pins.saturating_sub(1));
                 let entry = row.remove(now);
+                if held.away && !entry.life.get().leaving() {
+                    // Taken back as "an app that reopened" by the loop
+                    // above; it is in the hand, off the bar, and stays gone.
+                    entry.life.set(entry.life.get().reversed());
+                }
                 row.insert(carried, entry);
             }
         }
@@ -712,8 +729,12 @@ impl Row {
     /// them — and an answer that clears state as a side effect is an answer
     /// that depends on who asked first.
     fn sweep(&self) {
+        let held = self.held.borrow();
+        let held = held.as_ref().map(|held| held.id.as_str());
         let mut entries = self.entries.borrow_mut();
-        entries.retain(|entry| !entry.life.get().gone());
+        // An icon pulled off the bar has finished leaving it, and is still in
+        // the hand: brought back, it needs the entry it left.
+        entries.retain(|entry| !entry.life.get().gone() || Some(entry.item.id.as_str()) == held);
         for entry in entries.iter() {
             if entry
                 .launched
@@ -785,6 +806,7 @@ impl Row {
             from: index,
             x,
             grab: x - centre,
+            away: false,
         }));
         self.animate();
         true
@@ -795,21 +817,72 @@ impl Row {
         self.held.borrow().is_some()
     }
 
+    /// Whether the held icon has been pulled off the bar.
+    pub fn away(&self) -> bool {
+        self.held.borrow().as_ref().is_some_and(|held| held.away)
+    }
+
+    /// The size an icon carried off the bar is drawn at: the size the lens
+    /// gives the one under the pointer, which is what it was a moment ago.
+    pub fn held_picture_size(&self) -> f64 {
+        let rest = self.rest.get();
+        (rest.icon * rest.scale).round()
+    }
+
+    /// The held icon's picture at `size`, for the window that carries it once
+    /// it is off the bar.
+    pub fn held_picture(&self, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
+        let held = self.held.borrow();
+        let id = &held.as_ref()?.id;
+        self.entries
+            .borrow()
+            .iter()
+            .find(|entry| &entry.item.id == id)?
+            .at(size)
+    }
+
     /// Carry the held icon to `x`, and move it to the slot it is over.
     ///
     /// The order changes the moment the icon is nearer another slot than its
     /// own, and the icons it passed are drawn where they were and glide to
     /// where they now are — so the row makes way, a slot at a time, as the
     /// hand moves. Never past the pins: see `pick`.
-    pub fn drag_to(&self, x: f64) {
-        let id = {
+    ///
+    /// `y` is where the pointer is on the row's surface, whose top is the room
+    /// above the bar the lens rises into. An icon's height above the bar is
+    /// off it: the icon leaves the row, whose room closes behind it, and the
+    /// shell draws it at the pointer instead. Brought back down it rejoins
+    /// where it left, and the room opens again.
+    pub fn drag_to(&self, x: f64, y: f64) {
+        let rest = self.rest.get();
+        let away = y < rest.overhead() as f64 - rest.icon;
+        let (id, turned) = {
             let mut held = self.held.borrow_mut();
             let Some(held) = held.as_mut() else {
                 return;
             };
             held.x = x;
-            held.id.clone()
+            let turned = held.away != away;
+            held.away = away;
+            (held.id.clone(), turned)
         };
+        if turned {
+            if let Some(entry) = self
+                .entries
+                .borrow()
+                .iter()
+                .find(|entry| entry.item.id == id)
+            {
+                if entry.life.get().leaving() != away {
+                    entry.life.set(entry.life.get().reversed());
+                }
+            }
+            self.hold_room();
+            self.animate();
+        }
+        if away {
+            return;
+        }
         self.aim(Some(x));
         let grab = self
             .held
@@ -854,8 +927,16 @@ impl Row {
     /// write it and send it back, so a drop is not a jump back and then
     /// forward again. The rebuild that follows finds the order it already
     /// has. The icon glides from the hand into its slot.
-    pub fn drop_held(&self) -> Option<(String, u32)> {
+    ///
+    /// Off the bar, it is unpinned: its room has already closed, and it stays
+    /// on its way out until the daemon's rebuild takes it off for good — or,
+    /// for an app that is running, puts it back among the running ones.
+    pub fn drop_held(&self) -> Option<Dropped> {
         let held = self.held.replace(None)?;
+        if held.away {
+            self.animate();
+            return Some(Dropped::Unpinned(held.id));
+        }
         let centres = self.centres();
         let entries = self.entries.borrow();
         let at = entries.iter().position(|entry| entry.item.id == held.id)?;
@@ -864,7 +945,7 @@ impl Row {
         }
         drop(entries);
         self.animate();
-        (at != held.from).then(|| (held.id, at as u32 + 1))
+        (at != held.from).then(|| Dropped::Moved(held.id, at as u32 + 1))
     }
 
     /// Redraw on the compositor's own clock, and stop when there is nothing
@@ -1020,7 +1101,10 @@ impl Row {
                 );
                 // The icon in the hand goes where the hand is, at the size
                 // the lens gives the place it is passing over.
-                if let Some(held) = held.as_ref().filter(|held| held.id == entry.item.id) {
+                if let Some(held) = held
+                    .as_ref()
+                    .filter(|held| held.id == entry.item.id && !held.away)
+                {
                     drawn.placed.centre = held.x - held.grab;
                 }
                 drawn
@@ -1065,9 +1149,12 @@ impl Row {
             .borrow()
             .as_ref()
             .and_then(|held| entries.iter().position(|entry| entry.item.id == held.id));
+        // Off the bar it is drawn by the window that follows the pointer, and
+        // the row only closes the room it held.
+        let away = self.held.borrow().as_ref().is_some_and(|held| held.away);
         let order = (0..drawn.len())
             .filter(|index| Some(*index) != held)
-            .chain(held);
+            .chain(held.filter(|_| !away));
         for index in order {
             let icon = &drawn[index];
             let size = icon.size(rest.icon);
@@ -1256,12 +1343,129 @@ pub mod tests {
         row.items().into_iter().map(|item| item.id).collect()
     }
 
+    /// Where an icon stands on the row's surface: its top is the room the
+    /// lens rises into, and the icons sit at the bottom.
+    fn on_the_bar(rest: &Rest) -> f64 {
+        rest.overhead() as f64 + rest.icon / 2.0
+    }
+
+    /// Well above the bar, where letting go unpins.
+    const OFF_THE_BAR: f64 = -120.0;
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_pin_pulled_off_the_bar_and_let_go_of_is_unpinned() {
+        let (row, rest) = pins_and_a_stranger();
+        row.pick(1, rest.centre(1));
+        row.drag_to(rest.centre(1), OFF_THE_BAR);
+        assert!(row.away(), "an icon's height above the bar was not off it");
+        assert!(
+            row.held_picture(48).is_some(),
+            "nothing to carry off the bar"
+        );
+
+        std::thread::sleep(crate::motion::ENTRY);
+        row.settle();
+        assert!(
+            row.entries
+                .borrow()
+                .iter()
+                .any(|entry| entry.item.id == "b"),
+            "the icon in the hand was swept off the row while it was still held"
+        );
+        assert_eq!(
+            row.perch.size_request().0,
+            rest.run_width(4),
+            "the room it left was not closed behind it"
+        );
+
+        assert_eq!(row.drop_held(), Some(Dropped::Unpinned("b".to_string())));
+        assert!(!row.dragging());
+    }
+
+    /// Pulled off and brought back, it is a drag like any other: its room
+    /// opens again and letting go puts it down rather than unpinning it.
+    pub fn a_pin_brought_back_onto_the_bar_is_not_unpinned() {
+        let (row, rest) = pins_and_a_stranger();
+        row.pick(0, rest.centre(0));
+        row.drag_to(rest.centre(0), OFF_THE_BAR);
+        assert!(row.away());
+
+        row.drag_to(rest.centre(2), on_the_bar(&rest));
+        assert!(!row.away(), "back on the bar and still off it");
+        std::thread::sleep(crate::motion::ENTRY);
+        row.settle();
+        assert_eq!(
+            row.perch.size_request().0,
+            rest.run_width(5),
+            "its room never opened again"
+        );
+        assert_eq!(row.drop_held(), Some(Dropped::Moved("a".to_string(), 3)));
+    }
+
+    /// An app that is running, unpinned by being let go of off the bar, is
+    /// still running: the rebuild that follows puts it back among the running
+    /// apps, growing in from where it had shrunk to rather than staying gone.
+    pub fn a_running_app_let_go_of_off_the_bar_stays_among_the_running() {
+        let (row, rest) = pins_and_a_stranger();
+        let mut items = row.items();
+        items[0].windows = vec![3];
+        row.fill(&items, rest);
+        row.pick(0, rest.centre(0));
+        row.drag_to(rest.centre(0), OFF_THE_BAR);
+        assert_eq!(row.drop_held(), Some(Dropped::Unpinned("a".to_string())));
+
+        // What the daemon sends back: "a" no longer a pin, still running,
+        // after the pins.
+        let mut after: Vec<DockItem> = items[1..4].to_vec();
+        let mut a = items[0].clone();
+        a.pinned = false;
+        after.push(a);
+        after.push(items[4].clone());
+        row.fill(&after, rest);
+
+        assert_eq!(order(&row), ["b", "c", "d", "a", "running"]);
+        let leaving = row
+            .entries
+            .borrow()
+            .iter()
+            .find(|entry| entry.item.id == "a")
+            .map(|entry| entry.life.get().leaving());
+        assert_eq!(
+            leaving,
+            Some(false),
+            "the running app was left on its way off the bar"
+        );
+    }
+
+    /// A rebuild while a pin is off the bar does not put it back on.
+    pub fn a_rebuild_while_a_pin_is_off_the_bar_leaves_it_off() {
+        let (row, rest) = pins_and_a_stranger();
+        let original = row.items();
+        row.pick(2, rest.centre(2));
+        row.drag_to(rest.centre(2), OFF_THE_BAR);
+
+        row.fill(&original, rest);
+
+        let leaving = row
+            .entries
+            .borrow()
+            .iter()
+            .find(|entry| entry.item.id == "c")
+            .map(|entry| entry.life.get().leaving());
+        assert_eq!(
+            leaving,
+            Some(true),
+            "the rebuild brought the icon in the hand back onto the bar"
+        );
+        assert_eq!(row.drop_held(), Some(Dropped::Unpinned("c".to_string())));
+    }
+
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_pin_dragged_along_the_row_takes_the_place_it_is_dropped_at() {
         let (row, rest) = pins_and_a_stranger();
         assert!(row.pick(0, rest.centre(0)), "a pin could not be picked up");
 
-        row.drag_to(rest.centre(2));
+        row.drag_to(rest.centre(2), on_the_bar(&rest));
         assert_eq!(
             order(&row),
             ["b", "c", "a", "d", "running"],
@@ -1270,7 +1474,7 @@ pub mod tests {
 
         assert_eq!(
             row.drop_held(),
-            Some(("a".to_string(), 3)),
+            Some(Dropped::Moved("a".to_string(), 3)),
             "dropped third, counted from 1 the way PinItemAt counts"
         );
         assert!(!row.dragging());
@@ -1289,7 +1493,7 @@ pub mod tests {
         let (row, rest) = pins_and_a_stranger_at(1.0);
         let before: Vec<f64> = row.drawn().iter().map(|icon| icon.placed.centre).collect();
         row.pick(0, rest.centre(0));
-        row.drag_to(rest.centre(1));
+        row.drag_to(rest.centre(1), on_the_bar(&rest));
 
         let after: Vec<f64> = row.drawn().iter().map(|icon| icon.placed.centre).collect();
         // "b" was at slot 1 and is now at slot 0: drawn, still, where it was.
@@ -1320,21 +1524,21 @@ pub mod tests {
         );
 
         row.pick(1, rest.centre(1));
-        row.drag_to(rest.centre(4) + 200.0);
+        row.drag_to(rest.centre(4) + 200.0, on_the_bar(&rest));
         assert_eq!(
             order(&row),
             ["a", "c", "d", "b", "running"],
             "a pin went past the last pin"
         );
-        assert_eq!(row.drop_held(), Some(("b".to_string(), 4)));
+        assert_eq!(row.drop_held(), Some(Dropped::Moved("b".to_string(), 4)));
     }
 
     /// Picked up and put back where it was is nothing to write.
     pub fn a_pin_put_back_where_it_was_asks_for_nothing() {
         let (row, rest) = pins_and_a_stranger();
         row.pick(2, rest.centre(2));
-        row.drag_to(rest.centre(0));
-        row.drag_to(rest.centre(2));
+        row.drag_to(rest.centre(0), on_the_bar(&rest));
+        row.drag_to(rest.centre(2), on_the_bar(&rest));
         assert_eq!(row.drop_held(), None);
         assert_eq!(order(&row), ["a", "b", "c", "d", "running"]);
     }
@@ -1345,7 +1549,7 @@ pub mod tests {
         let (row, rest) = pins_and_a_stranger();
         let original = row.items();
         row.pick(0, rest.centre(0));
-        row.drag_to(rest.centre(2));
+        row.drag_to(rest.centre(2), on_the_bar(&rest));
 
         row.fill(&original, rest);
 
@@ -1355,7 +1559,7 @@ pub mod tests {
             "the rebuild took the icon back"
         );
         assert!(row.dragging(), "the rebuild let go of the icon");
-        assert_eq!(row.drop_held(), Some(("a".to_string(), 3)));
+        assert_eq!(row.drop_held(), Some(Dropped::Moved("a".to_string(), 3)));
     }
 
     /// The bar is *given* the run and *painted* wherever the icons are, so

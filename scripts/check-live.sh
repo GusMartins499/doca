@@ -924,6 +924,15 @@ fi
 # window: the bar is centred in it, three slots wide, and the second pin is
 # its middle. The order is read back from the daemon, which is where the drop
 # has to have landed — the bar showing it is not enough.
+# How many icon-sized windows of the bar's are on screen. Mapped, not merely
+# there: the window that carries a pin is kept and hidden between drags.
+carried_in_the_air() {
+    local id seen=0
+    for id in $(xwininfo -root -children 2>/dev/null | grep '"doca-shell":' | grep ' 64x64+' | awk '{print $1}'); do
+        xwininfo -id "$id" 2>/dev/null | grep -q 'IsViewable' && seen=$((seen + 1))
+    done
+    echo "$seen"
+}
 work_pins() {
     call ListEnvironments | grep -o "('Work', [^)]*)" \
         | sed -E "s/^\('Work', [^]]*\], (true|false), (\[[^]]*\]).*/\2/"
@@ -967,6 +976,30 @@ if command -v xdotool >/dev/null && [ -n "${APP3:-}" ]; then
         fail "a click on the folder, after the drag code, opened nothing"
     fi
     xdotool key Escape; sleep 0.3
+    # Pulled up off the bar and let go of, a pin is unpinned. While it is in
+    # the air it is carried by a window of its own, the icon's size — the
+    # bar's window ends a little above the bar and would cut it off.
+    xdotool mousemove "$FIRST" "$ICON_Y"; sleep 0.3
+    xdotool mousedown 1; sleep 0.1
+    for step in 6 16 40 80 120 160; do
+        xdotool mousemove "$FIRST" $((ICON_Y - step)); sleep 0.05
+    done
+    sleep 0.3
+    CARRIED=$(carried_in_the_air)
+    xdotool mouseup 1; sleep 1
+    [ "$CARRIED" -ge 1 ] \
+        && ok "a pin pulled off the bar was carried at the pointer" \
+        || fail "nothing carried the pin once it was off the bar"
+    case "$(work_pins)" in
+        "['$APP2']") ok "a pin let go of off the bar was unpinned, and only that one" ;;
+        *) fail "after letting go off the bar the pins are $(work_pins)" ;;
+    esac
+    grep -aq "a pin was pulled off the bar and let go of" "$WORK/shell.log" \
+        && ok "the bar said it let the pin go" \
+        || fail "the bar never logged the pin it let go of"
+    [ "$(carried_in_the_air)" = 0 ] \
+        && ok "the carried icon was put down with the pin" \
+        || fail "the carried icon was left in the air"
     call UnpinIn "Work" "$APP3" >/dev/null 2>&1
     call UnpinIn "Work" "$APP2" >/dev/null 2>&1
     call SetEnvironmentWidgets "Work" "['water', 'clock']" >/dev/null
