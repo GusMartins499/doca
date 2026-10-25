@@ -76,6 +76,12 @@ the one part of the bar in an order somebody chose; running apps follow
 their windows, and folders and the trash come after. A left click is chosen
 when the button comes up, so the same press can pick an icon up instead.
 
+Pull a pin up off the bar — an icon's height above it — and let go to unpin
+it. The bar closes the gap behind it while you carry it, and it goes up in a
+puff of smoke where you let go (not with *Reduce animation* on, nor without a
+compositor). Bring it back down before letting go and it is just a move. An
+app that is running stays on the bar, among the running ones.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/doca/config.toml`:

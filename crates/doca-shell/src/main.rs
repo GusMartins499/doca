@@ -6,6 +6,7 @@ mod keys;
 mod magnify;
 mod motion;
 mod panel;
+mod poof;
 mod row;
 mod screen;
 mod stack;
@@ -763,15 +764,19 @@ fn wire(
     // enough to be a drag — GTK's own threshold, the one every drag in the
     // desktop starts at.
     let pressed: Rc<RefCell<Option<Pressed>>> = Rc::default();
+    // What carries a pin once it is pulled off the bar.
+    let float = poof::Float::new();
 
     let naming = icons.clone();
     let naming_label = label.clone();
     let moving = pressed.clone();
     let holding = hide.clone();
+    let carrying = float.clone();
     icons.area.connect_motion_notify_event(move |area, event| {
         let (x, y) = event.position();
         if naming.dragging() {
-            naming.drag_to(x);
+            naming.drag_to(x, y);
+            carry_off_the_bar(&naming, &carrying, event.root());
             return glib::Propagation::Proceed;
         }
         let picked = moving.borrow_mut().as_mut().and_then(|press| {
@@ -792,7 +797,8 @@ fn wire(
                 // wherever the pointer strays: the bar stays until it lets go.
                 holding.hold();
                 tracing::debug!(index, "an icon was picked up");
-                naming.drag_to(x);
+                naming.drag_to(x, y);
+                carry_off_the_bar(&naming, &carrying, event.root());
                 return glib::Propagation::Proceed;
             }
         }
@@ -845,15 +851,30 @@ fn wire(
         }
         let press = pressed.replace(None);
         if releasing.dragging() {
-            if let Some((id, position)) = releasing.drop_held() {
-                tracing::info!(id, position, "an icon was dragged to a new place");
-                let proxy = proxy.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(e) = proxy.pin_item_at(&id, position).await {
-                        tracing::warn!("the dock refused the new place for {id}: {e}");
-                    }
-                });
+            let size = releasing.held_picture_size();
+            let proxy = proxy.clone();
+            match releasing.drop_held() {
+                Some(row::Dropped::Moved(id, position)) => {
+                    tracing::info!(id, position, "an icon was dragged to a new place");
+                    glib::spawn_future_local(async move {
+                        if let Err(e) = proxy.pin_item_at(&id, position).await {
+                            tracing::warn!("the dock refused the new place for {id}: {e}");
+                        }
+                    });
+                }
+                Some(row::Dropped::Unpinned(id)) => {
+                    tracing::info!(id, "a pin was pulled off the bar and let go of");
+                    float.put_down();
+                    poof::poof(event.root(), size);
+                    glib::spawn_future_local(async move {
+                        if let Err(e) = proxy.unpin_item(&id).await {
+                            tracing::warn!("the dock would not unpin {id}: {e}");
+                        }
+                    });
+                }
+                None => {}
             }
+            float.put_down();
             let (x, y) = event.position();
             let allocation = area.allocation();
             if x < 0.0
@@ -874,6 +895,24 @@ fn wire(
     });
 
     dock::accept_file_drops(icons);
+}
+
+/// Draw the held icon at the pointer while it is off the bar, and stop once it
+/// is back on it — where the row draws it again.
+fn carry_off_the_bar(icons: &row::Row, float: &poof::Float, pointer: (f64, f64)) {
+    if !icons.away() {
+        if float.carrying() {
+            float.put_down();
+        }
+        return;
+    }
+    if float.carrying() {
+        float.follow(pointer);
+        return;
+    }
+    if let Some(picture) = icons.held_picture(icons.held_picture_size() as i32) {
+        float.carry(picture, pointer);
+    }
 }
 
 /// A left button that went down on an icon and has not come up yet.
@@ -1835,6 +1874,11 @@ fn on_a_display() {
     row::tests::a_drag_stays_among_the_pins();
     row::tests::a_pin_put_back_where_it_was_asks_for_nothing();
     row::tests::a_rebuild_mid_drag_leaves_the_icon_in_the_hand();
+    row::tests::a_pin_pulled_off_the_bar_and_let_go_of_is_unpinned();
+    row::tests::a_pin_brought_back_onto_the_bar_is_not_unpinned();
+    row::tests::a_rebuild_while_a_pin_is_off_the_bar_leaves_it_off();
+    row::tests::a_running_app_let_go_of_off_the_bar_stays_among_the_running();
+    poof::tests::the_carried_icon_is_centred_on_the_pointer_and_takes_no_input();
     row::tests::a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports();
     row::tests::a_lens_that_is_shut_aims_at_once_rather_than_travelling();
     row::tests::an_app_that_closed_keeps_its_place_until_it_has_finished_going();
