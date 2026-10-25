@@ -23,6 +23,24 @@ pub struct Entry {
     scaled: RefCell<HashMap<i32, gdk_pixbuf::Pixbuf>>,
     launched: Cell<Option<Instant>>,
     life: Cell<Life>,
+    /// How far from its slot the icon was put when it last changed slot, and
+    /// when: it is drawn that far off and eased home over `motion::SHUFFLE`.
+    /// Stored as where it started rather than where it is, for the reason
+    /// `Life` is — a neighbour pushed back the other way mid-glide has to
+    /// turn round from wherever it had got to.
+    glide: Cell<(f64, Instant)>,
+}
+
+/// The icon being dragged into a new place, while the button is down.
+struct Held {
+    id: String,
+    /// Where it was picked up from, so dropping it back there is nothing.
+    from: usize,
+    /// Where the pointer is along the row.
+    x: f64,
+    /// How far from the icon's centre it was taken hold of. The icon is held
+    /// where the hand took it, not jumped to centre under the pointer.
+    grab: f64,
 }
 
 impl Entry {
@@ -33,7 +51,20 @@ impl Entry {
             scaled: RefCell::new(HashMap::new()),
             launched: Cell::new(None),
             life: Cell::new(if arriving { Life::arriving() } else { Life::settled() }),
+            glide: Cell::new((0.0, Instant::now() - crate::motion::SHUFFLE)),
         }
+    }
+
+    /// How far off its slot the icon is drawn this instant.
+    fn shift(&self) -> f64 {
+        let (from, since) = self.glide.get();
+        from * crate::motion::glide_left(since.elapsed())
+    }
+
+    /// Move the icon's slot by `by` without moving the icon: it is drawn
+    /// where it was and glides the rest of the way from there.
+    fn nudge(&self, by: f64) {
+        self.glide.set((self.shift() + by, Instant::now()));
     }
 
     /// The same app again, with whatever changed about it — and the icon it
@@ -245,6 +276,7 @@ pub struct Row {
     ringed: Rc<RefCell<Option<String>>>,
     ring: Rc<Cell<gdk::RGBA>>,
     proxy: Rc<RefCell<Option<Rc<DocaProxy<'static>>>>>,
+    held: Rc<RefCell<Option<Held>>>,
 }
 
 impl Row {
@@ -280,6 +312,7 @@ impl Row {
         area.add_events(
             gdk::EventMask::POINTER_MOTION_MASK
                 | gdk::EventMask::BUTTON_PRESS_MASK
+                | gdk::EventMask::BUTTON_RELEASE_MASK
                 | gdk::EventMask::LEAVE_NOTIFY_MASK
                 | gdk::EventMask::ENTER_NOTIFY_MASK,
         );
@@ -311,6 +344,7 @@ impl Row {
             ringed: Rc::new(RefCell::new(None)),
             ring: Rc::new(Cell::new(crate::theme::ring(crate::theme::DEFAULT))),
             proxy: Rc::new(RefCell::new(None)),
+            held: Rc::new(RefCell::new(None)),
             dots: Rc::new(RefCell::new((
                 gdk::RGBA::new(1.0, 1.0, 1.0, 0.45),
                 gdk::RGBA::new(0.298, 0.553, 1.0, 1.0),
@@ -348,6 +382,12 @@ impl Row {
         // can take the icons down a size to fit — a bar emptied and refilled
         // in one frame, rather than the same switch any other dock gets.
         let announcing = !self.entries.borrow().is_empty();
+        let held_at = self.held.borrow().as_ref().and_then(|held| {
+            self.entries
+                .borrow()
+                .iter()
+                .position(|entry| entry.item.id == held.id)
+        });
 
         let mut old: Vec<Option<Entry>> =
             self.entries.borrow_mut().drain(..).map(Some).collect();
@@ -373,6 +413,7 @@ impl Row {
                 // it never left the bar, and it goes on from where it was.
                 let loaded = Entry::from(item, largest, false);
                 loaded.life.set(entry.life.get());
+                loaded.glide.set(entry.glide.get());
                 loaded
             } else {
                 entry.again(item)
@@ -415,6 +456,17 @@ impl Row {
             row.push(entry);
         }
         row.extend(departing.map(|(_, entry)| entry));
+        // A rebuild that lands mid-drag — a window took focus — brings the
+        // order the config still has, and the hand has not let go yet: the
+        // icon it holds stays in the slot it was carried to.
+        if let Some(held) = self.held.borrow().as_ref() {
+            if let Some(now) = row.iter().position(|entry| entry.item.id == held.id) {
+                let pins = pinned_run(&row);
+                let carried = held_at.unwrap_or(now).min(pins.saturating_sub(1));
+                let entry = row.remove(now);
+                row.insert(carried, entry);
+            }
+        }
         *self.entries.borrow_mut() = row;
 
         self.rest.set(rest);
@@ -710,6 +762,111 @@ impl Row {
         self.animate();
     }
 
+    /// Take hold of the icon at `index`, the pointer at `x`, to drag it into
+    /// a new place. P3 of #18: "reorder by dragging".
+    ///
+    /// Only a pin: the pins are the one part of the row anyone put in an
+    /// order. An app that is running and not pinned follows its windows, and
+    /// folders and the trash come after — there is no order of theirs to
+    /// change. `false` when there is nothing here to take.
+    pub fn pick(&self, index: usize, x: f64) -> bool {
+        let id = {
+            let entries = self.entries.borrow();
+            match entries.get(index) {
+                Some(entry) if entry.item.pinned && !entry.life.get().leaving() => {
+                    entry.item.id.clone()
+                }
+                _ => return false,
+            }
+        };
+        let centre = self.drawn()[index].placed.centre;
+        self.held.replace(Some(Held {
+            id,
+            from: index,
+            x,
+            grab: x - centre,
+        }));
+        self.animate();
+        true
+    }
+
+    /// Whether an icon is in the hand.
+    pub fn dragging(&self) -> bool {
+        self.held.borrow().is_some()
+    }
+
+    /// Carry the held icon to `x`, and move it to the slot it is over.
+    ///
+    /// The order changes the moment the icon is nearer another slot than its
+    /// own, and the icons it passed are drawn where they were and glide to
+    /// where they now are — so the row makes way, a slot at a time, as the
+    /// hand moves. Never past the pins: see `pick`.
+    pub fn drag_to(&self, x: f64) {
+        let id = {
+            let mut held = self.held.borrow_mut();
+            let Some(held) = held.as_mut() else {
+                return;
+            };
+            held.x = x;
+            held.id.clone()
+        };
+        self.aim(Some(x));
+        let grab = self
+            .held
+            .borrow()
+            .as_ref()
+            .map(|held| held.grab)
+            .unwrap_or(0.0);
+        let centres = self.centres();
+        let mut entries = self.entries.borrow_mut();
+        let Some(now) = entries.iter().position(|entry| entry.item.id == id) else {
+            return;
+        };
+        let pins = pinned_run(&entries);
+        let Some(to) = nearest(&centres[..pins.min(centres.len())], x - grab) else {
+            return;
+        };
+        if to == now {
+            return;
+        }
+        let entry = entries.remove(now);
+        entries.insert(to, entry);
+        // Each icon between the two slots moved one slot over: drawn where it
+        // was, it glides the slot's width the other way.
+        let (low, high) = (now.min(to), now.max(to));
+        for index in low..=high {
+            if index == to {
+                continue;
+            }
+            let was = if to > now { index + 1 } else { index - 1 };
+            entries[index].nudge(centres[was] - centres[index]);
+        }
+        drop(entries);
+        self.speak();
+        self.animate();
+    }
+
+    /// Let go of the held icon where it is, and say where that is: its id and
+    /// its place counted from 1, the way `PinItemAt` counts — or nothing,
+    /// when it went back where it came from.
+    ///
+    /// The row keeps the new order now rather than waiting for the daemon to
+    /// write it and send it back, so a drop is not a jump back and then
+    /// forward again. The rebuild that follows finds the order it already
+    /// has. The icon glides from the hand into its slot.
+    pub fn drop_held(&self) -> Option<(String, u32)> {
+        let held = self.held.replace(None)?;
+        let centres = self.centres();
+        let entries = self.entries.borrow();
+        let at = entries.iter().position(|entry| entry.item.id == held.id)?;
+        if let Some(centre) = centres.get(at) {
+            entries[at].nudge(held.x - held.grab - centre - entries[at].shift());
+        }
+        drop(entries);
+        self.animate();
+        (at != held.from).then(|| (held.id, at as u32 + 1))
+    }
+
     /// Redraw on the compositor's own clock, and stop when there is nothing
     /// left moving — a dock that wakes sixty times a second while it sits
     /// still is paid for in battery.
@@ -740,7 +897,13 @@ impl Row {
             .iter()
             .any(|entry| entry.launched.get().is_some_and(crate::motion::is_launching_since));
         let joining = entries.iter().any(|entry| entry.life.get().moving());
-        !launching && !joining && !self.hovering.get() && self.scale_now() <= 1.0
+        let gliding = entries.iter().any(|entry| entry.shift() != 0.0);
+        !launching
+            && !joining
+            && !gliding
+            && self.held.borrow().is_none()
+            && !self.hovering.get()
+            && self.scale_now() <= 1.0
     }
 
     /// Which icon is under `x`, by what is drawn rather than by what rests there.
@@ -831,6 +994,7 @@ impl Row {
         let pointer = self.lens();
         let scale = self.scale_now();
         let centres = self.centres();
+        let held = self.held.borrow();
         self.entries
             .borrow()
             .iter()
@@ -846,14 +1010,20 @@ impl Row {
                     .filter(|elapsed| crate::motion::is_launching(*elapsed))
                     .map(crate::motion::launch_scale)
                     .unwrap_or(1.0);
-                Drawn::of(
-                    centres[index],
+                let mut drawn = Drawn::of(
+                    centres[index] + entry.shift(),
                     pointer,
                     rest.icon,
                     scale,
                     entry.life.get().presence(),
                     bounce,
-                )
+                );
+                // The icon in the hand goes where the hand is, at the size
+                // the lens gives the place it is passing over.
+                if let Some(held) = held.as_ref().filter(|held| held.id == entry.item.id) {
+                    drawn.placed.centre = held.x - held.grab;
+                }
+                drawn
             })
             .collect()
     }
@@ -889,7 +1059,17 @@ impl Row {
 
         let drawn = self.drawn();
         let entries = self.entries.borrow();
-        for (index, icon) in drawn.iter().enumerate() {
+        // The icon in the hand is drawn last, over the ones it is passing.
+        let held = self
+            .held
+            .borrow()
+            .as_ref()
+            .and_then(|held| entries.iter().position(|entry| entry.item.id == held.id));
+        let order = (0..drawn.len())
+            .filter(|index| Some(*index) != held)
+            .chain(held);
+        for index in order {
+            let icon = &drawn[index];
             let size = icon.size(rest.icon);
             let Some(entry) = entries.get(index) else {
                 continue;
@@ -988,6 +1168,25 @@ impl Row {
     }
 }
 
+/// How many icons at the front of the row are pins. The pins come first and
+/// in their own order — `model::build` puts them there — so this is also the
+/// last place a dragged pin can be taken to.
+fn pinned_run(entries: &[Entry]) -> usize {
+    entries
+        .iter()
+        .position(|entry| !entry.item.pinned)
+        .unwrap_or(entries.len())
+}
+
+/// The slot whose centre is nearest `x`.
+fn nearest(centres: &[f64], x: f64) -> Option<usize> {
+    centres
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - x).abs().total_cmp(&(*b - x).abs()))
+        .map(|(index, _)| index)
+}
+
 /// What is on the row, in words: each item's name in order, and how many
 /// windows it has open when it has any.
 pub fn spoken(items: &[DockItem]) -> String {
@@ -1035,6 +1234,129 @@ pub mod tests {
 
     const ICON: i32 = 48;
     const SCALE: f64 = 1.6;
+
+    /// Four pins, and an app that is running without being pinned.
+    fn pins_and_a_stranger() -> (Row, Rest) {
+        pins_and_a_stranger_at(SCALE)
+    }
+
+    fn pins_and_a_stranger_at(scale: f64) -> (Row, Rest) {
+        let rest = Rest::new(ICON, 4, 4, scale);
+        let row = Row::new();
+        let mut items: Vec<DockItem> = ["a", "b", "c", "d"].map(item).to_vec();
+        let mut stranger = item("running");
+        stranger.pinned = false;
+        stranger.windows = vec![7];
+        items.push(stranger);
+        row.fill(&items, rest);
+        (row, rest)
+    }
+
+    fn order(row: &Row) -> Vec<String> {
+        row.items().into_iter().map(|item| item.id).collect()
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_pin_dragged_along_the_row_takes_the_place_it_is_dropped_at() {
+        let (row, rest) = pins_and_a_stranger();
+        assert!(row.pick(0, rest.centre(0)), "a pin could not be picked up");
+
+        row.drag_to(rest.centre(2));
+        assert_eq!(
+            order(&row),
+            ["b", "c", "a", "d", "running"],
+            "the row did not make way"
+        );
+
+        assert_eq!(
+            row.drop_held(),
+            Some(("a".to_string(), 3)),
+            "dropped third, counted from 1 the way PinItemAt counts"
+        );
+        assert!(!row.dragging());
+        assert_eq!(
+            order(&row),
+            ["b", "c", "a", "d", "running"],
+            "the drop undid the move"
+        );
+    }
+
+    /// The icons the dragged one passes are drawn where they were in the frame
+    /// the order changed, and glide from there: a slot is never a jump.
+    pub fn an_icon_that_makes_way_glides_rather_than_jumps() {
+        // No lens, so that what moves is the glide and not the magnification
+        // opening under the pointer.
+        let (row, rest) = pins_and_a_stranger_at(1.0);
+        let before: Vec<f64> = row.drawn().iter().map(|icon| icon.placed.centre).collect();
+        row.pick(0, rest.centre(0));
+        row.drag_to(rest.centre(1));
+
+        let after: Vec<f64> = row.drawn().iter().map(|icon| icon.placed.centre).collect();
+        // "b" was at slot 1 and is now at slot 0: drawn, still, where it was.
+        assert!(
+            (after[0] - before[1]).abs() < 2.0,
+            "the neighbour jumped a slot: was at {}, drawn at {}",
+            before[1],
+            after[0]
+        );
+        std::thread::sleep(crate::motion::SHUFFLE);
+        let settled = row.drawn()[0].placed.centre;
+        assert!(
+            (settled - before[0]).abs() < 2.0,
+            "the neighbour never got to its new slot: {settled} against {}",
+            before[0]
+        );
+        row.drop_held();
+    }
+
+    /// Only the pins are in an order anyone chose: an app that is running
+    /// unpinned is not picked up, and no pin is carried in among the apps
+    /// that are.
+    pub fn a_drag_stays_among_the_pins() {
+        let (row, rest) = pins_and_a_stranger();
+        assert!(
+            !row.pick(4, rest.centre(4)),
+            "an unpinned app was picked up"
+        );
+
+        row.pick(1, rest.centre(1));
+        row.drag_to(rest.centre(4) + 200.0);
+        assert_eq!(
+            order(&row),
+            ["a", "c", "d", "b", "running"],
+            "a pin went past the last pin"
+        );
+        assert_eq!(row.drop_held(), Some(("b".to_string(), 4)));
+    }
+
+    /// Picked up and put back where it was is nothing to write.
+    pub fn a_pin_put_back_where_it_was_asks_for_nothing() {
+        let (row, rest) = pins_and_a_stranger();
+        row.pick(2, rest.centre(2));
+        row.drag_to(rest.centre(0));
+        row.drag_to(rest.centre(2));
+        assert_eq!(row.drop_held(), None);
+        assert_eq!(order(&row), ["a", "b", "c", "d", "running"]);
+    }
+
+    /// A rebuild mid-drag — a window took focus — brings the order the config
+    /// still has. The icon in the hand stays where the hand carried it.
+    pub fn a_rebuild_mid_drag_leaves_the_icon_in_the_hand() {
+        let (row, rest) = pins_and_a_stranger();
+        let original = row.items();
+        row.pick(0, rest.centre(0));
+        row.drag_to(rest.centre(2));
+
+        row.fill(&original, rest);
+
+        assert_eq!(
+            order(&row),
+            ["b", "c", "a", "d", "running"],
+            "the rebuild took the icon back"
+        );
+        assert!(row.dragging(), "the rebuild let go of the icon");
+        assert_eq!(row.drop_held(), Some(("a".to_string(), 3)));
+    }
 
     /// The bar is *given* the run and *painted* wherever the icons are, so
     /// the surface has to be the wider of the two. Sizing the bar to the

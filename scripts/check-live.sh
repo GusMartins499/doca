@@ -919,6 +919,63 @@ else
     echo "  skip  xdotool or xev missing: what the air over the bar takes is not checked"
 fi
 
+# A pin dragged to a new place on the bar (#18, P3). Two pins and the folder,
+# no tiles and no lens, so where each icon is can be worked out from the
+# window: the bar is centred in it, three slots wide, and the second pin is
+# its middle. The order is read back from the daemon, which is where the drop
+# has to have landed — the bar showing it is not enough.
+work_pins() {
+    call ListEnvironments | grep -o "('Work', [^)]*)" \
+        | sed -E "s/^\('Work', [^]]*\], (true|false), (\[[^]]*\]).*/\2/"
+}
+if command -v xdotool >/dev/null && [ -n "${APP3:-}" ]; then
+    call SetEnvironmentWidgets "Work" "[]" >/dev/null
+    call SetAppearance "{'magnification': <1.0>, 'icon_size': <int32 64>}" >/dev/null
+    call PinInAt "Work" "$APP2" 1 >/dev/null
+    call PinInAt "Work" "$APP3" 2 >/dev/null
+    sleep 1.5
+    DOCK=$(xdotool search --name '^Doca$' 2>/dev/null | head -1)
+    eval "$(xwininfo -id "$DOCK" | awk '/Absolute upper-left X/ {print "DX="$4} /Absolute upper-left Y/ {print "DY="$4} /Width/ {print "DW="$2} /Height/ {print "DH="$2}')"
+    PITCH=$((64 + 2 * 2 + 2))
+    MIDDLE=$((DX + DW / 2))
+    ICON_Y=$((DY + DH - 9 - 32))
+    FIRST=$((MIDDLE - PITCH))
+    case "$(work_pins)" in
+        "['$APP2', '$APP3']") ;;
+        *) fail "the two pins to drag did not land: $(work_pins)" ;;
+    esac
+    xdotool mousemove "$FIRST" "$ICON_Y"; sleep 0.3
+    xdotool mousedown 1; sleep 0.1
+    for step in 4 12 24 40 56 72 88; do
+        xdotool mousemove $((FIRST + step)) "$ICON_Y"; sleep 0.05
+    done
+    sleep 0.2
+    xdotool mouseup 1; sleep 1
+    case "$(work_pins)" in
+        "['$APP3', '$APP2']") ok "the first pin dragged past the second took its place" ;;
+        *) fail "after the drag the pins are $(work_pins)" ;;
+    esac
+    grep -aq "an icon was dragged to a new place" "$WORK/shell.log" \
+        && ok "the bar said where the icon was dropped" \
+        || fail "the bar never logged the drop"
+    # And a press that does not travel is still a click: the folder opens.
+    xdotool mousemove $((MIDDLE + PITCH)) "$ICON_Y"; sleep 0.3
+    xdotool mousedown 1; sleep 0.05; xdotool mouseup 1; sleep 0.8
+    if [ -n "$(some_menu_up)" ]; then
+        ok "a press that did not travel is still a click: the folder opened ($(some_menu_up))"
+    else
+        fail "a click on the folder, after the drag code, opened nothing"
+    fi
+    xdotool key Escape; sleep 0.3
+    call UnpinIn "Work" "$APP3" >/dev/null 2>&1
+    call UnpinIn "Work" "$APP2" >/dev/null 2>&1
+    call SetEnvironmentWidgets "Work" "['water', 'clock']" >/dev/null
+    call SetAppearance "{'magnification': <1.6>}" >/dev/null
+    sleep 0.5
+else
+    echo "  skip  xdotool missing or too few apps installed: a drag on the bar is not checked"
+fi
+
 # The monitor the dock was given, by name (#18, item 11). Xvfb has one output,
 # `screen`, and lists no monitor `xrandr --setmonitor` adds, so moving between
 # two is the unit tests' (`screen::choose`); what is checked here is the way

@@ -744,10 +744,59 @@ fn wire(
     hide: Hide,
     keys: &keys::Keyboard,
 ) {
+    // What a click does and what a key does are one closure each, handed to
+    // the keyboard as well as run here — so `Enter` cannot do something a
+    // left click would not, nor `Menu` something a right click would not.
+    let choose = choosing(icons, proxy.clone(), folders, window.clone(), hide.clone(), keys.clone());
+    let offer = offering(
+        icons,
+        proxy.clone(),
+        window.clone(),
+        hide.clone(),
+        keys.clone(),
+    );
+    keys.acts(choose.clone(), offer.clone());
+
+    // A left click is chosen on the release, not the press, so that the same
+    // press can instead pick an icon up: #18, P3, "reorder by dragging". Held
+    // here from the press until the button comes up or the hand moves far
+    // enough to be a drag — GTK's own threshold, the one every drag in the
+    // desktop starts at.
+    let pressed: Rc<RefCell<Option<Pressed>>> = Rc::default();
+
     let naming = icons.clone();
     let naming_label = label.clone();
-    icons.area.connect_motion_notify_event(move |_, event| {
-        naming.aim(Some(event.position().0));
+    let moving = pressed.clone();
+    let holding = hide.clone();
+    icons.area.connect_motion_notify_event(move |area, event| {
+        let (x, y) = event.position();
+        if naming.dragging() {
+            naming.drag_to(x);
+            return glib::Propagation::Proceed;
+        }
+        let picked = moving.borrow_mut().as_mut().and_then(|press| {
+            if press.moved
+                || !area.drag_check_threshold(press.x as i32, press.y as i32, x as i32, y as i32)
+            {
+                return None;
+            }
+            // Past the threshold it is no longer a click, whether or not
+            // there is an icon here that can be dragged.
+            press.moved = true;
+            Some(press.index)
+        });
+        if let Some(index) = picked {
+            if naming.pick(index, x) {
+                naming_label.hide();
+                // The hand is still on the dock while it carries an icon,
+                // wherever the pointer strays: the bar stays until it lets go.
+                holding.hold();
+                tracing::debug!(index, "an icon was picked up");
+                naming.drag_to(x);
+                return glib::Propagation::Proceed;
+            }
+        }
+        naming.aim(Some(x));
         name_what_is_hovered(&naming, &naming_label);
         glib::Propagation::Proceed
     });
@@ -755,34 +804,86 @@ fn wire(
     let leaving = icons.clone();
     let leaving_label = label.clone();
     icons.area.connect_leave_notify_event(move |_, _| {
-        leaving.aim(None);
         leaving_label.hide();
+        // The lens stays open over an icon being carried off the row: it is
+        // still where the hand is going to put it down.
+        if !leaving.dragging() {
+            leaving.aim(None);
+        }
         glib::Propagation::Proceed
     });
 
-    // What a click does and what a key does are one closure each, handed to
-    // the keyboard as well as run here — so `Enter` cannot do something a
-    // left click would not, nor `Menu` something a right click would not.
-    let choose = choosing(icons, proxy.clone(), folders, window.clone(), hide.clone(), keys.clone());
-    let offer = offering(icons, proxy, window, hide, keys.clone());
-    keys.acts(choose.clone(), offer.clone());
-
     let clicked = icons.clone();
     let clicked_label = label.clone();
+    let pressing = pressed.clone();
     icons.area.connect_button_press_event(move |_, event| {
         clicked_label.hide();
         let Some((index, item)) = clicked.item_at(event.position().0) else {
             return glib::Propagation::Stop;
         };
         match event.button() {
-            1 => choose(index, item, Some((**event).clone())),
+            1 if event.event_type() == gdk::EventType::ButtonPress => {
+                let (x, y) = event.position();
+                pressing.replace(Some(Pressed {
+                    index,
+                    item,
+                    x,
+                    y,
+                    moved: false,
+                }));
+            }
             3 => offer(index, item, Some((**event).clone())),
             _ => {}
         }
         glib::Propagation::Stop
     });
 
+    let releasing = icons.clone();
+    icons.area.connect_button_release_event(move |area, event| {
+        if event.button() != 1 {
+            return glib::Propagation::Stop;
+        }
+        let press = pressed.replace(None);
+        if releasing.dragging() {
+            if let Some((id, position)) = releasing.drop_held() {
+                tracing::info!(id, position, "an icon was dragged to a new place");
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(e) = proxy.pin_item_at(&id, position).await {
+                        tracing::warn!("the dock refused the new place for {id}: {e}");
+                    }
+                });
+            }
+            let (x, y) = event.position();
+            let allocation = area.allocation();
+            if x < 0.0
+                || y < 0.0
+                || x >= allocation.width() as f64
+                || y >= allocation.height() as f64
+            {
+                releasing.aim(None);
+            }
+            hide.release(&window);
+            return glib::Propagation::Stop;
+        }
+        match press {
+            Some(press) if !press.moved => choose(press.index, press.item, Some((**event).clone())),
+            _ => {}
+        }
+        glib::Propagation::Stop
+    });
+
     dock::accept_file_drops(icons);
+}
+
+/// A left button that went down on an icon and has not come up yet.
+struct Pressed {
+    index: usize,
+    item: doca_ipc::DockItem,
+    x: f64,
+    y: f64,
+    /// It travelled past the drag threshold, so its release is not a click.
+    moved: bool,
 }
 
 /// What choosing an icon does: a folder opens its grid over the icon, and
@@ -1729,6 +1830,11 @@ fn on_a_display() {
     ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
+    row::tests::a_pin_dragged_along_the_row_takes_the_place_it_is_dropped_at();
+    row::tests::an_icon_that_makes_way_glides_rather_than_jumps();
+    row::tests::a_drag_stays_among_the_pins();
+    row::tests::a_pin_put_back_where_it_was_asks_for_nothing();
+    row::tests::a_rebuild_mid_drag_leaves_the_icon_in_the_hand();
     row::tests::a_pointer_that_comes_back_elsewhere_travels_rather_than_teleports();
     row::tests::a_lens_that_is_shut_aims_at_once_rather_than_travelling();
     row::tests::an_app_that_closed_keeps_its_place_until_it_has_finished_going();

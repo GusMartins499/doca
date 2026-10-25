@@ -46,6 +46,27 @@ pub const ZOOM: Duration = Duration::from_millis(200);
 /// rather than two of different lengths.
 pub const ENTRY: Duration = SLIDE;
 
+/// How long an icon takes to make way for one dragged past it, and how long
+/// a dropped icon takes to settle into the place it was dropped at.
+///
+/// The bar's own figure again: making way is an icon moving one slot, which
+/// is the same distance an arrival opens.
+pub const SHUFFLE: Duration = SLIDE;
+
+/// How much of a glide is still to go, `elapsed` after it began: all of it at
+/// the start, none once it is over.
+///
+/// An icon that moved slot is drawn where it was and eased to where it is —
+/// the order changes in one frame and the picture follows over `SHUFFLE`.
+/// Eased out, because the icon has to get out of the way first and settle
+/// after: the dragged one is coming.
+pub fn glide_left(elapsed: Duration) -> f64 {
+    if elapsed >= SHUFFLE || still() {
+        return 0.0;
+    }
+    1.0 - ease_out(elapsed.as_secs_f64() / SHUFFLE.as_secs_f64())
+}
+
 /// How large an arriving icon starts, as a fraction of its full size.
 ///
 /// Far enough below one to read as growing out of the bar, near enough that
@@ -664,5 +685,24 @@ mod tests {
     fn a_launch_animation_is_over_once_its_time_is_up() {
         assert!(is_launching(LAUNCH / 2));
         assert!(!is_launching(LAUNCH));
+    }
+
+    #[test]
+    fn a_glide_starts_where_the_icon_was_and_ends_where_it_is() {
+        assert_eq!(glide_left(Duration::ZERO), 1.0);
+        assert_eq!(glide_left(SHUFFLE), 0.0);
+        let halfway = glide_left(SHUFFLE / 2);
+        assert!(
+            halfway < 0.5,
+            "eased out, so more than half the way is behind it at half the time: {halfway}"
+        );
+    }
+
+    #[test]
+    fn a_glide_only_ever_closes_in() {
+        let left: Vec<f64> = (0..=20)
+            .map(|step| glide_left(SHUFFLE * step / 20))
+            .collect();
+        assert!(left.windows(2).all(|pair| pair[1] <= pair[0]), "{left:?}");
     }
 }
