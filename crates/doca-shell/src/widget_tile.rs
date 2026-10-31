@@ -96,6 +96,13 @@ pub struct WidgetTile {
     /// room it left closes over the same frames. See `Shelf::carry_to`.
     room: Rc<Cell<f64>>,
     grip: Rc<RefCell<Option<Grip>>>,
+    /// What the panel says while the note is being typed into it.
+    ///
+    /// Kept apart from `shown` because the daemon is always behind the
+    /// typing: an answer to the write of a moment ago carries the text of a
+    /// moment ago, and shown as it came, the last letters would vanish from
+    /// the tile and come back.
+    typed: Rc<RefCell<Option<String>>>,
 }
 
 impl WidgetTile {
@@ -204,6 +211,7 @@ impl WidgetTile {
             held: Rc::new(Cell::new(false)),
             room: Rc::new(Cell::new(1.0)),
             grip,
+            typed: Rc::default(),
         };
         tile.resize();
         tile.mark();
@@ -358,6 +366,7 @@ impl WidgetTile {
 
     /// What this tile is showing now.
     pub fn update(&self, state: &WidgetState) {
+        let state = &written_over(state, self.typed.borrow().as_deref());
         let resize = self.shown.borrow().tile() != state.tile();
         *self.shown.borrow_mut() = state.clone();
         if resize {
@@ -366,6 +375,16 @@ impl WidgetTile {
         self.mark();
         self.speak();
         self.area.queue_draw();
+    }
+
+    /// The panel says this now, or has come down and the daemon has the
+    /// last word again.
+    fn typing(&self, text: Option<&str>) {
+        self.typed.replace(text.map(str::to_string));
+        if text.is_some() {
+            let shown = self.shown.borrow().clone();
+            self.update(&shown);
+        }
     }
 
     /// The bar changed size or colour under a tile that is staying.
@@ -487,6 +506,18 @@ fn draw_in(
             let (_, logical) = layout.pixel_extents();
             paint(cr, &layout, 0.0, (height - logical.height() as f64) / 2.0, look.palette.detail);
         }
+    }
+}
+
+/// A note's state with the text the panel has now, on the paper it came on.
+/// Anything else, or a note nobody is typing into, passes through.
+fn written_over(state: &WidgetState, typed: Option<&str>) -> WidgetState {
+    match (typed, state.body()) {
+        (Some(text), Ok(Body::Note(note))) => WidgetState::new(
+            state.id.clone(),
+            Body::Note(doca_ipc::Note { text: text.to_string(), ..note }),
+        ),
+        _ => state.clone(),
     }
 }
 
@@ -1446,6 +1477,13 @@ impl Shelf {
         }
     }
 
+    /// What a widget's panel says while it is being typed into.
+    pub fn typing(&self, id: &str, text: Option<&str>) {
+        if let Some((_, tile)) = self.tiles.borrow().iter().find(|(tile, _)| *tile == id) {
+            tile.typing(text);
+        }
+    }
+
     /// Who moves tiles. Every tile on the shelf is told, and every one it
     /// makes from now on.
     pub fn grips(&self, grip: Grip) {
@@ -2286,6 +2324,34 @@ pub mod tests {
 
         let (_, nothing, _) = drawn(&calendar(vec![]), Level::Full);
         assert!(nothing > 0, "nothing ahead drew nothing, which reads as a broken tile");
+    }
+
+    /// The tile says what the panel says, the daemon's echo of a moment ago
+    /// does not take the last letters back off it, and the paper stays the
+    /// note's. With the panel down the daemon has the last word again.
+    pub fn a_note_being_typed_is_on_the_tile_before_the_daemon_hears() {
+        let note = |text: &str| {
+            WidgetState::new(
+                "note",
+                Body::Note(doca_ipc::Note {
+                    text: text.to_string(),
+                    colour: "pink".to_string(),
+                }),
+            )
+        };
+        let (items, _, shelf, expand) = bar();
+        shelf.show(&items, &[note("mi")], look(ICON), &expand);
+        let shown = || shelf.tiles.borrow()[0].1.shown.borrow().clone();
+
+        shelf.typing("note", Some("milk"));
+        assert_eq!(shown(), note("milk"), "the tile fell behind the typing");
+
+        shelf.update(&note("mil"));
+        assert_eq!(shown(), note("milk"), "an old echo took letters off the tile");
+
+        shelf.typing("note", None);
+        shelf.update(&note("milk and bread"));
+        assert_eq!(shown(), note("milk and bread"), "the tile stayed on the panel's word");
     }
 
     /// The one that matters. Everything else here is about this holding under
