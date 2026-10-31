@@ -944,6 +944,27 @@ if command -v xdotool >/dev/null; then
     for _ in $(seq 1 30); do [ "$(bar_y)" -ge 790 ] 2>/dev/null && break; sleep 0.1; done
     [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "and it goes when the pointer does" \
         || fail "the bar stayed up after the pointer left (y $(bar_y))"
+
+    # The waits are the config's: a second at the edge, heard without a
+    # restart, and held to by the bar that is already running.
+    call SetAppearance "{'reveal_delay': <1000>, 'hide_delay': <1000>}" >/dev/null
+    sleep 0.5
+    xdotool mousemove 640 795
+    sleep 0.5
+    [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "a longer reveal_delay holds the bar back" \
+        || fail "the bar came up before reveal_delay (y $(bar_y))"
+    sleep 1
+    UP_Y=$(bar_y)
+    [ -n "$UP_Y" ] && [ "$UP_Y" -lt "$HIDDEN_Y" ] && ok "and the bar comes up when it is over" \
+        || fail "the bar never came up after reveal_delay (y $UP_Y)"
+    xdotool mousemove 100 100
+    sleep 0.6
+    [ "$(bar_y)" = "$UP_Y" ] && ok "a longer hide_delay keeps the bar up" \
+        || fail "the bar left before hide_delay (y $(bar_y))"
+    sleep 1
+    [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "and the bar goes when it is over" \
+        || fail "the bar stayed up after hide_delay (y $(bar_y))"
+    call SetAppearance "{'reveal_delay': <120>, 'hide_delay': <400>}" >/dev/null
     call SetAppearance "{'auto_hide': <false>}" >/dev/null
     sleep 0.5
 else

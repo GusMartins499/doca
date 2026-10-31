@@ -806,6 +806,8 @@ fn appearance_of(config: &Config) -> Appearance {
         gtk_theme: appearance.gtk_theme,
         cursor_theme: appearance.cursor_theme,
         monitor: appearance.monitor,
+        reveal_delay: appearance.reveal_delay,
+        hide_delay: appearance.hide_delay,
     }
 }
 

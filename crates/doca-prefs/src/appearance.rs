@@ -29,6 +29,8 @@ pub struct Tab {
     magnification: gtk::Adjustment,
     magnify: gtk::Switch,
     auto_hide: gtk::Switch,
+    reveal_delay: gtk::Adjustment,
+    hide_delay: gtk::Adjustment,
     show_trash: gtk::Switch,
     monitor: gtk::ComboBoxText,
     /// Setting a widget's value fires its own `changed` handler, which here
@@ -127,6 +129,18 @@ impl Tab {
         let auto_hide = gtk::Switch::new();
         let show_trash = gtk::Switch::new();
         let monitor = gtk::ComboBoxText::new();
+        let wait = |value: i32| {
+            gtk::Adjustment::new(
+                value as f64,
+                doca_ipc::MIN_HIDE_WAIT as f64,
+                doca_ipc::MAX_HIDE_WAIT as f64,
+                10.0,
+                100.0,
+                0.0,
+            )
+        };
+        let reveal_delay = wait(doca_ipc::DEFAULT_REVEAL_DELAY);
+        let hide_delay = wait(doca_ipc::DEFAULT_HIDE_DELAY);
 
         let mut row = 0;
         row = add(&grid, row, "Theme", &theme, Some(
@@ -161,6 +175,20 @@ impl Tab {
             "On, the dock slides away and gives maximised windows the screen back, \
              leaving a sliver to point at. Off, it keeps its space reserved.",
         ));
+        row = add(
+            &grid,
+            row,
+            "Wait before showing (ms)",
+            &gtk::SpinButton::new(Some(&reveal_delay), 10.0, 0),
+            Some("How long the pointer stays at the edge before the dock comes up."),
+        );
+        row = add(
+            &grid,
+            row,
+            "Wait before hiding (ms)",
+            &gtk::SpinButton::new(Some(&hide_delay), 10.0, 0),
+            Some("How long the pointer stays off the dock before it goes."),
+        );
         row = add(&grid, row, "Show the trash", &show_trash, None);
         add(&grid, row, "Screen", &monitor, Some(
             "The monitor the dock stands on. A monitor that is unplugged hands the \
@@ -174,6 +202,8 @@ impl Tab {
             magnification,
             magnify,
             auto_hide,
+            reveal_delay,
+            hide_delay,
             show_trash,
             monitor,
             filling,
@@ -250,6 +280,19 @@ impl Tab {
             }
         });
 
+        for (wait, name) in [
+            (&self.reveal_delay, key::REVEAL_DELAY),
+            (&self.hide_delay, key::HIDE_DELAY),
+        ] {
+            let writing = send.clone();
+            let filling = self.filling.clone();
+            wait.connect_value_changed(move |wait| {
+                if !filling.is_filling() {
+                    writing(name, Value::from(wait.value().round() as i32));
+                }
+            });
+        }
+
         for (switch, name) in [
             (&self.auto_hide, key::AUTO_HIDE),
             (&self.show_trash, key::SHOW_TRASH),
@@ -286,6 +329,8 @@ impl Tab {
                 switch.set_active(on);
                 switch.set_state(on);
             }
+            self.reveal_delay.set_value(appearance.reveal_delay as f64);
+            self.hide_delay.set_value(appearance.hide_delay as f64);
             self.show_screens(&connected(), &appearance.monitor);
         });
     }
@@ -364,6 +409,8 @@ pub mod on_a_display {
             icon_size: icon,
             magnification: lens,
             auto_hide: hide,
+            reveal_delay: 250,
+            hide_delay: 900,
             show_trash: trash,
             icon_theme: String::new(),
             gtk_theme: String::new(),
@@ -398,6 +445,8 @@ pub mod on_a_display {
         assert_eq!(tab.theme.active_id().map(|id| id.to_string()).as_deref(), Some("paper"));
         assert_eq!(tab.icon_size.value() as i32, 64);
         assert_eq!(tab.magnification.value(), 2.0);
+        assert_eq!(tab.reveal_delay.value(), 250.0);
+        assert_eq!(tab.hide_delay.value(), 900.0);
         assert!(tab.magnify.is_active(), "a lens at 2.0 is a lens that is on");
         assert!(tab.auto_hide.is_active());
         assert!(!tab.show_trash.is_active());

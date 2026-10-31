@@ -16,7 +16,7 @@ mod tooltip;
 mod widget_tile;
 
 use std::cell::{Cell, RefCell};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -135,6 +135,8 @@ struct Hide {
     /// The strip along the screen edge that a hidden bar is reached from.
     /// `None` until it is made, and in tests that have only a window.
     edge: Rc<RefCell<Option<gtk::Window>>>,
+    /// How long an arrival and a departure are held before they count.
+    waits: Rc<Cell<(Duration, Duration)>>,
 }
 
 /// Which part of the dock's window answers the pointer.
@@ -204,11 +206,29 @@ impl Default for Hide {
             bar: Rc::new(RefCell::new(None)),
             inside: Rc::new(Cell::new(false)),
             edge: Rc::new(RefCell::new(None)),
+            waits: Rc::new(Cell::new((motion::REVEAL_AFTER, motion::HIDE_AFTER))),
         }
     }
 }
 
 impl Hide {
+    /// Take the config's waits, in milliseconds. A move already waiting
+    /// keeps the wait it started with.
+    fn waits(&self, reveal: i32, hide: i32) {
+        let millis = |wait: i32| Duration::from_millis(wait.max(0) as u64);
+        self.waits.set((millis(reveal), millis(hide)));
+    }
+
+    /// How long the bar waits before believing where the pointer went.
+    fn intent_delay(&self, to_shown: bool) -> Duration {
+        let (reveal, hide) = self.waits.get();
+        if to_shown {
+            reveal
+        } else {
+            hide
+        }
+    }
+
     fn place(&self, window: &gtk::Window, x: i32, shown_y: i32, height: i32, enabled: bool) {
         self.put(window, x, shown_y, height, enabled);
         self.reach(window);
@@ -274,8 +294,9 @@ impl Hide {
     ///
     /// The pointer crossing the screen edge is not the same event as the user
     /// wanting the dock: the edge is also the way to the bottom of a window
-    /// and to nothing at all. So an arrival is held for `motion::REVEAL_AFTER`
-    /// before it counts, a departure for the longer `motion::HIDE_AFTER`, and
+    /// and to nothing at all. So an arrival is held before it counts, a
+    /// departure for longer — the config's two waits, which start from
+    /// `motion::REVEAL_AFTER` and `motion::HIDE_AFTER` — and
     /// either one cancels the other outright — a pointer that passes through
     /// asks for both and gets neither, which is the whole of what "intent"
     /// means here.
@@ -293,7 +314,7 @@ impl Hide {
 
         let hide = self.clone();
         let window = window.clone();
-        let waiting = glib::timeout_add_local_once(motion::intent_delay(to_shown), move || {
+        let waiting = glib::timeout_add_local_once(self.intent_delay(to_shown), move || {
             hide.intent.replace(None);
             hide.slide(&window, to_shown);
         });
@@ -1558,6 +1579,7 @@ async fn rebuild(
             themes.apply(appearance);
         }
         style.apply(&appearance.theme, &row.area.style_context());
+        hide.waits(appearance.reveal_delay, appearance.hide_delay);
     }
     let preferred_icon = appearance
         .as_ref()
@@ -2635,6 +2657,24 @@ pub mod hide_tests {
         );
         window.close();
         waiting(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::Hide;
+    use crate::motion;
+    use std::time::Duration;
+
+    #[test]
+    fn the_config_sets_each_wait_and_leaves_the_other_alone() {
+        let hide = Hide::default();
+        assert_eq!(hide.intent_delay(true), motion::REVEAL_AFTER);
+        assert_eq!(hide.intent_delay(false), motion::HIDE_AFTER);
+
+        hide.waits(0, 1500);
+        assert_eq!(hide.intent_delay(true), Duration::ZERO);
+        assert_eq!(hide.intent_delay(false), Duration::from_millis(1500));
     }
 }
 

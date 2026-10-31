@@ -37,6 +37,10 @@ pub fn appearance<'a>(
             key::GTK_THEME => patched.gtk_theme = text(value).context("gtk_theme")?,
             key::CURSOR_THEME => patched.cursor_theme = text(value).context("cursor_theme")?,
             key::MONITOR => patched.monitor = text(value).context("monitor")?,
+            key::REVEAL_DELAY => {
+                patched.reveal_delay = integer(value).context("reveal_delay")?
+            }
+            key::HIDE_DELAY => patched.hide_delay = integer(value).context("hide_delay")?,
             unknown => bail!(
                 "no appearance key {unknown}; known keys are {}",
                 key::ALL.join(", ")
@@ -142,6 +146,8 @@ mod tests {
             gtk_theme: String::new(),
             cursor_theme: String::new(),
             monitor: String::new(),
+            reveal_delay: 120,
+            hide_delay: 400,
         }
     }
 
@@ -160,6 +166,7 @@ mod tests {
         assert_eq!(patched.icon_size, base().icon_size, "the rest is left alone");
         assert_eq!(patched.magnification, base().magnification);
         assert_eq!(patched.auto_hide, base().auto_hide);
+        assert_eq!(patched.hide_delay, base().hide_delay);
         assert_eq!(patched.show_trash, base().show_trash);
     }
 
@@ -170,6 +177,8 @@ mod tests {
             (key::ICON_SIZE, Value::from(64i32)),
             (key::MAGNIFICATION, Value::from(2.0f64)),
             (key::AUTO_HIDE, Value::from(true)),
+            (key::REVEAL_DELAY, Value::from(300)),
+            (key::HIDE_DELAY, Value::from(900)),
             (key::SHOW_TRASH, Value::from(false)),
         ])
         .unwrap();
@@ -178,6 +187,7 @@ mod tests {
         assert_eq!(patched.icon_size, 64);
         assert_eq!(patched.magnification, 2.0);
         assert!(patched.auto_hide);
+        assert_eq!((patched.reveal_delay, patched.hide_delay), (300, 900));
         assert!(!patched.show_trash);
     }
 
