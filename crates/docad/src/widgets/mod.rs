@@ -16,6 +16,7 @@ pub mod stopwatch;
 pub mod time_progress;
 pub mod usage;
 
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -113,7 +114,18 @@ impl Drawn for WidgetState {
     }
 }
 
-const TICK: Duration = Duration::from_millis(250);
+/// The longest the hub sleeps with nothing due. Time spent suspended does not
+/// count against a timeout, and a dock of slow widgets has no other reason to
+/// wake and find the day has turned.
+const LONGEST_NAP: Duration = Duration::from_secs(60);
+
+/// How long the hub can sleep before a widget is due.
+fn nap(due: &[Instant], now: Instant) -> Duration {
+    due.iter()
+        .min()
+        .map_or(LONGEST_NAP, |next| next.saturating_duration_since(now))
+        .min(LONGEST_NAP)
+}
 
 enum Request {
     List(async_channel::Sender<Vec<WidgetState>>),
@@ -142,7 +154,7 @@ pub fn reconcile(have: &[String], want: &[String]) -> Vec<Option<usize>> {
 
 #[derive(Clone)]
 pub struct WidgetHandle {
-    tx: async_channel::Sender<Request>,
+    tx: std::sync::mpsc::Sender<Request>,
 }
 
 /// Start the thread that polls the widgets, owning the state file with them.
@@ -156,7 +168,7 @@ pub fn spawn_hub(
     mut store: crate::state::Store,
     day: crate::state::Day,
 ) -> Result<(WidgetHandle, async_channel::Receiver<WidgetState>)> {
-    let (tx, rx) = async_channel::unbounded::<Request>();
+    let (tx, rx) = std::sync::mpsc::channel::<Request>();
     let (changes_tx, changes_rx) = async_channel::unbounded::<WidgetState>();
 
     std::thread::Builder::new()
@@ -167,7 +179,36 @@ pub fn spawn_hub(
             let mut today = store.day();
 
             loop {
-                while let Ok(request) = rx.try_recv() {
+                // Asleep until a widget is due or somebody asks, so a click
+                // is answered when it lands and not at the next look.
+                let first = match rx.recv_timeout(nap(&due, Instant::now())) {
+                    Ok(request) => Some(request),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+
+                // Midnight, for a machine that has been awake since before
+                // it. Checked here and nowhere else: a widget that keeps a
+                // count never asks what day it is, it is simply handed the
+                // state a new day leaves behind. Ahead of the requests, so
+                // the first glass of a day is not counted on the one before.
+                let turned = day.today();
+                if turned != today {
+                    today = turned;
+                    let rolled = store.roll_to(turned).clone();
+                    for widget in widgets.iter_mut() {
+                        widget.adopt_state(&rolled);
+                    }
+                    // Whatever that reset is announced now rather than at its
+                    // own next tick, which for the water widget is a minute
+                    // of showing yesterday's count.
+                    for index in 0..widgets.len() {
+                        due[index] = Instant::now();
+                    }
+                }
+
+                let waiting = std::iter::from_fn(|| rx.try_recv().ok());
+                for request in first.into_iter().chain(waiting) {
                     match request {
                         Request::List(reply) => {
                             let states = widgets
@@ -282,28 +323,6 @@ pub fn spawn_hub(
                         }
                     }
                 }
-                if rx.is_closed() {
-                    break;
-                }
-
-                // Midnight, for a machine that has been awake since before
-                // it. Checked here and nowhere else: a widget that keeps a
-                // count never asks what day it is, it is simply handed the
-                // state a new day leaves behind.
-                let turned = day.today();
-                if turned != today {
-                    today = turned;
-                    let rolled = store.roll_to(turned).clone();
-                    for widget in widgets.iter_mut() {
-                        widget.adopt_state(&rolled);
-                    }
-                    // Whatever that reset is announced now rather than at its
-                    // own next tick, which for the water widget is a minute
-                    // of showing yesterday's count.
-                    for index in 0..widgets.len() {
-                        due[index] = Instant::now();
-                    }
-                }
 
                 let now = Instant::now();
                 for (index, widget) in widgets.iter_mut().enumerate() {
@@ -319,8 +338,6 @@ pub fn spawn_hub(
                     last[index] = Some(state.clone());
                     let _ = changes_tx.send_blocking(state);
                 }
-
-                std::thread::sleep(TICK);
             }
         })?;
 
@@ -332,7 +349,6 @@ impl WidgetHandle {
         let (reply_tx, reply_rx) = async_channel::bounded(1);
         self.tx
             .send(Request::List(reply_tx))
-            .await
             .map_err(|_| anyhow::anyhow!("widget hub is gone"))?;
         reply_rx
             .recv()
@@ -350,7 +366,6 @@ impl WidgetHandle {
         let (reply_tx, reply_rx) = async_channel::bounded(1);
         self.tx
             .send(Request::Settle(ids, settings, reply_tx))
-            .await
             .map_err(|_| anyhow::anyhow!("widget hub is gone"))?;
         reply_rx
             .recv()
@@ -362,7 +377,6 @@ impl WidgetHandle {
         let (reply_tx, reply_rx) = async_channel::bounded(1);
         self.tx
             .send(Request::Invoke(id.to_string(), action.to_string(), reply_tx))
-            .await
             .map_err(|_| anyhow::anyhow!("widget hub is gone"))?;
         reply_rx
             .recv()
@@ -603,7 +617,7 @@ mod tests {
     /// A hub over a state file of this test's own.
     ///
     /// The day is the real one, not a fixture. A hub notices the turn of the
-    /// day on every tick, so a store dated some made-up day is a hub that
+    /// day whenever it wakes, so a store dated some made-up day is a hub that
     /// rolls it over the moment it starts — which is right, and which cost an
     /// hour before this comment existed.
     async fn running_with(ids: &[&str], scratch: Scratch) -> (WidgetHandle, Scratch) {
@@ -614,6 +628,34 @@ mod tests {
         let (handle, _changes) =
             spawn_hub(widgets, store, day).expect("the hub thread starts");
         (handle, scratch)
+    }
+
+    #[test]
+    fn the_hub_sleeps_until_the_soonest_widget_and_never_past_the_longest_nap() {
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(3);
+        let late = now + Duration::from_secs(3600);
+
+        assert_eq!(nap(&[late, soon], now), Duration::from_secs(3));
+        assert_eq!(nap(&[now, late], now + Duration::from_secs(1)), Duration::ZERO);
+        assert_eq!(nap(&[late], now), LONGEST_NAP);
+        assert_eq!(nap(&[], now), LONGEST_NAP, "no widgets still have to see midnight");
+    }
+
+    /// A click on a slow widget, with the hub deep in its sleep: it wakes for
+    /// the click and not for the widget's next turn.
+    #[tokio::test]
+    async fn a_sleeping_hub_answers_at_once() {
+        let hub = running(&["note"]).await;
+        holding(&hub).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let asked = Instant::now();
+        hub.settle(ids_of(&["note"]), WidgetSettings::default())
+            .await
+            .expect("the hub settles");
+
+        assert!(asked.elapsed() < Duration::from_millis(100), "took {:?}", asked.elapsed());
     }
 
     async fn holding(handle: &WidgetHandle) -> Vec<String> {

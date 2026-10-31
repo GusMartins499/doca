@@ -50,37 +50,19 @@ pub fn format_clock(seconds_since_epoch: u64, offset_seconds: i64) -> (String, S
     )
 }
 
+/// Seconds ahead of UTC where the user is, right now.
+///
+/// Asked for on every use rather than kept: an offset is only true until the
+/// next daylight-saving change or flight, and the daemon outlives both.
 pub fn local_offset_seconds() -> i64 {
-    let output = std::process::Command::new("date").arg("+%z").output().ok();
-    let Some(output) = output else { return 0 };
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_utc_offset(text.trim()).unwrap_or(0)
+    chrono::Local::now().offset().local_minus_utc() as i64
 }
 
-pub fn parse_utc_offset(value: &str) -> Option<i64> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 5 {
-        return None;
-    }
-    let sign = match bytes[0] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let hours: i64 = value.get(1..3)?.parse().ok()?;
-    let minutes: i64 = value.get(3..5)?.parse().ok()?;
-    Some(sign * (hours * 3600 + minutes * 60))
-}
-
-pub struct Clock {
-    offset: i64,
-}
+pub struct Clock;
 
 impl Clock {
     pub fn new() -> Self {
-        Self {
-            offset: local_offset_seconds(),
-        }
+        Self
     }
 }
 
@@ -98,7 +80,7 @@ impl Widget for Clock {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let (label, detail) = format_clock(now, self.offset);
+        let (label, detail) = format_clock(now, local_offset_seconds());
 
         WidgetState::new(
             "clock",
@@ -187,13 +169,5 @@ mod tests {
         let (_, detail) = format_clock(0, 0);
 
         assert_eq!(detail, "Thu 01/01");
-    }
-
-    #[test]
-    fn a_utc_offset_string_parses_in_both_directions() {
-        assert_eq!(parse_utc_offset("+0000"), Some(0));
-        assert_eq!(parse_utc_offset("-0300"), Some(-10_800));
-        assert_eq!(parse_utc_offset("+0530"), Some(19_800));
-        assert_eq!(parse_utc_offset("garbage"), None);
     }
 }

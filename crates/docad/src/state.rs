@@ -180,22 +180,21 @@ impl State {
 
 /// Today where the user is, as days since the epoch.
 ///
-/// The offset is read once and kept: it comes from running `date`, and the
-/// hub asks what day it is on every tick.
+/// The offset is asked for on every read, so a laptop that crosses a zone or
+/// a daylight-saving change is on the right day without a restart. Only a
+/// test pins one.
 pub struct Day {
-    offset: i64,
+    offset: Option<i64>,
 }
 
 impl Day {
     pub fn here() -> Self {
-        Self {
-            offset: crate::widgets::clock::local_offset_seconds(),
-        }
+        Self { offset: None }
     }
 
     #[cfg(test)]
     pub fn at_offset(offset: i64) -> Self {
-        Self { offset }
+        Self { offset: Some(offset) }
     }
 
     pub fn today(&self) -> i64 {
@@ -203,7 +202,10 @@ impl Day {
             .duration_since(UNIX_EPOCH)
             .map(|since| since.as_secs() as i64)
             .unwrap_or(0);
-        (now + self.offset).div_euclid(86_400)
+        let offset = self
+            .offset
+            .unwrap_or_else(crate::widgets::clock::local_offset_seconds);
+        (now + offset).div_euclid(86_400)
     }
 }
 

@@ -26,15 +26,11 @@ pub fn label_for(days: Option<i64>) -> String {
 
 pub struct Countdown {
     settings: CountdownSettings,
-    offset: i64,
 }
 
 impl Countdown {
     pub fn new(settings: CountdownSettings) -> Self {
-        Self {
-            settings,
-            offset: local_offset_seconds(),
-        }
+        Self { settings }
     }
 }
 
@@ -52,7 +48,7 @@ impl Widget for Countdown {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
-            + self.offset;
+            + local_offset_seconds();
         let today = now.div_euclid(86_400);
         let days = parse_date(&self.settings.date).map(|target| days_until(target, today));
 
