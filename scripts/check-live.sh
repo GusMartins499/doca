@@ -912,6 +912,44 @@ else
     echo "  skip  xdotool or python3-gi missing: the keyboard on the dock is not checked"
 fi
 
+# A hidden bar is reached from more than what shows of it (#18, item 12). The
+# strip is a second window, so this is the one place that sees it take a real
+# pointer: five pixels up, over the two that show, and in the air beside the
+# bar the window spreads into, where a bar that came up and could not hold the
+# pointer would go and come back for as long as it rested there.
+if command -v xdotool >/dev/null; then
+    call SetAppearance "{'auto_hide': <true>}" >/dev/null
+    xdotool mousemove 100 100
+    sleep 1.5
+    for _ in $(seq 1 30); do [ "$(bar_y)" -ge 790 ] 2>/dev/null && break; sleep 0.1; done
+    HIDDEN_Y=$(bar_y)
+
+    xdotool mousemove 640 790
+    sleep 0.6
+    [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "above the edge the hidden bar stays hidden" \
+        || fail "the bar came up for a pointer above the edge (y $HIDDEN_Y → $(bar_y))"
+
+    xdotool mousemove 640 795
+    sleep 0.6
+    UP_Y=$(bar_y)
+    [ -n "$UP_Y" ] && [ "$UP_Y" -lt "$HIDDEN_Y" ] \
+        && ok "a pointer five pixels up the edge brought the bar up (y $HIDDEN_Y → $UP_Y)" \
+        || fail "the edge did not bring the bar up (y $HIDDEN_Y → $UP_Y)"
+    sleep 1
+    [ "$(bar_y)" = "$UP_Y" ] && ok "the bar stays up under a pointer that came from the edge" \
+        || fail "the bar left a pointer that came from the edge (y $(bar_y))"
+
+    xdotool mousemove 100 100
+    sleep 1
+    for _ in $(seq 1 30); do [ "$(bar_y)" -ge 790 ] 2>/dev/null && break; sleep 0.1; done
+    [ "$(bar_y)" = "$HIDDEN_Y" ] && ok "and it goes when the pointer does" \
+        || fail "the bar stayed up after the pointer left (y $(bar_y))"
+    call SetAppearance "{'auto_hide': <false>}" >/dev/null
+    sleep 0.5
+else
+    echo "  skip  xdotool is not installed, so the edge is not checked"
+fi
+
 # The air over a resting bar is the screen's. The window is the bar plus the
 # room a magnified icon rises and spreads into, drawn transparent — and until
 # the window was given an input shape, a click there went to the dock and did

@@ -132,6 +132,9 @@ struct Hide {
     bar: Rc<RefCell<Option<gtk::Widget>>>,
     /// The pointer is on the window, the air over the bar included.
     inside: Rc<Cell<bool>>,
+    /// The strip along the screen edge that a hidden bar is reached from.
+    /// `None` until it is made, and in tests that have only a window.
+    edge: Rc<RefCell<Option<gtk::Window>>>,
 }
 
 /// Which part of the dock's window answers the pointer.
@@ -168,6 +171,18 @@ fn reach(shown: bool, inside: bool) -> Reach {
     }
 }
 
+/// Whether the strip along the screen edge is up.
+///
+/// While the bar is hidden, and for the rest of a slide back up: taken away
+/// at the start of one, a pointer that left during it would be on nothing of
+/// the dock's, the leave would never come and the bar would stay up. A dock
+/// that stepped aside for a fullscreen window has no edge either — the
+/// screen is that window's, and the bottom rows of a video are not to be
+/// clicked through.
+fn edge_stands(enabled: bool, shown: bool, sliding: bool, on_screen: bool) -> bool {
+    enabled && on_screen && (!shown || sliding)
+}
+
 /// How often a drag over the dock is asked whether it is still there.
 const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -188,6 +203,7 @@ impl Default for Hide {
             dragging: Rc::new(Cell::new(false)),
             bar: Rc::new(RefCell::new(None)),
             inside: Rc::new(Cell::new(false)),
+            edge: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -415,8 +431,8 @@ impl Hide {
             return;
         }
         if self.turn(to_shown, Instant::now()) {
-            self.reach(window);
             self.run(window);
+            self.reach(window);
         }
     }
 
@@ -440,6 +456,7 @@ impl Hide {
 
     /// Tell the window which part of it answers the pointer. See [`Reach`].
     fn reach(&self, window: &gtk::Window) {
+        self.fit_edge(window);
         let Some(bar) = self.bar.borrow().clone() else {
             return;
         };
@@ -459,6 +476,81 @@ impl Hide {
             }
         };
         window.input_shape_combine_region(region.as_ref());
+    }
+
+    /// Make the strip a hidden bar is reached from, and hear the pointer on it.
+    ///
+    /// #18, item 12. What can be pointed at on a hidden bar is the window, and
+    /// what is left of the window is the two pixels of the peek; the input
+    /// region of a window cannot pass its own edges, so a wider edge has to
+    /// be a window of its own. It is told what the window itself is told, so
+    /// to auto-hide and to the intent delays it is simply more of the dock.
+    ///
+    /// Popup, so that no window manager places it or lists it, and drawn
+    /// empty: on a composited desktop nothing shows. The price is the one the
+    /// peek already charged, a little taller — while the bar is hidden, a
+    /// click in the bottom [`motion::EDGE`] pixels under it lands on nothing.
+    fn reached_from_edge(&self, window: &gtk::Window) -> gtk::Window {
+        let edge = gtk::Window::new(gtk::WindowType::Popup);
+        edge.set_app_paintable(true);
+        edge.set_accept_focus(false);
+        if let Some(visual) = gtk::prelude::WidgetExt::screen(&edge).and_then(|s| s.rgba_visual()) {
+            edge.set_visual(Some(&visual));
+        }
+        edge.connect_draw(|_, cr| {
+            cr.set_operator(gtk::cairo::Operator::Source);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+            let _ = cr.paint();
+            glib::Propagation::Stop
+        });
+        edge.add_events(gdk::EventMask::ENTER_NOTIFY_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+
+        let arriving = self.clone();
+        let dock = window.clone();
+        edge.connect_enter_notify_event(move |_, _| {
+            arriving.pointing(&dock, true);
+            arriving.intend(&dock, true);
+            glib::Propagation::Proceed
+        });
+        let leaving = self.clone();
+        let dock = window.clone();
+        edge.connect_leave_notify_event(move |edge, _| {
+            // Taken away from under the pointer, which stayed where it was:
+            // that is the bar arriving, and the pointer is on it now. Heard
+            // as a departure it would shrink the window's reach to the bar,
+            // and a pointer on the air beside it would send the bar away
+            // again, to come back again, for as long as it rested there.
+            if edge.is_visible() {
+                leaving.pointing(&dock, false);
+                leaving.intend(&dock, false);
+            }
+            glib::Propagation::Proceed
+        });
+
+        self.edge.replace(Some(edge.clone()));
+        self.fit_edge(window);
+        edge
+    }
+
+    /// Put the strip where the bar's bottom is, or take it away.
+    fn fit_edge(&self, window: &gtk::Window) {
+        let Some(edge) = self.edge.borrow().clone() else {
+            return;
+        };
+        if !edge_stands(
+            self.enabled.get(),
+            self.shown.get(),
+            self.ticking.get(),
+            window.is_visible(),
+        ) {
+            edge.hide();
+            return;
+        }
+        let width = window.allocated_width().max(1);
+        edge.set_size_request(width, motion::EDGE);
+        edge.resize(width, motion::EDGE);
+        edge.move_(self.x.get(), motion::edge_y(self.shown_y.get(), self.height.get()));
+        edge.show();
     }
 
     /// Point the slide the other way at `now`, from where it is. `false` when
@@ -484,6 +576,7 @@ impl Hide {
             moving.move_(hide.x.get(), hide.y());
             if hide.since.get().elapsed() >= motion::SLIDE {
                 hide.ticking.set(false);
+                hide.fit_edge(&moving);
                 return glib::ControlFlow::Break;
             }
             glib::ControlFlow::Continue
@@ -539,6 +632,7 @@ async fn drive(
         glib::Propagation::Proceed
     });
     hide.reaches_through(&window, &bar);
+    let edge = hide.reached_from_edge(&window);
     tiles.grips(moving_tiles(
         &tiles,
         &items,
@@ -550,7 +644,15 @@ async fn drive(
     // The whole window takes part in a drag, so that a drag reaching the
     // sliver of a hidden bar is heard; the row is a drop target of its own.
     window.drag_dest_set(gtk::DestDefaults::empty(), &[], gdk::DragAction::COPY);
-    hide.follows_drags(&window, &[window.clone().upcast(), icons.area.clone().upcast()]);
+    edge.drag_dest_set(gtk::DestDefaults::empty(), &[], gdk::DragAction::COPY);
+    hide.follows_drags(
+        &window,
+        &[
+            window.clone().upcast(),
+            edge.upcast(),
+            icons.area.clone().upcast(),
+        ],
+    );
 
     icons.serve(proxy.clone());
     let keys = keys::Keyboard::new(&window, &icons, tiles.clone(), &label, hide.clone());
@@ -1633,7 +1735,7 @@ async fn rebuild(
     keys.refresh();
 
     let width = if covered {
-        step_aside(window)
+        step_aside(window, hide)
     } else {
         seat(window, bar, screen, row, &tiles, hide, auto_hide)
     };
@@ -1675,10 +1777,11 @@ async fn rebuild(
 /// Taken off the screen rather than slid away: a video or a game owns the
 /// whole of it, peek included, and the strut goes with the window — an
 /// unmapped dock reserves nothing, so there is nothing left to fight.
-fn step_aside(window: &gtk::Window) -> i32 {
+fn step_aside(window: &gtk::Window, hide: &Hide) -> i32 {
     if window.is_visible() {
         tracing::info!("a fullscreen window is active; the dock steps aside");
         window.hide();
+        hide.fit_edge(window);
     }
     0
 }
@@ -1943,6 +2046,7 @@ fn on_a_display() {
 
     dock::tests::an_icon_for_a_dense_screen_has_the_pixels_to_fill_it();
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
+    hide_tests::the_edge_stands_for_a_hidden_bar_and_only_for_one();
     hide_tests::a_bar_held_still_is_where_it_was_sent_at_once();
     hide_tests::a_bar_turned_round_mid_slide_never_jumps();
     hide_tests::a_pointer_that_stays_is_an_arrival();
@@ -2129,6 +2233,42 @@ pub mod hide_tests {
         hide.settle();
         assert!(!hide.shown.get(), "the bar did not go away when asked");
         (window, hide)
+    }
+
+    /// #18, item 12: the strip is at the bottom of the bar, as wide as the
+    /// window and taller than the peek, and it goes when the bar has come up
+    /// or the dock has stepped aside.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn the_edge_stands_for_a_hidden_bar_and_only_for_one() {
+        let (window, hide) = hidden_bar();
+        window.show_all();
+        waiting(motion::FRAME * 2);
+        let edge = hide.reached_from_edge(&window);
+        waiting(motion::SLIDE + motion::FRAME * 2);
+
+        assert!(edge.is_visible(), "a hidden bar had no edge to reach it from");
+        assert_eq!(edge.allocated_height(), motion::EDGE);
+        assert_eq!(edge.allocated_width(), window.allocated_width());
+        assert_eq!(edge.position(), (0, motion::edge_y(500, 60)));
+
+        hide.slide(&window, true);
+        assert!(edge.is_visible(), "the edge went before the bar had arrived");
+        waiting(motion::SLIDE + motion::FRAME * 4);
+        assert!(!edge.is_visible(), "the edge stayed over a bar that had come up");
+
+        hide.slide(&window, false);
+        assert!(edge.is_visible(), "a bar on its way out could not be called back");
+        waiting(motion::SLIDE + motion::FRAME * 4);
+        crate::step_aside(&window, &hide);
+        assert!(!edge.is_visible(), "the edge stayed over a fullscreen window");
+
+        window.show();
+        hide.place(&window, 0, 500, 60, false);
+        assert!(!edge.is_visible(), "a dock with auto-hide off kept its edge");
+        edge.close();
+        window.close();
+        waiting(std::time::Duration::from_millis(20));
     }
 
     /// With animations off, the bar does not slide: it is where it was sent
@@ -2495,6 +2635,25 @@ pub mod hide_tests {
         );
         window.close();
         waiting(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::edge_stands;
+
+    #[test]
+    fn a_bar_on_its_way_up_keeps_its_edge_until_it_arrives() {
+        assert!(edge_stands(true, false, false, true), "hidden");
+        assert!(edge_stands(true, false, true, true), "going down");
+        assert!(edge_stands(true, true, true, true), "coming up");
+        assert!(!edge_stands(true, true, false, true), "up");
+    }
+
+    #[test]
+    fn no_auto_hide_or_no_dock_on_screen_has_no_edge() {
+        assert!(!edge_stands(false, false, false, true));
+        assert!(!edge_stands(true, false, false, false));
     }
 }
 
