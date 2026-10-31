@@ -56,6 +56,12 @@ pub const UNKNOWN: usize = 2;
 /// in question has a key for.
 pub type Write = Rc<dyn Fn(&str, &str)>;
 
+/// What a row says while it is being typed into, for whoever shows it: told
+/// every change, and `None` when the panel comes down. Nothing goes to the
+/// daemon from here — that is `Write`, once the typing has stopped — so it
+/// can afford to be told at every key.
+pub type Typed = Rc<dyn Fn(&str, Option<&str>)>;
+
 /// Everything a panel's rows can ask the daemon for.
 ///
 /// One value rather than two arguments, because every row that needs either
@@ -64,6 +70,7 @@ pub type Write = Rc<dyn Fn(&str, &str)>;
 pub struct Asks {
     pub invoke: Invoke,
     pub write: Write,
+    pub typed: Typed,
     pub choose: Choose,
 }
 
@@ -581,7 +588,7 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, 
         // Never told what the note now says: the newest note is the one
         // being typed here, and the daemon's echo of it would put the cursor
         // back at the start of a word.
-        Row::Text { value } => (text_row(menu, id, value, &asks.write), None),
+        Row::Text { value } => (text_row(menu, id, value, &asks.write, &asks.typed), None),
         Row::Figure { name, value } => {
             let named = gtk::Label::new(Some(name));
             named.set_xalign(0.0);
@@ -823,7 +830,13 @@ fn chooses(key: gdk::keys::Key) -> bool {
 /// keystroke, and a write only on close loses whatever was not closed. The
 /// quiet interval means at most a moment of typing is ever at risk, and the
 /// close catches the last word of it.
-fn text_row(menu: &gtk::Menu, id: &str, value: &str, write: &Write) -> gtk::MenuItem {
+fn text_row(
+    menu: &gtk::Menu,
+    id: &str,
+    value: &str,
+    write: &Write,
+    typed: &Typed,
+) -> gtk::MenuItem {
     let text = gtk::TextView::new();
     text.set_widget_name("panel-text");
     text.set_wrap_mode(gtk::WrapMode::WordChar);
@@ -837,6 +850,16 @@ fn text_row(menu: &gtk::Menu, id: &str, value: &str, write: &Write) -> gtk::Menu
 
     let row = gtk::MenuItem::new();
     row.add(&frame);
+
+    // A panel opened to write in is ready to be written in. Nothing else
+    // would give the text the focus: a menu has none to pass on, and the
+    // keys below are only handed over to a text that has it.
+    text.connect_map(|text| text.grab_focus());
+
+    // A click is the cursor being put somewhere, not the row being chosen.
+    // Left to the shell, the release takes the panel down, and whatever was
+    // being written with it. See `stays_up`.
+    row.connect_button_release_event(|_, _| glib::Propagation::Stop);
 
     // The keys, handed over.
     let typing = text.clone();
@@ -853,7 +876,9 @@ fn text_row(menu: &gtk::Menu, id: &str, value: &str, write: &Write) -> gtk::Menu
     let buffer = text.buffer().expect("a text view has a buffer");
     let waiting = quiet.clone();
     let after_quiet = saving.clone();
-    buffer.connect_changed(move |_| {
+    let (showing, named) = (typed.clone(), id.to_string());
+    buffer.connect_changed(move |buffer| {
+        showing(&named, Some(&current(buffer)));
         if let Some(pending) = waiting.replace(None) {
             pending.remove();
         }
@@ -869,11 +894,13 @@ fn text_row(menu: &gtk::Menu, id: &str, value: &str, write: &Write) -> gtk::Menu
     // And once more on the way down, for the word that was still being typed.
     let on_close = saving.clone();
     let pending = quiet.clone();
+    let (showing, named) = (typed.clone(), id.to_string());
     menu.connect_unmap(move |_| {
         if let Some(waiting) = pending.replace(None) {
             waiting.remove();
         }
         on_close();
+        showing(&named, None);
     });
 
     row
@@ -1135,6 +1162,10 @@ pub mod tests {
         Rc::new(|_: &str, _: &str| {})
     }
 
+    fn shows_nothing() -> Typed {
+        Rc::new(|_: &str, _: Option<&str>| {})
+    }
+
     fn writes_nothing() -> Write {
         Rc::new(|_: &str, _: &str| {})
     }
@@ -1144,7 +1175,12 @@ pub mod tests {
     }
 
     fn asks_nothing() -> Asks {
-        Asks { invoke: invokes_nothing(), write: writes_nothing(), choose: chooses_nothing() }
+        Asks {
+            invoke: invokes_nothing(),
+            write: writes_nothing(),
+            typed: shows_nothing(),
+            choose: chooses_nothing(),
+        }
     }
 
     /// Let GTK get on with whatever the last call asked for.
@@ -1600,6 +1636,68 @@ pub mod tests {
         }
     }
 
+    /// The text view inside a panel, wherever the row put it.
+    fn text_view_in(widget: &gtk::Widget) -> Option<gtk::TextView> {
+        if let Some(text) = widget.downcast_ref::<gtk::TextView>() {
+            return Some(text.clone());
+        }
+        widget
+            .downcast_ref::<gtk::Container>()?
+            .children()
+            .iter()
+            .find_map(text_view_in)
+    }
+
+    /// Every change reaches the tile at once, and none reaches the daemon
+    /// until the typing stops: the tile keeps up without the config being
+    /// written at every key.
+    pub fn typing_is_shown_at_every_key_and_written_once() {
+        let panel = opening(Shape { rows: 1, size: None });
+        let window = a_window();
+        let (show, _) = against(&window);
+        let written = Rc::new(RefCell::new(Vec::<String>::new()));
+        let shown = Rc::new(RefCell::new(Vec::<Option<String>>::new()));
+        let noting = written.clone();
+        let write: Write = Rc::new(move |_: &str, text: &str| {
+            noting.borrow_mut().push(text.to_string())
+        });
+        let telling = shown.clone();
+        let typed: Typed = Rc::new(move |_: &str, text: Option<&str>| {
+            telling.borrow_mut().push(text.map(str::to_string))
+        });
+
+        fill(
+            &panel,
+            "note",
+            &[Row::Text { value: String::new() }],
+            &Asks { write, typed, ..asks_nothing() },
+            &show,
+            Instant::now() - SETTLED,
+        );
+        show(&panel);
+        settle();
+
+        let text = text_view_in(panel.upcast_ref()).expect("a note row has a text view");
+        assert!(text.is_focus(), "a note that opens without the focus cannot be typed into");
+        let buffer = text.buffer().expect("a text view has a buffer");
+        buffer.insert_at_cursor("m");
+        buffer.insert_at_cursor("i");
+        settle();
+
+        assert_eq!(
+            *shown.borrow(),
+            [Some("m".to_string()), Some("mi".to_string())]
+        );
+        assert!(written.borrow().is_empty(), "written while still being typed");
+
+        panel.popdown();
+        settle();
+
+        assert_eq!(shown.borrow().last(), Some(&None), "the tile was never let go of");
+        assert_eq!(*written.borrow(), ["mi"], "the last word was lost on the way down");
+        window.close();
+    }
+
     /// Closing a panel that was only read must not write anything: opening a
     /// note to look at it would otherwise touch the config every time.
     pub fn reading_a_note_and_closing_writes_nothing() {
@@ -1616,7 +1714,7 @@ pub mod tests {
             &panel,
             "note",
             &[Row::Text { value: "call the dentist".to_string() }],
-            &Asks { invoke: invokes_nothing(), write, choose: chooses_nothing() },
+            &Asks { write, ..asks_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -1950,7 +2048,7 @@ pub mod tests {
             &panel,
             "water",
             &rows,
-            &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
+            &Asks { invoke, ..asks_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -2047,7 +2145,7 @@ pub mod tests {
             &panel,
             "water",
             &rows,
-            &Asks { invoke, write: writes_nothing(), choose: chooses_nothing() },
+            &Asks { invoke, ..asks_nothing() },
             &show,
             Instant::now() - SETTLED,
         );
@@ -2189,7 +2287,7 @@ pub mod tests {
             &panel,
             "claude",
             &rows,
-            &Asks { invoke: invokes_nothing(), write: writes_nothing(), choose },
+            &Asks { choose, ..asks_nothing() },
             &show,
             Instant::now() - SETTLED,
         );

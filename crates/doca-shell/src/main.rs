@@ -1241,6 +1241,7 @@ fn expanding(
     showing: panel::Showing,
     hide: Hide,
     keys: keys::Keyboard,
+    tiles: std::rc::Weak<widget_tile::Shelf>,
 ) -> widget_tile::Expand {
     let invoke: panel::Invoke = {
         let asking = proxy.clone();
@@ -1278,6 +1279,14 @@ fn expanding(
         })
     };
 
+    // The tile keeps up with the typing on its own: this stays in the bar,
+    // so it costs a redraw and no write.
+    let typed: panel::Typed = Rc::new(move |id: &str, text: Option<&str>| {
+        if let Some(tiles) = tiles.upgrade() {
+            tiles.typing(id, text);
+        }
+    });
+
     // A setting picked in a panel goes the way the preferences window sends
     // one, so the file, the window and the panel cannot disagree.
     let choose: panel::Choose = {
@@ -1297,7 +1306,7 @@ fn expanding(
         })
     };
 
-    let asks = panel::Asks { invoke, write, choose };
+    let asks = panel::Asks { invoke, write, typed, choose };
 
     Rc::new(move |id: &str, over: &gtk::Widget| {
         let menu = panel::opening(panels.of(id));
@@ -1588,6 +1597,7 @@ async fn rebuild(
         showing.clone(),
         hide.clone(),
         keys.clone(),
+        Rc::downgrade(&tiles),
     );
     tiles.show(
         items,
@@ -1987,6 +1997,7 @@ fn on_a_display() {
     widget_tile::tests::the_bottle_holds_as_much_as_the_day_has_in_it();
     widget_tile::tests::a_calendar_tile_keeps_its_date_and_gives_up_its_list();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
+    widget_tile::tests::a_note_being_typed_is_on_the_tile_before_the_daemon_hears();
     widget_tile::tests::a_widget_that_went_takes_its_tile_off_the_bar();
     widget_tile::tests::a_widget_that_joined_grows_onto_the_bar_rather_than_appearing();
     widget_tile::tests::a_tile_that_is_leaving_keeps_its_place_until_it_has_gone();
@@ -2009,6 +2020,7 @@ fn on_a_display() {
     widget_tile::tests::a_widget_this_bar_cannot_read_still_gets_a_tile();
     widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
     panel::tests::reading_a_note_and_closing_writes_nothing();
+    panel::tests::typing_is_shown_at_every_key_and_written_once();
     panel::tests::the_weeks_bars_stand_for_the_days_they_are_drawn_from();
     panel::tests::a_panel_closes_on_escape_and_holds_the_grab_that_dismisses_it();
     panel::tests::a_panel_opens_before_the_daemon_has_answered();
