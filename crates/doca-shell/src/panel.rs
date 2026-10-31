@@ -631,9 +631,13 @@ fn drawn(menu: &gtk::Menu, id: &str, row: &Row, asks: &Asks) -> (gtk::MenuItem, 
             // around itself.
             let paint = {
                 let picture = picture.clone();
-                move |art: &str| match crate::dock::scaled_to_fill(art, COVER, COVER) {
-                    Some(pixbuf) => picture.set_from_pixbuf(Some(&pixbuf)),
-                    None => picture.clear(),
+                move |art: &str| {
+                    let density = picture.scale_factor();
+                    let side = COVER * density as f64;
+                    match crate::dock::scaled_to_fill(art, side, side) {
+                        Some(pixbuf) => crate::dock::show_dense(&picture, &pixbuf, density),
+                        None => picture.clear(),
+                    }
                 }
             };
             paint(art);

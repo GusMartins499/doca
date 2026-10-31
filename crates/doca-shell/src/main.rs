@@ -601,6 +601,14 @@ async fn drive(
     // each rebuild measures it; `screen::Stand` keeps where that was.
     let (screen_moved, screen_moves) = async_channel::unbounded::<()>();
     let mut screen_moves = Box::pin(screen_moves);
+    // A new density is a new screen as far as the bar goes: every picture on
+    // it has to be made again, and the strut said again in the new pixels.
+    {
+        let telling = screen_moved.clone();
+        window.connect_scale_factor_notify(move |_| {
+            let _ = telling.send_blocking(());
+        });
+    }
     if let Some(display_screen) = gdk::Screen::default() {
         let telling = screen_moved.clone();
         display_screen.connect_monitors_changed(move |_| {
@@ -1749,7 +1757,8 @@ fn seat(
             + screen::below(screen, &screen::connected()) as u32,
         start_x: bar_x.max(0) as u32,
         end_x: (bar_x + width).max(0) as u32,
-    };
+    }
+    .in_device_pixels(window.scale_factor());
     let xid = x11_window.xid() as u32;
     match strut::apply(xid, &reserved) {
         Ok(()) => tracing::info!(xid, height, x, width, "strut applied"),
@@ -1922,6 +1931,7 @@ fn measured() -> Option<gdk::Rectangle> {
 fn on_a_display() {
     gtk::init().expect("no X display");
 
+    dock::tests::an_icon_for_a_dense_screen_has_the_pixels_to_fill_it();
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
     hide_tests::a_bar_held_still_is_where_it_was_sent_at_once();
     hide_tests::a_bar_turned_round_mid_slide_never_jumps();

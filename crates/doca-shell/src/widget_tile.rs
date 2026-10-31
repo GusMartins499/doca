@@ -250,9 +250,16 @@ impl WidgetTile {
             return None;
         }
         let (outer_w, outer_h) = (width + CARRY_PAD * 2, height + CARRY_PAD * 2);
-        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, outer_w, outer_h).ok()?;
+        // In device pixels, the way the float takes every picture. The scale
+        // is on the context and not the surface, because
+        // `pixbuf_get_from_surface` counts raw pixels whatever a surface
+        // says its density is.
+        let density = self.area.scale_factor();
+        let (raw_w, raw_h) = (outer_w * density, outer_h * density);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, raw_w, raw_h).ok()?;
         {
             let cr = cairo::Context::new(&surface).ok()?;
+            cr.scale(density as f64, density as f64);
             let card = gtk::DrawingArea::new();
             card.set_widget_name("ground");
             let context = card.style_context();
@@ -262,7 +269,7 @@ impl WidgetTile {
             cr.translate(CARRY_PAD as f64, CARRY_PAD as f64);
             self.root.draw(&cr);
         }
-        gdk::pixbuf_get_from_surface(&surface, 0, 0, outer_w, outer_h)
+        gdk::pixbuf_get_from_surface(&surface, 0, 0, raw_w, raw_h)
     }
 
     /// Picked up, or put down. A tile in the hand is drawn by nothing: the
@@ -930,20 +937,23 @@ fn draw_music(
     width: f64,
     height: f64,
 ) {
+    let density = area.scale_factor();
     let cover = (!music.art.is_empty())
-        .then(|| crate::dock::scaled_to_fill(&music.art, width, height))
+        .then(|| {
+            let dense = density as f64;
+            crate::dock::scaled_to_fill(&music.art, width * dense, height * dense)
+        })
         .flatten();
 
     if let Some(cover) = &cover {
         let _ = cr.save();
         // Centred and cropped rather than squashed: a square cover in a wide
         // tile has to lose its edges, not its proportions.
-        let x = (width - cover.width() as f64) / 2.0;
-        let y = (height - cover.height() as f64) / 2.0;
+        let x = (width - (cover.width() / density) as f64) / 2.0;
+        let y = (height - (cover.height() / density) as f64) / 2.0;
         cr.rectangle(0.0, 0.0, width, height);
         cr.clip();
-        cr.set_source_pixbuf(cover, x, y);
-        let _ = cr.paint();
+        crate::dock::paint_dense(cr, cover, (x, y), density, 1.0);
         let _ = cr.restore();
         veil(cr, width, height);
     }

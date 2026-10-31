@@ -60,10 +60,10 @@ pub enum Dropped {
 }
 
 impl Entry {
-    fn from(item: &DockItem, largest: i32, arriving: bool) -> Self {
+    fn from(item: &DockItem, largest: i32, density: i32, arriving: bool) -> Self {
         Self {
             item: item.clone(),
-            source: crate::dock::load_pixbuf(&item.icon, largest),
+            source: crate::dock::load_pixbuf(&item.icon, largest, density),
             scaled: RefCell::new(HashMap::new()),
             launched: Cell::new(None),
             life: Cell::new(if arriving { Life::arriving() } else { Life::settled() }),
@@ -92,6 +92,7 @@ impl Entry {
         }
     }
 
+    /// The picture at `size` device pixels across.
     fn at(&self, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
         if let Some(kept) = self.scaled.borrow().get(&size) {
             return Some(kept.clone());
@@ -271,6 +272,9 @@ pub struct Row {
     lens: Rc<Cell<Option<f64>>>,
     lens_at: Rc<Cell<Instant>>,
     largest: Rc<Cell<i32>>,
+    /// Device pixels to the logical one, as of the last `fill`: the pictures
+    /// are loaded at this and painted at this, so they change together.
+    density: Rc<Cell<i32>>,
     /// When the pointer arrived or left, and which of the two it was.
     hovering: Rc<Cell<bool>>,
     hover_since: Rc<Cell<Instant>>,
@@ -353,6 +357,7 @@ impl Row {
             lens: Rc::new(Cell::new(None)),
             lens_at: Rc::new(Cell::new(Instant::now())),
             largest: Rc::new(Cell::new(0)),
+            density: Rc::new(Cell::new(1)),
             hovering: Rc::new(Cell::new(false)),
             hover_since: Rc::new(Cell::new(Instant::now() - crate::motion::ZOOM)),
             ticking: Rc::new(Cell::new(false)),
@@ -386,7 +391,10 @@ impl Row {
     /// where the pointer is or what an icon looks like.
     pub fn fill(&self, items: &[DockItem], rest: Rest) {
         let largest = (rest.icon * rest.scale).ceil() as i32;
-        let resized = largest != self.largest.replace(largest);
+        let density = self.area.scale_factor();
+        // `|`, not `||`: both have to be kept, whichever one moved.
+        let resized = (largest != self.largest.replace(largest))
+            | (density != self.density.replace(density));
         // A row that had nothing on it is not a row something arrived at.
         // Without this every icon fades in together whenever the dock starts
         // or the icon theme changes — an animation that announces nothing.
@@ -418,7 +426,7 @@ impl Row {
         let mut survived = vec![false; old.len()];
         for item in items {
             let Some(at) = was_at.remove(&item.id) else {
-                staying.push(Entry::from(item, largest, announcing));
+                staying.push(Entry::from(item, largest, density, announcing));
                 continue;
             };
             let entry = old[at].take().expect("one id, one entry");
@@ -427,7 +435,7 @@ impl Row {
                 // The same app wearing a different picture, or the same
                 // picture at a different size: a load, but not an arrival —
                 // it never left the bar, and it goes on from where it was.
-                let loaded = Entry::from(item, largest, false);
+                let loaded = Entry::from(item, largest, density, false);
                 loaded.life.set(entry.life.get());
                 loaded.glide.set(entry.glide.get());
                 loaded
@@ -842,8 +850,8 @@ impl Row {
         (rest.icon * rest.scale).round()
     }
 
-    /// The held icon's picture at `size`, for the window that carries it once
-    /// it is off the bar.
+    /// The held icon's picture at `size` logical pixels, in device pixels,
+    /// for the window that carries it once it is off the bar.
     pub fn held_picture(&self, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
         let held = self.held.borrow();
         let id = &held.as_ref()?.id;
@@ -851,7 +859,7 @@ impl Row {
             .borrow()
             .iter()
             .find(|entry| &entry.item.id == id)?
-            .at(size)
+            .at(size * self.density.get())
     }
 
     /// Carry the held icon to `x`, and move it to the slot it is over.
@@ -1155,6 +1163,7 @@ impl Row {
         }
         let bottom = area.allocated_height() as f64 - INDICATOR as f64;
         let (running_dot, active_dot) = *self.dots.borrow();
+        let density = self.density.get();
 
         let drawn = self.drawn();
         let entries = self.entries.borrow();
@@ -1176,7 +1185,7 @@ impl Row {
             let Some(entry) = entries.get(index) else {
                 continue;
             };
-            let Some(pixbuf) = entry.at(size) else {
+            let Some(pixbuf) = entry.at(size * density) else {
                 continue;
             };
             let centre = icon.placed.centre;
@@ -1194,12 +1203,8 @@ impl Row {
                 cr.scale(growth, growth);
                 cr.translate(-centre, -bottom);
             }
-            cr.set_source_pixbuf(&pixbuf, x.round(), y.round());
-            let _ = if growing.is_some() {
-                cr.paint_with_alpha(icon.presence)
-            } else {
-                cr.paint()
-            };
+            let alpha = if growing.is_some() { icon.presence } else { 1.0 };
+            crate::dock::paint_dense(cr, &pixbuf, (x, y), density, alpha);
             if growing.is_some() {
                 let _ = cr.restore();
             }

@@ -111,17 +111,12 @@ fn entry_icon(entry: &FolderEntry) -> gtk::Image {
             .unwrap_or_else(|| "text-x-generic".to_string())
     };
 
-    let image = gtk::IconTheme::default()
-        .and_then(|theme| {
-            theme
-                .load_icon(&name, ENTRY_ICON, gtk::IconLookupFlags::FORCE_SIZE)
-                .ok()
-                .flatten()
-        })
-        .map(|pixbuf| gtk::Image::from_pixbuf(Some(&pixbuf)))
-        .unwrap_or_else(|| {
-            gtk::Image::from_icon_name(Some("text-x-generic"), gtk::IconSize::Dnd)
-        });
+    let image = gtk::Image::new();
+    let density = image.scale_factor();
+    match crate::dock::load_pixbuf(&name, ENTRY_ICON, density) {
+        Some(pixbuf) => crate::dock::show_dense(&image, &pixbuf, density),
+        None => image.set_from_icon_name(Some("text-x-generic"), gtk::IconSize::Dnd),
+    }
     image.set_pixel_size(ENTRY_ICON);
     image
 }
