@@ -988,6 +988,35 @@ else
     echo "  skip  xdotool or xev missing: what the air over the bar takes is not checked"
 fi
 
+# The menu on the bar (#18, P3). Where the bar starts is read from its strut,
+# because the padding at its end is the one place that is neither an icon nor
+# a tile. Real keys choose in the menu, and the daemon says if it landed.
+if command -v xdotool >/dev/null && command -v xprop >/dev/null; then
+    DOCK=$(xdotool search --name '^Doca$' 2>/dev/null | head -1)
+    STRUT=$(xprop -id "$DOCK" _NET_WM_STRUT_PARTIAL | sed 's/.*= //; s/,//g')
+    BAR_LEFT=$(echo "$STRUT" | awk '{print $11}')
+    BAR_Y=$(( $(bar_y) + $(xwininfo -id "$DOCK" | awk '/Height/ {print $2}') - 20 ))
+    xdotool mousemove $((BAR_LEFT + 3)) "$BAR_Y"
+    sleep 0.4
+    xdotool click 3
+    sleep 0.5
+    if [ -n "$(some_menu_up)" ]; then
+        ok "a right click on the empty bar offered its menu"
+    else
+        fail "a right click on the empty bar offered nothing"
+    fi
+    xdotool key Down Down Down Return
+    sleep 0.6
+    # Toggled back: it answers with what it is now, so false means it was on.
+    [ "$(call ToggleAutoHide)" = "(false,)" ] \
+        && ok "choosing in the menu reached the daemon" \
+        || fail "the auto-hide chosen in the menu never reached the daemon"
+    xdotool mousemove 20 20
+    sleep 0.6
+else
+    echo "  skip  xdotool or xprop missing: the menu on the bar is not checked"
+fi
+
 # A pin dragged to a new place on the bar (#18, P3). Two pins and the folder,
 # no tiles and no lens, so where each icon is can be worked out from the
 # window: the bar is centred in it, three slots wide, and the second pin is

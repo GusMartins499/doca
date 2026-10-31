@@ -302,6 +302,86 @@ pub fn context_menu(
     menu
 }
 
+/// What the menu on the empty bar is built from.
+pub struct BarLook {
+    pub theme: String,
+    pub auto_hide: bool,
+    pub show_trash: bool,
+    /// The widgets on the dock showing now.
+    pub widgets: Vec<String>,
+}
+
+/// What was chosen in the menu on the empty bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarChoice {
+    Theme(String),
+    ToggleAutoHide,
+    ShowTrash(bool),
+    ToggleWidget(String),
+}
+
+/// The menu on the bar itself, for what belongs to no icon (#18, P3).
+///
+/// The look and the widgets are what a person reaches for first, and they
+/// should not need the TOML, or a whole window, to find. Only what one click
+/// settles is here; anything that takes a value stays in the preferences,
+/// which this ends with.
+///
+/// It answers with what was chosen rather than doing it, so that all of this
+/// can be checked without a daemon.
+pub fn bar_menu(look: &BarLook, choose: Rc<dyn Fn(BarChoice)>) -> gtk::Menu {
+    let menu = gtk::Menu::new();
+
+    let themes = gtk::Menu::new();
+    for name in doca_ipc::THEMES {
+        let entry = gtk::CheckMenuItem::with_label(&crate::panel::name_of(name));
+        entry.set_draw_as_radio(true);
+        entry.set_active(look.theme == name);
+        let current = look.theme == name;
+        let choosing = choose.clone();
+        entry.connect_activate(move |_| {
+            if !current {
+                choosing(BarChoice::Theme(name.to_string()));
+            }
+        });
+        themes.append(&entry);
+    }
+    let theme = gtk::MenuItem::with_label("Theme");
+    theme.set_submenu(Some(&themes));
+    menu.append(&theme);
+
+    let widgets = gtk::Menu::new();
+    for id in doca_ipc::WIDGETS {
+        let entry = gtk::CheckMenuItem::with_label(&crate::panel::name_of(id));
+        entry.set_active(look.widgets.iter().any(|shown| shown == id));
+        let choosing = choose.clone();
+        entry.connect_activate(move |_| choosing(BarChoice::ToggleWidget(id.to_string())));
+        widgets.append(&entry);
+    }
+    let widget = gtk::MenuItem::with_label("Widgets");
+    widget.set_submenu(Some(&widgets));
+    menu.append(&widget);
+
+    menu.append(&gtk::SeparatorMenuItem::new());
+
+    let auto_hide = gtk::CheckMenuItem::with_label("Hide automatically");
+    auto_hide.set_active(look.auto_hide);
+    let choosing = choose.clone();
+    auto_hide.connect_activate(move |_| choosing(BarChoice::ToggleAutoHide));
+    menu.append(&auto_hide);
+
+    let trash = gtk::CheckMenuItem::with_label("Show the trash");
+    trash.set_active(look.show_trash);
+    trash.connect_activate(move |entry| choose(BarChoice::ShowTrash(entry.is_active())));
+    menu.append(&trash);
+
+    menu.append(&gtk::SeparatorMenuItem::new());
+    menu.append(&preferences());
+
+    menu.show_all();
+    menu
+}
+
 /// The way into the preferences window from the dock itself.
 ///
 /// This is the hole Plank leaves: its own preferences are only reachable by
@@ -381,6 +461,80 @@ pub fn covered_by_fullscreen(windows: &[doca_ipc::WindowInfo]) -> bool {
 
 #[cfg(test)]
 pub mod tests {
+    /// Choosing in the menu on the empty bar says what was chosen, and the
+    /// marks in it are what the bar is showing.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn the_menu_on_the_bar_shows_the_look_and_says_what_was_chosen() {
+        use std::cell::RefCell;
+
+        fn entries(menu: &gtk::Menu) -> Vec<gtk::MenuItem> {
+            menu.children()
+                .into_iter()
+                .filter_map(|child| child.downcast::<gtk::MenuItem>().ok())
+                .collect()
+        }
+        fn labelled(menu: &gtk::Menu, label: &str) -> gtk::MenuItem {
+            entries(menu)
+                .into_iter()
+                .find(|entry| entry.label().as_deref() == Some(label))
+                .unwrap_or_else(|| panic!("no {label} in the menu"))
+        }
+        fn opened(entry: gtk::MenuItem) -> gtk::Menu {
+            entry
+                .submenu()
+                .and_then(|menu| menu.downcast::<gtk::Menu>().ok())
+                .expect("a submenu")
+        }
+        fn ticked(entry: &gtk::MenuItem) -> bool {
+            entry
+                .downcast_ref::<gtk::CheckMenuItem>()
+                .expect("a check item")
+                .is_active()
+        }
+
+        let chosen: Rc<RefCell<Vec<BarChoice>>> = Rc::default();
+        let hearing = chosen.clone();
+        let menu = bar_menu(
+            &BarLook {
+                theme: "paper".to_string(),
+                auto_hide: true,
+                show_trash: false,
+                widgets: vec!["water".to_string()],
+            },
+            Rc::new(move |choice| hearing.borrow_mut().push(choice)),
+        );
+
+        let themes = opened(labelled(&menu, "Theme"));
+        assert_eq!(entries(&themes).len(), doca_ipc::THEMES.len());
+        assert!(ticked(&labelled(&themes, "Paper")));
+        assert!(!ticked(&labelled(&themes, "Midnight")));
+        let widgets = opened(labelled(&menu, "Widgets"));
+        assert_eq!(entries(&widgets).len(), doca_ipc::WIDGETS.len());
+        assert!(ticked(&labelled(&widgets, "Water")));
+        assert!(!ticked(&labelled(&widgets, "Clock")));
+        assert!(ticked(&labelled(&menu, "Hide automatically")));
+        assert!(!ticked(&labelled(&menu, "Show the trash")));
+        assert!(chosen.borrow().is_empty(), "showing what is true chose something");
+
+        labelled(&themes, "Paper").activate();
+        assert!(chosen.borrow().is_empty(), "the theme in force was chosen again");
+
+        labelled(&themes, "Midnight").activate();
+        labelled(&widgets, "Clock").activate();
+        labelled(&menu, "Hide automatically").activate();
+        labelled(&menu, "Show the trash").activate();
+        assert_eq!(
+            *chosen.borrow(),
+            vec![
+                BarChoice::Theme("midnight".to_string()),
+                BarChoice::ToggleWidget("clock".to_string()),
+                BarChoice::ToggleAutoHide,
+                BarChoice::ShowTrash(true),
+            ]
+        );
+    }
+
     /// The whole of what "sharp" means: on a surface twice as dense, a
     /// picture made at twice the pixels arrives without one being invented.
     /// A checkerboard is what resampling would visibly blur to grey.
