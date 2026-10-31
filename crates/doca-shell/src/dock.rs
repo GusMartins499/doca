@@ -103,8 +103,9 @@ pub fn overflow_grid(
     for (index, item) in items.iter().enumerate() {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
         let picture = gtk::Image::new();
-        if let Some(pixbuf) = load_pixbuf(&item.icon, icon_size) {
-            picture.set_from_pixbuf(Some(&pixbuf));
+        let density = picture.scale_factor();
+        if let Some(pixbuf) = load_pixbuf(&item.icon, icon_size, density) {
+            show_dense(&picture, &pixbuf, density);
         }
         column.add(&picture);
 
@@ -158,10 +159,13 @@ pub fn scaled_from_file(path: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf
     gdk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, size, size, true).ok()
 }
 
-pub fn load_pixbuf(name: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
+/// An icon `size` logical pixels across, made at `density` device pixels to
+/// each of them — so what comes back is `size * density` wide, and it is
+/// `paint_dense` or `show_dense` that puts it on screen at `size`.
+pub fn load_pixbuf(name: &str, size: i32, density: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
     let from_theme = gtk::IconTheme::default().and_then(|theme| {
         theme
-            .load_icon(name, size, gtk::IconLookupFlags::FORCE_SIZE)
+            .load_icon_for_scale(name, size, density, gtk::IconLookupFlags::FORCE_SIZE)
             .ok()
             .flatten()
     });
@@ -169,9 +173,38 @@ pub fn load_pixbuf(name: &str, size: i32) -> Option<gdk::gdk_pixbuf::Pixbuf> {
     from_theme.or_else(|| {
         std::path::Path::new(name)
             .is_absolute()
-            .then(|| scaled_from_file(name, size))
+            .then(|| scaled_from_file(name, size * density))
             .flatten()
     })
+}
+
+/// Paint a picture made at `density` with its corner at logical `(x, y)`.
+///
+/// A pixbuf has no idea how dense it is: painted as it comes on a HiDPI
+/// screen it is doubled by the surface and comes out twice the size, or was
+/// made small and comes out stretched. So the scale is undone for the length
+/// of the paint and the picture lands pixel for pixel, on a device pixel.
+pub fn paint_dense(
+    cr: &gtk::cairo::Context,
+    picture: &gdk::gdk_pixbuf::Pixbuf,
+    (x, y): (f64, f64),
+    density: i32,
+    alpha: f64,
+) {
+    let density = density as f64;
+    let _ = cr.save();
+    cr.scale(1.0 / density, 1.0 / density);
+    cr.set_source_pixbuf(picture, (x * density).round(), (y * density).round());
+    let _ = cr.paint_with_alpha(alpha);
+    let _ = cr.restore();
+}
+
+/// `paint_dense` for a `gtk::Image`, which takes a surface that knows its
+/// own density where a pixbuf would be laid out at one logical pixel each.
+pub fn show_dense(image: &gtk::Image, picture: &gdk::gdk_pixbuf::Pixbuf, density: i32) {
+    use gdk::prelude::GdkPixbufExt;
+    let surface = picture.create_surface(density, None::<&gdk::Window>);
+    image.set_from_surface(surface.as_ref());
 }
 
 fn elide(text: &str, limit: usize) -> String {
@@ -348,6 +381,47 @@ pub fn covered_by_fullscreen(windows: &[doca_ipc::WindowInfo]) -> bool {
 
 #[cfg(test)]
 pub mod tests {
+    /// The whole of what "sharp" means: on a surface twice as dense, a
+    /// picture made at twice the pixels arrives without one being invented.
+    /// A checkerboard is what resampling would visibly blur to grey.
+    #[test]
+    fn a_dense_picture_lands_pixel_for_pixel() {
+        use gtk::cairo;
+        const SIDE: i32 = 8;
+
+        let picture = gdk::gdk_pixbuf::Pixbuf::new(
+            gdk::gdk_pixbuf::Colorspace::Rgb,
+            true,
+            8,
+            SIDE,
+            SIDE,
+        )
+        .expect("a pixbuf");
+        for y in 0..SIDE as u32 {
+            for x in 0..SIDE as u32 {
+                let shade = if (x + y) % 2 == 0 { 255 } else { 0 };
+                picture.put_pixel(x, y, shade, shade, shade, 255);
+            }
+        }
+
+        let mut surface =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, SIDE, SIDE).expect("no surface");
+        surface.set_device_scale(2.0, 2.0);
+        {
+            let cr = cairo::Context::new(&surface).expect("no context");
+            super::paint_dense(&cr, &picture, (0.0, 0.0), 2, 1.0);
+        }
+
+        let stride = surface.stride() as usize;
+        let pixels = surface.data().expect("the surface is ours");
+        for y in 0..SIDE as usize {
+            for x in 0..SIDE as usize {
+                let expected = if (x + y) % 2 == 0 { 255 } else { 0 };
+                assert_eq!(pixels[y * stride + x * 4], expected, "at ({x}, {y})");
+            }
+        }
+    }
+
     #[test]
     fn only_a_fullscreen_window_in_front_sends_the_dock_away() {
         let window = |active: bool, fullscreen: bool| doca_ipc::WindowInfo {
@@ -411,6 +485,15 @@ pub mod tests {
 
         assert_eq!(pixbuf.width(), ICON_SIZE);
         assert_eq!(pixbuf.height(), ICON_SIZE);
+    }
+
+    pub fn an_icon_for_a_dense_screen_has_the_pixels_to_fill_it() {
+        let docker_sized = write_square_png(1024);
+
+        let dense = load_pixbuf(&docker_sized, ICON_SIZE, 2).unwrap();
+
+        assert_eq!(dense.width(), ICON_SIZE * 2);
+        assert_eq!(dense.height(), ICON_SIZE * 2);
     }
 
     #[test]

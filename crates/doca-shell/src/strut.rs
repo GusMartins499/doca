@@ -18,6 +18,20 @@ pub struct BottomStrut {
     pub end_x: u32,
 }
 
+impl BottomStrut {
+    /// The same strut in device pixels. GDK measures in logical pixels; a
+    /// strut is a raw X property that the window manager reads in the
+    /// screen's own, so on HiDPI a logical one reserves half the bar.
+    pub fn in_device_pixels(&self, density: i32) -> Self {
+        let density = density.max(1) as u32;
+        Self {
+            height: self.height * density,
+            start_x: self.start_x * density,
+            end_x: self.end_x * density,
+        }
+    }
+}
+
 pub fn apply(xid: u32, strut: &BottomStrut) -> Result<()> {
     let (conn, _) = x11rb::connect(None).context("cannot open an X11 display")?;
 
@@ -75,6 +89,19 @@ mod tests {
     #[test]
     fn a_bar_that_stays_put_reserves_its_whole_height() {
         assert_eq!(reserved_height(84, false), 84);
+    }
+
+    #[test]
+    fn a_strut_is_said_in_the_pixels_the_window_manager_reads() {
+        let logical = BottomStrut {
+            height: 84,
+            start_x: 100,
+            end_x: 900,
+        };
+
+        let device = logical.in_device_pixels(2);
+
+        assert_eq!((device.height, device.start_x, device.end_x), (168, 200, 1800));
     }
 
     #[test]

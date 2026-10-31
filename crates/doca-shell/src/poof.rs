@@ -62,11 +62,10 @@ impl Float {
         let window = bare(gdk::WindowTypeHint::Dnd);
         let picture: Rc<std::cell::RefCell<Option<gdk_pixbuf::Pixbuf>>> = Rc::default();
         let drawing = picture.clone();
-        window.connect_draw(move |_, cr| {
+        window.connect_draw(move |window, cr| {
             clear(cr);
             if let Some(picture) = drawing.borrow().as_ref() {
-                cr.set_source_pixbuf(picture, 0.0, 0.0);
-                let _ = cr.paint();
+                crate::dock::paint_dense(cr, picture, (0.0, 0.0), window.scale_factor(), 1.0);
             }
             glib::Propagation::Stop
         });
@@ -77,9 +76,17 @@ impl Float {
         }
     }
 
-    /// Carry this picture with its centre at `at`, in root coordinates.
+    /// How big a picture in device pixels is on this window, in logical ones.
+    fn logical(&self, picture: &gdk_pixbuf::Pixbuf) -> (i32, i32) {
+        let density = self.window.scale_factor();
+        (picture.width() / density, picture.height() / density)
+    }
+
+    /// Carry this picture, in device pixels, with its centre at `at`, in root
+    /// coordinates.
     pub fn carry(&self, picture: gdk_pixbuf::Pixbuf, at: (f64, f64)) {
-        let grab = (picture.width() as f64 / 2.0, picture.height() as f64 / 2.0);
+        let (width, height) = self.logical(&picture);
+        let grab = (width as f64 / 2.0, height as f64 / 2.0);
         self.carry_from(picture, at, grab);
     }
 
@@ -87,7 +94,7 @@ impl Float {
     /// tile picked up by its end stays held by its end.
     pub fn carry_from(&self, picture: gdk_pixbuf::Pixbuf, at: (f64, f64), grab: (f64, f64)) {
         self.grab.set(grab);
-        let size = (picture.width(), picture.height());
+        let size = self.logical(&picture);
         self.picture.replace(Some(picture));
         self.window.set_size_request(size.0, size.1);
         self.window.resize(size.0, size.1);
