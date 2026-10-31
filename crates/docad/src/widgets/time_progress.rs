@@ -71,15 +71,11 @@ pub fn fraction(span: Span, days_since_epoch: i64, second_of_day: i64) -> f64 {
 
 pub struct TimeProgress {
     span: Span,
-    offset: i64,
 }
 
 impl TimeProgress {
     pub fn new() -> Self {
-        Self {
-            span: Span::Day,
-            offset: super::clock::local_offset_seconds(),
-        }
+        Self { span: Span::Day }
     }
 }
 
@@ -101,7 +97,7 @@ impl Widget for TimeProgress {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
-            + self.offset;
+            + super::clock::local_offset_seconds();
         let fraction = fraction(self.span, now.div_euclid(86_400), now.rem_euclid(86_400));
 
         WidgetState::new(

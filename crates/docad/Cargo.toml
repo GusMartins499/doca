@@ -17,7 +17,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 x11rb = { version = "0.13", features = ["xtest"] }
 async-channel = "2"
-toml = "0.8"
+toml = "1"
 toml_edit = "0.25"
 # Remote album covers. Blocking and small, which is what the widget side of
 # the daemon is: plain threads, no runtime. rustls rather than native-tls so
