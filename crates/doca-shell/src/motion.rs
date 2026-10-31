@@ -7,6 +7,12 @@ pub const SLIDE: Duration = Duration::from_millis(160);
 #[cfg(test)]
 pub const FRAME: Duration = Duration::from_millis(16);
 pub const PEEK: i32 = 2;
+/// How far up from the screen edge a hidden bar can be reached from.
+///
+/// Three times what shows of it. A little goes a long way at an edge the
+/// pointer stops at, and every pixel of this is one a window under a hidden
+/// bar cannot be clicked on.
+pub const EDGE: i32 = 6;
 
 /// How long the pointer has to stay at the edge before the bar comes up.
 ///
@@ -295,6 +301,12 @@ pub fn hidden_y(shown_y: i32, height: i32) -> i32 {
     shown_y + height - PEEK
 }
 
+/// The top of the strip a hidden bar is reached from. The bottom of the shown
+/// bar is the bottom of the screen, wherever the bar happens to be.
+pub fn edge_y(shown_y: i32, height: i32) -> i32 {
+    shown_y + height - EDGE
+}
+
 pub fn launch_scale(elapsed: Duration) -> f64 {
     if elapsed >= LAUNCH || still() {
         return 1.0;
@@ -357,6 +369,8 @@ mod tests {
 
         assert_eq!(hidden, SHOWN + HEIGHT - PEEK);
         assert!(PEEK > 0, "a bar with nothing on screen can never be summoned");
+        assert!(EDGE > PEEK, "the edge is what makes the peek more than a sliver to hit");
+        assert_eq!(edge_y(SHOWN, HEIGHT) + EDGE, SHOWN + HEIGHT);
     }
 
     #[test]
