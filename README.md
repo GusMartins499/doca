@@ -406,6 +406,9 @@ there is only one environment, which is the only case with nowhere to go.
 doca-prefs
 ```
 
+Right-clicking the bar outside an icon or a tile offers what one click settles:
+the theme, the widgets on this dock, auto-hide, the trash, and **Preferences…**.
+
 Also from **right-clicking the dock → Preferences…**, and from the applications
 menu once `packaging/doca-prefs.desktop` is installed. It is single-instance:
 opening it again brings the window you have to the front rather than starting a

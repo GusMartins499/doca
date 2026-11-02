@@ -15,6 +15,7 @@ mod theme;
 mod tooltip;
 mod widget_tile;
 
+use std::collections::HashMap;
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 use std::rc::Rc;
@@ -183,6 +184,14 @@ fn reach(shown: bool, inside: bool) -> Reach {
 /// clicked through.
 fn edge_stands(enabled: bool, shown: bool, sliding: bool, on_screen: bool) -> bool {
     enabled && on_screen && (!shown || sliding)
+}
+
+/// Whether a point falls in a rectangle of left, top, width and height.
+fn within((x, y): (f64, f64), (left, top, width, height): (i32, i32, i32, i32)) -> bool {
+    x >= left as f64
+        && y >= top as f64
+        && x < (left + width) as f64
+        && y < (top + height) as f64
 }
 
 /// How often a drag over the dock is asked whether it is still there.
@@ -466,6 +475,22 @@ impl Hide {
         let reaching = self.clone();
         let window = window.clone();
         bar.connect_size_allocate(move |_, _| reaching.reach(&window));
+    }
+
+    /// Whether a point on the screen is on the bar, rather than on the air
+    /// around it: the air is nobody's to right-click.
+    fn on_the_bar(&self, window: &gtk::Window, root: (f64, f64)) -> bool {
+        let (Some(bar), Some(surface)) = (self.bar.borrow().clone(), window.window()) else {
+            return false;
+        };
+        let Some((x, y)) = bar.translate_coordinates(window, 0, 0) else {
+            return false;
+        };
+        let (_, left, top) = surface.origin();
+        within(
+            root,
+            (left + x, top + y, bar.allocated_width(), bar.allocated_height()),
+        )
     }
 
     /// The pointer came onto the window, or left it.
@@ -887,6 +912,17 @@ fn wire(
     // the keyboard as well as run here — so `Enter` cannot do something a
     // left click would not, nor `Menu` something a right click would not.
     let choose = choosing(icons, proxy.clone(), folders, window.clone(), hide.clone(), keys.clone());
+    // The bar's own right click: from the row, for a gap between icons, and
+    // from the window, for the bar around the row and the tiles.
+    let offer_bar = offering_the_bar(proxy.clone(), window.clone(), hide.clone(), keys.clone());
+    let offering_bar = offer_bar.clone();
+    window.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
+    window.connect_button_press_event(move |_, event| {
+        if event.button() == 3 {
+            offering_bar(event);
+        }
+        glib::Propagation::Proceed
+    });
     let offer = offering(
         icons,
         proxy.clone(),
@@ -963,6 +999,9 @@ fn wire(
     icons.area.connect_button_press_event(move |_, event| {
         clicked_label.hide();
         let Some((index, item)) = clicked.item_at(event.position().0) else {
+            if event.button() == 3 {
+                offer_bar(event);
+            }
             return glib::Propagation::Stop;
         };
         match event.button() {
@@ -1220,6 +1259,72 @@ fn offering(
                     // and Enter has something to choose.
                     menu.select_first(false);
                 }
+            }
+        });
+    })
+}
+
+/// The right click that lands on the bar and on nothing on it.
+fn offering_the_bar(
+    proxy: Rc<DocaProxy<'static>>,
+    window: gtk::Window,
+    hide: Hide,
+    keys: keys::Keyboard,
+) -> Rc<dyn Fn(&gdk::EventButton)> {
+    Rc::new(move |click: &gdk::EventButton| {
+        if !hide.on_the_bar(&window, click.root()) {
+            return;
+        }
+        let click: gdk::Event = (**click).clone();
+        let (proxy, holding, under, keys) = (proxy.clone(), hide.clone(), window.clone(), keys.clone());
+        glib::spawn_future_local(async move {
+            let Ok(appearance) = proxy.appearance().await else {
+                tracing::warn!("no look to offer: the daemon did not answer");
+                return;
+            };
+            let widgets = proxy.list_widgets().await.unwrap_or_default();
+            let look = dock::BarLook {
+                theme: appearance.theme,
+                auto_hide: appearance.auto_hide,
+                show_trash: appearance.show_trash,
+                widgets: widgets.into_iter().map(|state| state.id).collect(),
+            };
+            let menu = dock::bar_menu(&look, carrying_out(proxy.clone()));
+            holding.holds_for(&under, &menu);
+            keys.watches(&menu);
+            tracing::debug!("the bar offered its menu");
+            menu.popup_at_pointer(Some(&click));
+        });
+    })
+}
+
+/// Tell the daemon what was chosen on the bar. The bar hears it back like
+/// any other change to the config, so nothing is changed here.
+fn carrying_out(proxy: Rc<DocaProxy<'static>>) -> Rc<dyn Fn(dock::BarChoice)> {
+    use doca_ipc::appearance_key as key;
+
+    Rc::new(move |choice| {
+        let proxy = proxy.clone();
+        glib::spawn_future_local(async move {
+            let set = |name: &str, value: zbus::zvariant::Value<'_>| {
+                value
+                    .try_to_owned()
+                    .map(|value| HashMap::from([(name.to_string(), value)]))
+            };
+            let done = match &choice {
+                dock::BarChoice::ToggleAutoHide => proxy.toggle_auto_hide().await.map(|_| ()),
+                dock::BarChoice::ToggleWidget(id) => proxy.toggle_widget(id).await.map(|_| ()),
+                dock::BarChoice::Theme(name) => match set(key::THEME, name.as_str().into()) {
+                    Ok(changes) => proxy.set_appearance(changes).await,
+                    Err(e) => Err(e.into()),
+                },
+                dock::BarChoice::ShowTrash(on) => match set(key::SHOW_TRASH, (*on).into()) {
+                    Ok(changes) => proxy.set_appearance(changes).await,
+                    Err(e) => Err(e.into()),
+                },
+            };
+            if let Err(e) = done {
+                tracing::warn!("the dock refused {choice:?}: {e}");
             }
         });
     })
@@ -2067,6 +2172,7 @@ fn on_a_display() {
     gtk::init().expect("no X display");
 
     dock::tests::an_icon_for_a_dense_screen_has_the_pixels_to_fill_it();
+    dock::tests::the_menu_on_the_bar_shows_the_look_and_says_what_was_chosen();
     hide_tests::a_pointer_only_passing_through_does_not_summon_the_bar();
     hide_tests::the_edge_stands_for_a_hidden_bar_and_only_for_one();
     hide_tests::a_bar_held_still_is_where_it_was_sent_at_once();
@@ -2694,6 +2800,21 @@ mod edge_tests {
     fn no_auto_hide_or_no_dock_on_screen_has_no_edge() {
         assert!(!edge_stands(false, false, false, true));
         assert!(!edge_stands(true, false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod within_tests {
+    use super::within;
+
+    #[test]
+    fn the_edges_of_a_rectangle_are_counted_the_way_pixels_are() {
+        let bar = (100, 700, 50, 40);
+        assert!(within((100.0, 700.0), bar));
+        assert!(within((149.5, 739.5), bar));
+        assert!(!within((150.0, 720.0), bar));
+        assert!(!within((120.0, 740.0), bar));
+        assert!(!within((99.0, 720.0), bar));
     }
 }
 
