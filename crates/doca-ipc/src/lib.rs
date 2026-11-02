@@ -505,6 +505,10 @@ pub struct Appearance {
     /// The monitor the dock stands on, by the name RandR gives its output
     /// (`eDP-1`, `DisplayPort-0`: what `xrandr` lists). Empty is the primary.
     pub monitor: String,
+    /// How long, in milliseconds, the pointer has to stay at the edge before
+    /// a hidden bar comes up, and off the bar before it goes.
+    pub reveal_delay: i32,
+    pub hide_delay: i32,
 }
 
 /// The settings the widgets take, as the daemon reports them.
@@ -750,6 +754,14 @@ pub const MAX_ICON_SIZE: i32 = 96;
 /// 1.0 is how the lens is turned off, so it is also the floor.
 pub const MIN_MAGNIFICATION: f64 = 1.0;
 pub const MAX_MAGNIFICATION: f64 = 2.5;
+/// The two waits of auto-hide, in milliseconds.
+///
+/// No wait at all is a choice somebody can make, so the floor is zero. The
+/// ceiling is where a bar stops seeming slow and starts seeming broken.
+pub const MIN_HIDE_WAIT: i32 = 0;
+pub const MAX_HIDE_WAIT: i32 = 2000;
+pub const DEFAULT_REVEAL_DELAY: i32 = 120;
+pub const DEFAULT_HIDE_DELAY: i32 = 400;
 /// A timer of no minutes has nothing to count, so one is the floor.
 pub const MIN_TIMER_MINUTES: u32 = 1;
 pub const MAX_TIMER_MINUTES: u32 = 24 * 60;
@@ -781,8 +793,10 @@ pub mod appearance_key {
     pub const GTK_THEME: &str = "gtk_theme";
     pub const CURSOR_THEME: &str = "cursor_theme";
     pub const MONITOR: &str = "monitor";
+    pub const REVEAL_DELAY: &str = "reveal_delay";
+    pub const HIDE_DELAY: &str = "hide_delay";
 
-    pub const ALL: [&str; 9] = [
+    pub const ALL: [&str; 11] = [
         THEME,
         ICON_SIZE,
         MAGNIFICATION,
@@ -792,6 +806,8 @@ pub mod appearance_key {
         GTK_THEME,
         CURSOR_THEME,
         MONITOR,
+        REVEAL_DELAY,
+        HIDE_DELAY,
     ];
 }
 

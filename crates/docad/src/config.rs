@@ -8,8 +8,8 @@ pub const DEFAULT_ENVIRONMENT: &str = "Default";
 // The look of the dock is a contract between three crates, so its names and
 // limits live in the one they all depend on.
 pub use doca_ipc::{
-    DEFAULT_THEME, MAX_ICON_SIZE, MAX_MAGNIFICATION, MAX_TIMER_MINUTES, MAX_WATER_GOAL,
-    MIN_ICON_SIZE, MIN_MAGNIFICATION, MIN_TIMER_MINUTES, MIN_WATER_GOAL,
+    DEFAULT_HIDE_DELAY, DEFAULT_REVEAL_DELAY, DEFAULT_THEME, MAX_HIDE_WAIT, MAX_ICON_SIZE, MAX_MAGNIFICATION, MAX_TIMER_MINUTES, MAX_WATER_GOAL,
+    MIN_HIDE_WAIT, MIN_ICON_SIZE, MIN_MAGNIFICATION, MIN_TIMER_MINUTES, MIN_WATER_GOAL,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +40,19 @@ pub struct Appearance {
     /// primary — empty for the reason the three themes above are.
     #[serde(default)]
     pub monitor: String,
+    /// Auto-hide's two waits, in milliseconds.
+    #[serde(default = "default_reveal_delay")]
+    pub reveal_delay: i32,
+    #[serde(default = "default_hide_delay")]
+    pub hide_delay: i32,
+}
+
+fn default_reveal_delay() -> i32 {
+    DEFAULT_REVEAL_DELAY
+}
+
+fn default_hide_delay() -> i32 {
+    DEFAULT_HIDE_DELAY
 }
 
 fn default_show_trash() -> bool {
@@ -70,6 +83,8 @@ impl Default for Appearance {
             gtk_theme: String::new(),
             cursor_theme: String::new(),
             monitor: String::new(),
+            reveal_delay: default_reveal_delay(),
+            hide_delay: default_hide_delay(),
         }
     }
 }
@@ -90,6 +105,8 @@ impl Appearance {
             gtk_theme: self.gtk_theme.trim().to_string(),
             cursor_theme: self.cursor_theme.trim().to_string(),
             monitor: self.monitor.trim().to_string(),
+            reveal_delay: self.reveal_delay.clamp(MIN_HIDE_WAIT, MAX_HIDE_WAIT),
+            hide_delay: self.hide_delay.clamp(MIN_HIDE_WAIT, MAX_HIDE_WAIT),
         }
     }
 }
@@ -1249,6 +1266,13 @@ mod tests {
     }
 
     #[test]
+    fn a_config_that_names_no_waits_keeps_the_ones_it_always_had() {
+        let appearance = config("[appearance]\nauto_hide = true\n").appearance();
+        assert_eq!(appearance.reveal_delay, DEFAULT_REVEAL_DELAY);
+        assert_eq!(appearance.hide_delay, DEFAULT_HIDE_DELAY);
+    }
+
+    #[test]
     fn auto_hide_is_off_unless_it_is_asked_for() {
         assert!(!config("[appearance]\ntheme = \"native\"\n").appearance().auto_hide);
         assert!(config("[appearance]\nauto_hide = true\n").appearance().auto_hide);
@@ -1459,6 +1483,8 @@ mod tests {
             gtk_theme: String::new(),
             cursor_theme: String::new(),
             monitor: " eDP-1 ".to_string(),
+            reveal_delay: -5,
+            hide_delay: 90_000,
         });
         config.save_to(&path).unwrap();
 
@@ -1477,6 +1503,8 @@ mod tests {
             "a theme name is looked up verbatim, so stray spaces would simply miss"
         );
         assert_eq!(reloaded.monitor, "eDP-1", "and so is a monitor's");
+        assert_eq!(reloaded.reveal_delay, MIN_HIDE_WAIT);
+        assert_eq!(reloaded.hide_delay, MAX_HIDE_WAIT);
     }
 
     #[test]

@@ -96,6 +96,8 @@ theme = "native"
 icon_size = 48
 magnification = 1.6
 auto_hide = false
+reveal_delay = 120      # ms at the edge before it comes up
+hide_delay = 400        # ms off the dock before it goes
 show_trash = true
 icon_theme = ""       # empty follows the system
 gtk_theme = ""
@@ -127,6 +129,7 @@ other environment claims.
 | `theme` | `system` (borrows the colours of the GTK theme in force), `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
 | `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit, or than fit with the lens open. |
 | `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. The lens needs room to open, which comes out of the icon size on a crowded dock. With GNOME's *Reduce animation* on (`gtk-enable-animations = false`) there is no lens at all, and nothing slides, swells or bounces: the dock is where it is going at once. |
+| `reveal_delay`, `hide_delay` | with `auto_hide`, how long in milliseconds the pointer has to stay at the edge before the bar comes up, and off the bar before it goes. Clamped to 0–2000. Defaults 120 and 400. |
 | `auto_hide` | slides the bar off the bottom edge, leaving a two-pixel sliver in sight, and reserves only that sliver through the strut so maximised windows get the screen back. The bottom six pixels under it bring it up, so there is more to reach than there is to see; while it is hidden, they take clicks from whatever is under them. Pointing there slides it up; moving away slides it down. |
 | `show_trash` | a trash item at the end of the bar. |
 | `icon_theme` | an icon theme for the dock alone. Empty follows `gtk-icon-theme-name`, which is what GNOME Tweaks → Appearance → Icons sets. |
@@ -522,7 +525,7 @@ the trash on the window already on screen.
 
 | method | |
 |---|---|
-| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`, `monitor`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
+| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`, `monitor`, `reveal_delay`, `hide_delay`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
 | `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written, announced, and handed to the widget that is already running — which keeps whatever it was counting. A key nobody knows is refused rather than ignored, and a value out of range is brought back in. |
 | `WidgetSettings()` → `(sssuu)` | what every widget setting is, already clamped. The counterpart of `SetWidgetSetting`, flat and named the same way, so a window can put them straight on its controls. |
 | `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |
