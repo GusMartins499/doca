@@ -729,7 +729,7 @@ fn draw_water(
     // A day that reached its goal says so in the colour the water is drawn
     // in, and says it by standing still. A tile that blinks to be noticed is
     // a tile you end up covering up.
-    let ink = if done { look.palette.fill } else { look.palette.label };
+    let ink = if done { look.palette.accent } else { look.palette.label };
     paint(cr, &amount, text_left, y, ink);
     y += amount_height;
     if let Some(against) = against {
@@ -819,7 +819,7 @@ fn draw_calendar(
     let weekday_height = weekday.pixel_extents().1.height() as f64;
     let day_height = day.pixel_extents().1.height() as f64;
     let y = ((height - weekday_height - day_height) / 2.0).max(0.0);
-    paint(cr, &weekday, 0.0, y, look.palette.fill);
+    paint(cr, &weekday, 0.0, y, look.palette.accent);
     paint(cr, &day, 0.0, y + weekday_height, look.palette.label);
 
     if look.level == Level::Minimal {
@@ -895,7 +895,7 @@ fn draw_calendar(
         // What is happening now is in the accent; what is still to come in
         // the label ink, the first of it brightest.
         let ink = if calendar.upcoming[index].now {
-            look.palette.fill
+            look.palette.accent
         } else if index == 0 {
             look.palette.label
         } else {
@@ -2022,6 +2022,174 @@ pub mod tests {
         }
     }
 
+    /// The ground a theme puts under its tiles, with how see-through it is.
+    /// The same figures as `#ground` in the theme's sheet.
+    fn ground_of(theme: &str, area: &gtk::DrawingArea) -> gdk::RGBA {
+        match theme {
+            "midnight" => gdk::RGBA::new(0.051, 0.059, 0.078, 1.0),
+            "paper" => gdk::RGBA::new(0.980, 0.973, 0.953, 0.95),
+            "system" => {
+                let bg = area.style_context().lookup_color("theme_bg_color").unwrap();
+                gdk::RGBA::new(bg.red(), bg.green(), bg.blue(), 0.82)
+            }
+            _ => gdk::RGBA::new(0.110, 0.110, 0.118, 0.82),
+        }
+    }
+
+    /// The wash behind a tile marking itself, where the theme has one of its
+    /// own: `#widget.active`, the same figures as the sheet.
+    fn wash_of(theme: &str) -> Option<gdk::RGBA> {
+        match theme {
+            "midnight" => Some(gdk::RGBA::new(0.086, 0.137, 0.239, 1.0)),
+            "paper" => Some(gdk::RGBA::new(0.776, 0.486, 0.306, 0.16)),
+            "native" => Some(gdk::RGBA::new(0.298, 0.553, 1.0, 0.18)),
+            _ => None,
+        }
+    }
+
+    /// How much ink lands on the tile, and how much outside it.
+    fn ink_of(state: &WidgetState, look: Look) -> (u32, u32) {
+        const MARGIN: i32 = 24;
+        let (width, height) = (declared_width(state, look), height_of(look.icon_size));
+        let (across, down) = (width + MARGIN * 2, height + MARGIN * 2);
+        let mut surface =
+            gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, across, down)
+                .expect("no surface");
+        {
+            let cr = gtk::cairo::Context::new(&surface).expect("no context");
+            cr.translate(MARGIN as f64, MARGIN as f64);
+            let area = gtk::DrawingArea::new();
+            draw_in(state, look, &area, &cr, width as f64, height as f64);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().expect("the surface is still borrowed");
+        let (mut inside, mut outside) = (0, 0);
+        for y in 0..down {
+            for x in 0..across {
+                if data[y as usize * stride + x as usize * 4 + 3] == 0 {
+                    continue;
+                }
+                let on_tile = (MARGIN..MARGIN + width).contains(&x)
+                    && (MARGIN..MARGIN + height).contains(&y);
+                if on_tile {
+                    inside += 1;
+                } else {
+                    outside += 1;
+                }
+            }
+        }
+        (inside, outside)
+    }
+
+    fn calendars() -> Vec<WidgetState> {
+        let up = |when: &str, title: &str, now| doca_ipc::Upcoming {
+            when: when.to_string(),
+            title: title.to_string(),
+            now,
+        };
+        let calendar = |upcoming, missing: &str| {
+            WidgetState::new(
+                "calendar",
+                Body::Calendar(doca_ipc::Calendar {
+                    weekday: "Wed".to_string(),
+                    day: 30,
+                    upcoming,
+                    missing: missing.to_string(),
+                }),
+            )
+        };
+        vec![
+            calendar(
+                vec![
+                    up("now", "Standup with the whole team", true),
+                    up("19:00", "Dentist", false),
+                    up("Fri 09:30", "Renew the car insurance", false),
+                ],
+                "",
+            ),
+            calendar(Vec::new(), ""),
+            calendar(Vec::new(), "no calendar service"),
+        ]
+    }
+
+    fn usages() -> Vec<WidgetState> {
+        let claude = |label: &str, detail: &str, progress, near| {
+            WidgetState::new(
+                "claude",
+                Body::Claude(doca_ipc::Claude {
+                    mode: doca_ipc::claude_mode::ALL[0].to_string(),
+                    label: label.to_string(),
+                    detail: detail.to_string(),
+                    progress,
+                    near,
+                    input: 0,
+                    output: 0,
+                    cache_write: 0,
+                    cache_read: 0,
+                    turns: String::new(),
+                }),
+            )
+        };
+        vec![
+            claude("2.4M", "of 2.5M this week", 0.96, true),
+            claude("2.4M", "last 5 hours", NO_PROGRESS, false),
+            claude("?", "Claude Code not found", NO_PROGRESS, false),
+        ]
+    }
+
+    /// Every word these tiles write stands 4.5:1 off the bar, WCAG's figure
+    /// for small text and these are as small as text gets. `system` is held to
+    /// 3:1: its colours are the GTK theme's, and the most the bar can do is
+    /// refuse an accent that does not read.
+    ///
+    /// Against the bar as it really is: two of the grounds are see-through,
+    /// so each is taken over the lightest and the darkest wallpaper there is.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn every_word_on_these_tiles_stands_off_the_bar_on_every_theme() {
+        let area = gtk::DrawingArea::new();
+        use crate::theme::{contrast, over, wallpapers};
+        for theme in crate::theme::names() {
+            let palette = crate::theme::palette_for(theme, &area.style_context());
+            let least = if theme == "system" { 3.0 } else { 4.5 };
+            let ground = ground_of(theme, &area);
+            for wallpaper in wallpapers() {
+                let bar = over(ground, wallpaper);
+                let washed = wash_of(theme).map_or(bar, |wash| over(wash, bar));
+                let inks = [("label", palette.label), ("detail", palette.detail), ("accent", palette.accent)];
+                for (name, ink) in inks {
+                    for under in [bar, washed] {
+                        let ratio = contrast(over(ink, under), under);
+                        assert!(ratio >= least, "{theme}: {name} stands {ratio:.2} off the bar");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nothing is cut off or spills onto a neighbour, at any size, in any
+    /// state of giving way, with what these tiles say at their longest.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn these_tiles_stay_inside_themselves_at_every_size() {
+        let area = gtk::DrawingArea::new();
+        for theme in crate::theme::names() {
+            let palette = crate::theme::palette_for(theme, &area.style_context());
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
+                    let look = Look { icon_size, palette, level };
+                    for state in calendars().iter().chain(usages().iter()) {
+                        let (inside, outside) = ink_of(state, look);
+                        let said = spoken(state);
+                        assert!(inside > 0, "{theme} {level:?} {icon_size}: {said} drew nothing");
+                        assert_eq!(outside, 0, "{theme} {level:?} {icon_size}: {said} spilled");
+                    }
+                }
+            }
+        }
+    }
+
     /// And the theme really has no say in it, which is the part a luminance
     /// sum cannot check: the same note drawn under all four themes comes out
     /// the same pixels.
@@ -2288,7 +2456,7 @@ pub mod tests {
             surface.flush();
             let stride = surface.stride() as usize;
             let data = surface.data().expect("the surface is still borrowed");
-            let fill = tile_look.palette.fill;
+            let fill = tile_look.palette.accent;
             let leaf = (ICON as f64 * 0.72) as usize + 2;
             let (mut alphas, mut list, mut accent) = (Vec::new(), 0usize, 0usize);
             for row in 0..height as usize {

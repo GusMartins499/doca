@@ -40,7 +40,7 @@ const NATIVE: &str = "
     #indicator { background: rgba(255,255,255,0.45); }
     #indicator-active { background: #4c8dff; }
     #widget-label { color: #f2f2f2; font-size: 15px; font-weight: 600; }
-    #widget-detail { color: rgba(255,255,255,0.55); font-size: 10px; }
+    #widget-detail { color: rgba(255,255,255,0.70); font-size: 10px; }
     #widget-progress { background: rgba(255,255,255,0.14); }
     #widget-progress progress { background: #4c8dff; }
     #empty { color: rgba(255,255,255,0.55); font-size: 13px; padding: 12px; }
@@ -63,7 +63,7 @@ const MIDNIGHT: &str = "
     #indicator { background: #4a5568; }
     #indicator-active { background: #7aa2f7; }
     #widget-label { color: #d8e0f0; font-size: 15px; font-weight: 700; }
-    #widget-detail { color: #6b7488; font-size: 10px; }
+    #widget-detail { color: #8791a6; font-size: 10px; }
     #widget-progress { background: #1f2430; }
     #widget-progress progress { background: #7aa2f7; }
     #empty { color: #6b7488; font-size: 13px; padding: 12px; }
@@ -86,7 +86,7 @@ const PAPER: &str = "
     #indicator { background: rgba(0,0,0,0.35); }
     #indicator-active { background: #c67c4e; }
     #widget-label { color: #26241f; font-size: 15px; font-weight: 600; }
-    #widget-detail { color: rgba(0,0,0,0.45); font-size: 10px; }
+    #widget-detail { color: rgba(0,0,0,0.60); font-size: 10px; }
     #widget-progress { background: rgba(0,0,0,0.10); }
     #widget-progress progress { background: #c67c4e; }
     #empty { color: rgba(0,0,0,0.45); font-size: 13px; padding: 12px; }
@@ -123,7 +123,7 @@ const SYSTEM_CSS: &str = "
     #indicator { background: alpha(@theme_fg_color, 0.45); }
     #indicator-active { background: @theme_selected_bg_color; }
     #widget-label { color: @theme_fg_color; font-size: 15px; font-weight: 600; }
-    #widget-detail { color: alpha(@theme_fg_color, 0.55); font-size: 10px; }
+    #widget-detail { color: alpha(@theme_fg_color, 0.75); font-size: 10px; }
     #widget-progress { background: alpha(@theme_fg_color, 0.14); }
     #widget-progress progress { background: @theme_selected_bg_color; }
     #empty { color: alpha(@theme_fg_color, 0.55); font-size: 13px; padding: 12px; }
@@ -228,6 +228,12 @@ pub struct Palette {
     pub track: gdk::RGBA,
     /// What fills it, and the accent a tile marks itself with.
     pub fill: gdk::RGBA,
+    /// The accent when it is words: today's weekday, what is happening now.
+    ///
+    /// Not `fill`, because a bar is read by its length and words are not. An
+    /// accent that holds a four-pixel bar can fade out of a seven-pixel word,
+    /// so this one is the accent pushed as far from the ground as words need.
+    pub accent: gdk::RGBA,
 }
 
 fn rgba(red: f64, green: f64, blue: f64, alpha: f64) -> gdk::RGBA {
@@ -248,12 +254,23 @@ pub fn palette_for(name: &str, context: &gtk::StyleContext) -> Palette {
             Palette {
                 label: foreground.unwrap_or(borrowed.label),
                 detail: foreground
-                    .map(|colour| faded(colour, 0.55))
+                    .map(|colour| faded(colour, 0.75))
                     .unwrap_or(borrowed.detail),
                 track: foreground
                     .map(|colour| faded(colour, 0.14))
                     .unwrap_or(borrowed.track),
                 fill: lookup(context, "theme_selected_bg_color").unwrap_or(borrowed.fill),
+                accent: foreground
+                    .zip(lookup(context, "theme_selected_bg_color"))
+                    .zip(lookup(context, "theme_bg_color"))
+                    .map(|((words, accent), ground)| {
+                        if reads_on(accent, ground) {
+                            accent
+                        } else {
+                            words
+                        }
+                    })
+                    .unwrap_or(borrowed.accent),
             }
         }
         resolved => palette(resolved),
@@ -266,22 +283,25 @@ pub fn palette(name: &str) -> Palette {
     match resolve(name) {
         "midnight" => Palette {
             label: rgba(0.847, 0.878, 0.941, 1.0),
-            detail: rgba(0.420, 0.455, 0.533, 1.0),
+            detail: rgba(0.529, 0.569, 0.651, 1.0),
             track: rgba(0.122, 0.141, 0.188, 1.0),
             fill: rgba(0.478, 0.635, 0.969, 1.0),
+            accent: rgba(0.478, 0.635, 0.969, 1.0),
         },
         "paper" => Palette {
             label: rgba(0.149, 0.141, 0.122, 1.0),
-            detail: rgba(0.0, 0.0, 0.0, 0.45),
+            detail: rgba(0.0, 0.0, 0.0, 0.60),
             track: rgba(0.0, 0.0, 0.0, 0.10),
             fill: rgba(0.776, 0.486, 0.306, 1.0),
+            accent: rgba(0.540, 0.300, 0.150, 1.0),
         },
         // `native`, and whatever a sheet fell back to.
         _ => Palette {
             label: rgba(0.949, 0.949, 0.949, 1.0),
-            detail: rgba(1.0, 1.0, 1.0, 0.55),
+            detail: rgba(1.0, 1.0, 1.0, 0.70),
             track: rgba(1.0, 1.0, 1.0, 0.14),
             fill: rgba(0.298, 0.553, 1.0, 1.0),
+            accent: rgba(0.650, 0.780, 1.0, 1.0),
         },
     }
 }
@@ -334,6 +354,52 @@ pub fn dots_for(name: &str, context: &gtk::StyleContext) -> (gdk::RGBA, gdk::RGB
 
 fn lookup(context: &gtk::StyleContext, name: &str) -> Option<gdk::RGBA> {
     gtk::prelude::StyleContextExt::lookup_color(context, name)
+}
+
+/// WCAG's relative luminance, so a contrast ratio means what it says.
+pub fn luminance(colour: gdk::RGBA) -> f64 {
+    let linear = |c: f64| {
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(colour.red()) + 0.7152 * linear(colour.green()) + 0.0722 * linear(colour.blue())
+}
+
+/// How far apart two opaque colours are, as WCAG counts it: 1 to 21.
+pub fn contrast(a: gdk::RGBA, b: gdk::RGBA) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// One colour laid over another, the way the bar lays over a wallpaper.
+pub fn over(top: gdk::RGBA, under: gdk::RGBA) -> gdk::RGBA {
+    let mix = |t: f64, u: f64| t * top.alpha() + u * (1.0 - top.alpha());
+    gdk::RGBA::new(
+        mix(top.red(), under.red()),
+        mix(top.green(), under.green()),
+        mix(top.blue(), under.blue()),
+        1.0,
+    )
+}
+
+/// The lightest and the darkest a see-through bar can be sitting on.
+pub fn wallpapers() -> [gdk::RGBA; 2] {
+    [rgba(0.0, 0.0, 0.0, 1.0), rgba(1.0, 1.0, 1.0, 1.0)]
+}
+
+/// Whether a borrowed accent can be words on a borrowed ground. A GTK theme
+/// picks its selection colour to sit behind text, not to be text, and when it
+/// cannot be, the tile says the same thing in the foreground ink.
+///
+/// `#ground` in the `system` sheet is 0.82 of the theme's background, so the
+/// bar under the word is that over whatever the wallpaper is.
+fn reads_on(accent: gdk::RGBA, ground: gdk::RGBA) -> bool {
+    wallpapers()
+        .into_iter()
+        .all(|wallpaper| contrast(accent, over(faded(ground, 0.82), wallpaper)) >= 3.0)
 }
 
 /// The same colour, as faint as the stylesheet draws the running dot.
@@ -427,6 +493,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_borrowed_accent_only_becomes_words_where_it_reads() {
+        let white = rgba(1.0, 1.0, 1.0, 1.0);
+        let dark = rgba(0.12, 0.12, 0.12, 1.0);
+        assert!(reads_on(rgba(0.60, 0.75, 1.0, 1.0), dark), "a light blue on a dark bar reads");
+        assert!(!reads_on(rgba(0.95, 0.85, 0.30, 1.0), white), "a yellow selection does not");
+        assert!(
+            !reads_on(rgba(0.208, 0.518, 0.894, 1.0), white),
+            "Adwaita's blue reads on white and not on a light bar over a black wallpaper"
+        );
+        assert!((contrast(white, rgba(0.0, 0.0, 0.0, 1.0)) - 21.0).abs() < 0.01);
+    }
+
     /// A drawn tile and a styled bar have to look like one dock, and the only
     /// thing keeping them that way is that the numbers are the same numbers.
     #[test]
@@ -434,9 +513,9 @@ mod tests {
         // The declarations each theme makes for the two lines, as they are
         // written in its sheet.
         let declared = [
-            ("native", "#f2f2f2", "rgba(255,255,255,0.55)"),
-            ("midnight", "#d8e0f0", "#6b7488"),
-            ("paper", "#26241f", "rgba(0,0,0,0.45)"),
+            ("native", "#f2f2f2", "rgba(255,255,255,0.70)"),
+            ("midnight", "#d8e0f0", "#8791a6"),
+            ("paper", "#26241f", "rgba(0,0,0,0.60)"),
         ];
 
         for (name, label, detail) in declared {
