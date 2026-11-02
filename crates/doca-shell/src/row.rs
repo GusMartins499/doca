@@ -15,6 +15,23 @@ use crate::motion::Life;
 pub const INDICATOR: i32 = 9;
 const DOT_WIDTH: f64 = 6.0;
 const DOT_HEIGHT: f64 = 3.0;
+const DOT_GAP: f64 = 3.0;
+/// The most dots an icon gets, however many windows it has. Three is what
+/// fits under the smallest icon, and it is as far as a count can be read at a
+/// glance: past that the dots only need to say "several", and the tooltip and
+/// the icon's menu have the number.
+const MOST_DOTS: usize = 3;
+
+/// Where each dot under an icon starts, one per window up to [`MOST_DOTS`].
+///
+/// Rounded once, for the first, so the gaps stay equal: rounding each on its
+/// own would let a lens passing over the icon shimmer them by a pixel.
+fn dot_lefts(centre: f64, windows: usize) -> impl Iterator<Item = f64> {
+    let dots = windows.min(MOST_DOTS);
+    let across = dots as f64 * (DOT_WIDTH + DOT_GAP) - DOT_GAP;
+    let first = (centre - across / 2.0).round();
+    (0..dots).map(move |dot| first + dot as f64 * (DOT_WIDTH + DOT_GAP))
+}
 
 /// One icon, as the row needs it.
 pub struct Entry {
@@ -1221,12 +1238,9 @@ impl Row {
                     dot.blue(),
                     dot.alpha() * icon.presence,
                 );
-                cr.rectangle(
-                    (centre - DOT_WIDTH / 2.0).round(),
-                    bottom + 3.0,
-                    DOT_WIDTH,
-                    DOT_HEIGHT,
-                );
+                for left in dot_lefts(centre, entry.item.windows.len()) {
+                    cr.rectangle(left, bottom + 3.0, DOT_WIDTH, DOT_HEIGHT);
+                }
                 let _ = cr.fill();
             }
         }
@@ -1324,6 +1338,61 @@ pub fn spoken(items: &[DockItem]) -> String {
 
 #[cfg(test)]
 pub mod tests {
+    /// How many separate marks the dots leave on a line across them.
+    fn marks_for(windows: usize) -> usize {
+        let mut surface = cairo::ImageSurface::create(cairo::Format::A8, 48, 1).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            for left in super::dot_lefts(24.0, windows) {
+                cr.rectangle(left, 0.0, super::DOT_WIDTH, 1.0);
+            }
+            cr.fill().unwrap();
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let line = &data[..stride.min(48)];
+        (0..line.len())
+            .filter(|&x| line[x] > 0 && (x == 0 || line[x - 1] == 0))
+            .count()
+    }
+
+    #[test]
+    fn the_dots_can_be_counted_up_to_three_and_then_mean_several() {
+        let marks: Vec<usize> = (0..=5).map(marks_for).collect();
+        assert_eq!(marks, [0, 1, 2, 3, 3, 3]);
+    }
+
+    #[test]
+    fn the_dots_stay_under_the_smallest_icon_and_centred_on_any_icon() {
+        const SMALLEST_ICON: f64 = 24.0;
+        for windows in 1..=5 {
+            let lefts: Vec<f64> = super::dot_lefts(100.0, windows).collect();
+            let start = lefts[0];
+            let end = lefts[lefts.len() - 1] + super::DOT_WIDTH;
+            assert!(
+                end - start <= SMALLEST_ICON,
+                "{windows} windows: wider than the icon"
+            );
+            assert!(
+                ((start + end) / 2.0 - 100.0).abs() <= 0.5,
+                "{windows} windows: off centre"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lens_passing_over_leaves_the_gaps_between_the_dots_alone() {
+        for tenth in 0..10 {
+            let centre = 100.0 + tenth as f64 / 10.0;
+            let lefts: Vec<f64> = super::dot_lefts(centre, 3).collect();
+            assert_eq!(lefts[1] - lefts[0], lefts[2] - lefts[1], "at {centre}");
+            assert!(
+                lefts.iter().all(|left| left.fract() == 0.0),
+                "blurred at {centre}"
+            );
+        }
+    }
+
     #[test]
     fn the_row_is_said_in_the_order_it_is_shown() {
         let item = |name: &str, windows: usize| DockItem {

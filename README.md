@@ -69,6 +69,10 @@ pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 
 ## On the bar
 
+Under an icon there is a dot for each window the app has open, up to three:
+three means three or more, and the tooltip has the number. The colour says
+which app has the focus.
+
 Drag a pinned icon along the bar to give it another place: the icons it
 passes make way, and it is pinned where you let go — written to the config,
 comments and all, through `PinItemAt`. A running app that is not pinned can
