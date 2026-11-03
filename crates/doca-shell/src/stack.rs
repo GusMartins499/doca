@@ -1,10 +1,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gtk::prelude::*;
 use doca_ipc::FolderEntry;
+
+use crate::motion::SETTLED;
 
 pub const PREFIX: &str = "folder:";
 pub const COLUMNS: i32 = 5;
@@ -20,17 +22,6 @@ pub const ENTRY_ICON: i32 = 32;
 /// wide as its longest filename, which is what lets a grid be opened at the
 /// size its answer will take before the answer is known.
 pub const LABEL_CHARS: i32 = 14;
-
-/// How long a grid is left alone after it goes up, before it may be taken
-/// down to be resized.
-///
-/// Measured, and the reason this is not simply "straight away": a grid put up
-/// by a press and taken down and up again before the *release* of that same
-/// click is dismissed by that release — the release lands on the new menu and
-/// closes it. With a folder that reads instantly the whole dance fits inside
-/// one click, and the grid opened one time in three. Longer than a click is
-/// held, so the release is always spent before anything moves.
-pub const SETTLED: Duration = Duration::from_millis(250);
 
 /// How faint a cell is while it is still only the promise of one.
 const WAITING: f64 = 0.3;

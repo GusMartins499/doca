@@ -1,10 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
 
 use gtk::prelude::*;
 
-pub const DELAY: Duration = Duration::from_millis(260);
 pub const GAP: i32 = 10;
 
 /// Where a label of `size` sits so it is centred over an item and clear of the bar.
@@ -94,7 +92,7 @@ impl Tooltip {
 
         let tooltip = self.clone();
         let text = text.to_string();
-        glib::timeout_add_local_once(DELAY, move || {
+        glib::timeout_add_local_once(crate::motion::TOOLTIP, move || {
             if tooltip.generation.get() != generation {
                 tracing::info!("tooltip cancelled before it showed");
                 return;

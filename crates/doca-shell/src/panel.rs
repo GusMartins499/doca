@@ -27,19 +27,15 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use doca_ipc::{Body, WidgetState};
 use gtk::prelude::*;
 
-/// How long a panel is left alone after it goes up, before it may be taken
-/// down to be resized.
-///
-/// The folder grid's figure and the folder grid's reason: a menu put up by a
-/// press and taken down and up again before the *release* of that same click
-/// is dismissed by that release. Shared rather than copied, so there is one
-/// number to change if it is ever wrong.
-pub use crate::stack::SETTLED;
+/// The folder grid's figure and the folder grid's reason, shared rather than
+/// copied, so there is one number to change if it is ever wrong.
+pub use crate::motion::SETTLED;
+use crate::motion::{LET_GO, QUIET};
 
 /// How faint a row is while it is still only the promise of one.
 const WAITING: f64 = 0.3;
@@ -950,9 +946,6 @@ fn current(buffer: &gtk::TextBuffer) -> String {
     buffer.text(&from, &to, false).map(|text| text.to_string()).unwrap_or_default()
 }
 
-/// How long the typing has to stop before it is written down.
-const QUIET: std::time::Duration = std::time::Duration::from_millis(600);
-
 /// How many of a row's characters the time of an appointment takes:
 /// `Tue 14:00` and a space.
 const EVENT_WHEN_CHARS: i32 = 9;
@@ -1085,10 +1078,6 @@ fn reopen(menu: &gtk::Menu, show: &Show, opened: Instant) {
     }
 }
 
-/// How long a panel being reopened waits for its old grab to be let go of
-/// before it goes up regardless.
-const LET_GO: Duration = Duration::from_millis(300);
-
 /// Show the panel again once the grab it is about to give up has been reported
 /// gone, for the pointer and for the keyboard both.
 ///
@@ -1200,7 +1189,7 @@ pub mod tests {
         let until = Instant::now() + LET_GO * 2;
         while Instant::now() < until {
             settle();
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 

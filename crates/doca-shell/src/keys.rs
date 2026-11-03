@@ -43,7 +43,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
 
 use doca_ipc::DockItem;
 use gtk::prelude::*;
@@ -52,10 +51,9 @@ use crate::row::Row;
 use crate::tooltip::Tooltip;
 use crate::widget_tile::Shelf;
 use crate::Hide;
+use crate::motion::GRAB_RETRY;
 
-/// How long the keyboard is waited for when someone else has it — the key
-/// that asked for the dock, still held down — and how often it is asked for.
-const GRAB_RETRY: Duration = Duration::from_millis(50);
+/// How many times the keyboard is asked for, [`GRAB_RETRY`] apart.
 const GRAB_TRIES: u32 = 20;
 
 /// What a key means to the dock while the dock has the keyboard.
@@ -446,6 +444,7 @@ fn inside(window: &gtk::Window, (x, y): (f64, f64)) -> bool {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::time::Duration;
     use gdk::keys::constants as k;
 
     const NONE: gdk::ModifierType = gdk::ModifierType::empty();
