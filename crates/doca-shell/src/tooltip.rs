@@ -40,6 +40,9 @@ pub struct Tooltip {
     label: gtk::Label,
     showing: Rc<RefCell<Option<String>>>,
     generation: Rc<Cell<u64>>,
+    /// Set while the window preview is up: the name is its heading then, and
+    /// a label saying it again on top would cover the preview it names.
+    hushed: Rc<Cell<bool>>,
 }
 
 impl Tooltip {
@@ -73,7 +76,16 @@ impl Tooltip {
             label,
             showing: Rc::new(RefCell::new(None)),
             generation: Rc::new(Cell::new(0)),
+            hushed: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Say nothing until told otherwise — or, for `false`, go back to naming.
+    pub fn hush(&self, quiet: bool) {
+        if quiet {
+            self.hide();
+        }
+        self.hushed.set(quiet);
     }
 
     /// Show `text` over `item`, after the pause that keeps a passing pointer quiet.
@@ -82,6 +94,9 @@ impl Tooltip {
     /// resizes under the pointer — and so re-enters itself — does not restart
     /// the pause or move the label.
     pub fn point_at(&self, anchor: (i32, i32), width: i32, text: &str) {
+        if self.hushed.get() {
+            return;
+        }
         if self.showing.borrow().as_deref() == Some(text) {
             return;
         }
@@ -146,6 +161,20 @@ pub mod tests {
             natural.width,
             natural.height
         );
+    }
+
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_hushed_label_says_nothing_until_it_may_speak_again() {
+        let tooltip = Tooltip::new();
+
+        tooltip.hush(true);
+        tooltip.point_at((900, 1000), 48, "Files");
+        assert!(tooltip.showing.borrow().is_none(), "named an icon under the preview");
+
+        tooltip.hush(false);
+        tooltip.point_at((900, 1000), 48, "Files");
+        assert_eq!(tooltip.showing.borrow().as_deref(), Some("Files"));
+        tooltip.hide();
     }
 
     #[test]

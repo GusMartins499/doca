@@ -7,6 +7,7 @@ mod magnify;
 mod motion;
 mod panel;
 mod poof;
+mod preview;
 mod row;
 mod screen;
 mod stack;
@@ -307,6 +308,14 @@ impl Hide {
     /// means here.
     fn intend(&self, window: &gtk::Window, to_shown: bool) {
         self.forget_intent();
+        if to_shown {
+            // The pointer is back: a departure deferred while something was
+            // open is one it has taken back. Kept, the bar would slide away
+            // under the pointer the moment that something closed — which,
+            // with the window preview, is every time one is crossed into and
+            // left for the bar again.
+            self.held_back.set(false);
+        }
         if !self.enabled.get() || self.shown.get() == to_shown {
             return;
         }
@@ -331,7 +340,9 @@ impl Hide {
     /// Hiding under an open folder grid leaves the grid floating over
     /// nothing, and closing it then drops the pointer onto a desktop nobody
     /// aimed at. The menu is the dock still being used, so the dock stays.
-    fn holds_for(&self, window: &gtk::Window, menu: &gtk::Menu) {
+    /// The window preview is held the same way: it is a menu of windows that
+    /// the pointer reaches by leaving the bar.
+    fn holds_for(&self, window: &gtk::Window, menu: &impl IsA<gtk::Widget>) {
         let holding = self.clone();
         menu.connect_map(move |_| holding.hold());
         let releasing = self.clone();
@@ -881,6 +892,24 @@ fn name_what_is_hovered(icons: &row::Row, label: &tooltip::Tooltip) {
 
 /// Put an icon's name over it — the pointer resting on it, or the keyboard.
 fn name_at(icons: &row::Row, label: &tooltip::Tooltip, index: usize, name: &str) {
+    let (anchor, width) = on_screen(icons, index);
+    label.point_at(anchor, width, name);
+}
+
+/// Start waiting to show the windows of whatever the pointer is on, or let
+/// go of them if it is on nothing.
+fn preview_what_is_hovered(icons: &row::Row, preview: &preview::Preview) {
+    match icons.hovered() {
+        Some((index, item)) => {
+            let (anchor, width) = on_screen(icons, index);
+            preview.over(Some((&item, anchor, width)));
+        }
+        None => preview.over(None),
+    }
+}
+
+/// Where an icon is on the screen: its top-left corner and its width.
+fn on_screen(icons: &row::Row, index: usize) -> ((i32, i32), i32) {
     let origin = icons
         .area
         .toplevel()
@@ -889,11 +918,7 @@ fn name_at(icons: &row::Row, label: &tooltip::Tooltip, index: usize, name: &str)
         .unwrap_or((0, 0));
     let allocation = icons.area.allocation();
     let (left, width) = icons.rect_of(index);
-    label.point_at(
-        (origin.0 + allocation.x() + left, origin.1 + allocation.y()),
-        width,
-        name,
-    );
+    ((origin.0 + allocation.x() + left, origin.1 + allocation.y()), width)
 }
 
 fn wire(
@@ -908,6 +933,18 @@ fn wire(
     // What a click does and what a key does are one closure each, handed to
     // the keyboard as well as run here — so `Enter` cannot do something a
     // left click would not, nor `Menu` something a right click would not.
+    // An app's windows, over its icon once the pointer rests there. Held
+    // like a menu, so the bar stays while the pointer crosses to it.
+    let preview = &preview::Preview::new(label, proxy.clone());
+    hide.holds_for(&window, preview.surface());
+    let leaving_bar = preview.clone();
+    window.connect_leave_notify_event(move |_, event| {
+        if event.detail() != gdk::NotifyType::Inferior {
+            leaving_bar.let_go();
+        }
+        glib::Propagation::Proceed
+    });
+
     let choose = choosing(icons, proxy.clone(), folders, window.clone(), hide.clone(), keys.clone());
     // The bar's own right click: from the row, for a gap between icons, and
     // from the window, for the bar around the row and the tiles.
@@ -940,6 +977,7 @@ fn wire(
 
     let naming = icons.clone();
     let naming_label = label.clone();
+    let naming_preview = preview.clone();
     let moving = pressed.clone();
     let holding = hide.clone();
     let carrying = float.clone();
@@ -964,6 +1002,7 @@ fn wire(
         if let Some(index) = picked {
             if naming.pick(index, x) {
                 naming_label.hide();
+                naming_preview.hide();
                 // The hand is still on the dock while it carries an icon,
                 // wherever the pointer strays: the bar stays until it lets go.
                 holding.hold();
@@ -975,13 +1014,16 @@ fn wire(
         }
         naming.aim(Some(x));
         name_what_is_hovered(&naming, &naming_label);
+        preview_what_is_hovered(&naming, &naming_preview);
         glib::Propagation::Proceed
     });
 
     let leaving = icons.clone();
     let leaving_label = label.clone();
+    let leaving_preview = preview.clone();
     icons.area.connect_leave_notify_event(move |_, _| {
         leaving_label.hide();
+        leaving_preview.let_go();
         // The lens stays open over an icon being carried off the row: it is
         // still where the hand is going to put it down.
         if !leaving.dragging() {
@@ -992,9 +1034,12 @@ fn wire(
 
     let clicked = icons.clone();
     let clicked_label = label.clone();
+    let clicked_preview = preview.clone();
     let pressing = pressed.clone();
     icons.area.connect_button_press_event(move |_, event| {
         clicked_label.hide();
+        // A click is a choice made; the windows were offered for choosing.
+        clicked_preview.hide();
         let Some((index, item)) = clicked.item_at(event.position().0) else {
             if event.button() == 3 {
                 offer_bar(event);
@@ -2192,6 +2237,7 @@ fn on_a_display() {
     fit::tests::the_model_never_promises_room_the_bar_does_not_have();
     ground::tests::the_ground_is_painted_in_the_colours_the_stylesheet_names();
     tooltip::tests::a_label_is_the_size_of_its_own_words();
+    tooltip::tests::a_hushed_label_says_nothing_until_it_may_speak_again();
     row::tests::a_pointer_that_left_is_not_pointing_at_anything();
     row::tests::a_pin_dragged_along_the_row_takes_the_place_it_is_dropped_at();
     row::tests::an_icon_that_makes_way_glides_rather_than_jumps();

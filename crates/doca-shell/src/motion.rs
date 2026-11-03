@@ -71,6 +71,17 @@ pub const POOF: Duration = Duration::from_millis(350);
 /// sees icons grow and not a trail of names.
 pub const TOOLTIP: Duration = Duration::from_millis(260);
 
+/// How long the pointer rests on an app before its windows are shown.
+///
+/// Well past the name's [`TOOLTIP`]: the name is for a pointer that paused,
+/// the windows for one that is still deciding. Shorter and every pause to
+/// read a name would grow into a row of pictures.
+pub const PREVIEW: Duration = Duration::from_millis(700);
+
+/// How long the window preview stays once the pointer has left the icon, for
+/// it to cross the gap to the preview. Arriving cancels it.
+pub const PREVIEW_STAYS: Duration = Duration::from_millis(300);
+
 /// How long a grid or a panel is left alone after it goes up, before it may
 /// be taken down to be resized.
 ///

@@ -917,6 +917,10 @@ pub trait Doca {
     fn pin_item(&self, id: &str) -> zbus::Result<()>;
     fn unpin_item(&self, id: &str) -> zbus::Result<()>;
     fn close_window(&self, id: u32) -> zbus::Result<()>;
+    /// One of the dock's windows as a picture no larger than `width` ×
+    /// `height`: its width, its height, and RGBA bytes. `0, 0` and no bytes
+    /// when it has nothing on screen to show.
+    fn window_preview(&self, id: u32, width: u32, height: u32) -> zbus::Result<(u32, u32, Vec<u8>)>;
 
     fn list_windows(&self) -> zbus::Result<Vec<WindowInfo>>;
     fn activate_window(&self, id: u32) -> zbus::Result<()>;

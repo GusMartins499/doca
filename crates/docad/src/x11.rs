@@ -2,10 +2,13 @@ use anyhow::{Context, Result};
 use doca_ipc::WindowInfo;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask, Window,
+    AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt, EventMask, ImageFormat,
+    ImageOrder, MapState, Window,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
+
+use crate::preview::{self, Shot};
 
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {
@@ -170,6 +173,49 @@ impl X11Backend {
         )
     }
 
+    /// What `id` shows, shrunk to fit `room`, or `None` when there is
+    /// nothing on screen to take it from.
+    ///
+    /// Read with a plain `GetImage`. Under a compositor — mutter always is
+    /// one — the window is redirected and the image comes from its own
+    /// pixmap, so a window covered by another still reads as itself. With no
+    /// compositor what is read is what is on screen, covers and all.
+    /// A minimised window, and one on another workspace, is unmapped and has
+    /// no pixels to read: that is `None`, and the dock shows the icon.
+    pub fn window_preview(&self, id: u32, room: (u32, u32)) -> Result<Option<Shot>> {
+        let attributes = self.conn.get_window_attributes(id)?.reply()?;
+        if attributes.map_state != MapState::VIEWABLE {
+            return Ok(None);
+        }
+        let geometry = self.conn.get_geometry(id)?.reply()?;
+        let (width, height) = (u32::from(geometry.width), u32::from(geometry.height));
+        let to = preview::fit(width, height, room);
+        if to == (0, 0) {
+            return Ok(None);
+        }
+        // Only the layout every desktop X server uses is read: 32 bits a
+        // pixel, least significant byte first. Anything else is said to be
+        // unreadable rather than drawn in the wrong colours.
+        let setup = self.conn.setup();
+        let wide = setup
+            .pixmap_formats
+            .iter()
+            .any(|format| format.depth == geometry.depth && format.bits_per_pixel == 32);
+        if !wide || setup.image_byte_order != ImageOrder::LSB_FIRST {
+            tracing::debug!(id, depth = geometry.depth, "a window in a layout the preview does not read");
+            return Ok(None);
+        }
+        let image = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, id, 0, 0, geometry.width, geometry.height, !0)?
+            .reply()?;
+        let stride = image.data.len() / height as usize;
+        if stride < width as usize * 4 {
+            return Ok(None);
+        }
+        Ok(Some(preview::shrink(&image.data, stride, (width, height), to)))
+    }
+
     pub fn current_workspace(&self) -> Result<i32> {
         Ok(self
             .prop_u32(self.root, self.atoms._NET_CURRENT_DESKTOP)?
@@ -261,6 +307,7 @@ enum Request {
     ActivateWindow(u32, async_channel::Sender<Result<()>>),
     MinimizeWindow(u32, async_channel::Sender<Result<()>>),
     CloseWindow(u32, async_channel::Sender<Result<()>>),
+    WindowPreview(u32, (u32, u32), async_channel::Sender<Result<Option<Shot>>>),
     CurrentWorkspace(async_channel::Sender<Result<i32>>),
     WorkspaceCount(async_channel::Sender<Result<i32>>),
     SetWorkspace(i32, async_channel::Sender<Result<()>>),
@@ -289,6 +336,9 @@ pub fn spawn_worker(backend: X11Backend) -> Result<XHandle> {
                     }
                     Request::CloseWindow(id, reply) => {
                         let _ = reply.send_blocking(backend.close_window(id));
+                    }
+                    Request::WindowPreview(id, room, reply) => {
+                        let _ = reply.send_blocking(backend.window_preview(id, room));
                     }
                     Request::CurrentWorkspace(reply) => {
                         let _ = reply.send_blocking(backend.current_workspace());
@@ -336,6 +386,10 @@ impl XHandle {
 
     pub async fn close_window(&self, id: u32) -> Result<()> {
         self.ask(|reply| Request::CloseWindow(id, reply)).await
+    }
+
+    pub async fn window_preview(&self, id: u32, room: (u32, u32)) -> Result<Option<Shot>> {
+        self.ask(|reply| Request::WindowPreview(id, room, reply)).await
     }
 
     pub async fn current_workspace(&self) -> Result<i32> {

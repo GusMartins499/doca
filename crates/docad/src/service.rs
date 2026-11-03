@@ -13,6 +13,7 @@ use crate::patch;
 use crate::desktop::DesktopIndex;
 use crate::folder;
 use crate::model;
+use crate::preview;
 use crate::trash;
 use crate::widgets::WidgetHandle;
 use crate::x11::XHandle;
@@ -696,6 +697,30 @@ impl DockService {
     ) -> zbus::fdo::Result<bool> {
         let shown = self.shown().await?.name;
         self.commit(&emitter, |config| config.toggle_widget(&shown, id)).await
+    }
+
+    /// A picture of one of the dock's windows, for the hover over its icon:
+    /// width, height and RGBA bytes, or `0, 0` and nothing when the window
+    /// has nothing on screen to show (minimised, or on another workspace).
+    ///
+    /// Only a window the dock lists is shown. On X11 any client can read any
+    /// window, so this is not a lock; it keeps the method what it says it
+    /// is, a preview of the dock's windows and not a screenshot service.
+    async fn window_preview(
+        &self,
+        id: u32,
+        width: u32,
+        height: u32,
+    ) -> zbus::fdo::Result<(u32, u32, Vec<u8>)> {
+        let windows = self.x11.list_windows().await.map_err(failed)?;
+        if !windows.iter().any(|window| window.id == id) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("{id} is not a window on the dock")));
+        }
+        let room = (width.min(preview::LARGEST), height.min(preview::LARGEST));
+        Ok(match self.x11.window_preview(id, room).await.map_err(failed)? {
+            Some(shot) => (shot.width, shot.height, shot.rgba),
+            None => (0, 0, Vec::new()),
+        })
     }
 
     async fn close_window(&self, id: u32) -> zbus::fdo::Result<()> {

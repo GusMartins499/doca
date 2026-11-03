@@ -5,6 +5,7 @@ mod folder;
 mod merge;
 mod model;
 mod patch;
+mod preview;
 mod service;
 mod state;
 mod trash;
