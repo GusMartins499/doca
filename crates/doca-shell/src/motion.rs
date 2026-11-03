@@ -61,6 +61,46 @@ pub const SHUFFLE: Duration = SLIDE;
 /// while it was being carried.
 pub const POOF: Duration = Duration::from_millis(350);
 
+// The waits. Not movements, but they are the bar's sense of time all the
+// same — how long it holds still, how long it listens — and a figure that
+// lives next to the movements is one that gets weighed against them.
+
+/// How long a label waits under a still pointer before it shows.
+///
+/// Longer than the lens takes to open, so a pointer sweeping across the bar
+/// sees icons grow and not a trail of names.
+pub const TOOLTIP: Duration = Duration::from_millis(260);
+
+/// How long a grid or a panel is left alone after it goes up, before it may
+/// be taken down to be resized.
+///
+/// Measured, and the reason this is not simply "straight away": a menu put up
+/// by a press and taken down and up again before the *release* of that same
+/// click is dismissed by that release — the release lands on the new menu and
+/// closes it. With a folder that reads instantly the whole dance fits inside
+/// one click, and the grid opened one time in three. Longer than a click is
+/// held, so the release is always spent before anything moves.
+pub const SETTLED: Duration = Duration::from_millis(250);
+
+/// How long a panel being reopened waits for its old grab to be let go of
+/// before it goes up regardless. See `panel::once_let_go`.
+pub const LET_GO: Duration = Duration::from_millis(300);
+
+/// How often a drag over the dock is asked whether it is still there.
+pub const DRAG_SETTLES: Duration = Duration::from_millis(200);
+
+/// How long the typing in a note has to stop before it is written down.
+pub const QUIET: Duration = Duration::from_millis(600);
+
+/// How long the keyboard is waited for when someone else has it — the key
+/// that asked for the dock, still held down — and how often it is asked for.
+pub const GRAB_RETRY: Duration = Duration::from_millis(50);
+
+/// A wait the config gives in milliseconds. One below zero is no wait.
+pub fn millis(wait: i32) -> Duration {
+    Duration::from_millis(wait.max(0) as u64)
+}
+
 /// How much of a glide is still to go, `elapsed` after it began: all of it at
 /// the start, none once it is over.
 ///
@@ -720,5 +760,39 @@ mod tests {
             .map(|step| glide_left(SHUFFLE * step / 20))
             .collect();
         assert!(left.windows(2).all(|pair| pair[1] <= pair[0]), "{left:?}");
+    }
+
+    /// Every figure of time the shell keeps lives here, and nowhere else.
+    ///
+    /// Read off the sources rather than trusted: a wait written in the middle
+    /// of a file is the one nobody weighs against the others when the bar's
+    /// timing is changed. Tests are left out, because how long a test pumps
+    /// the loop is the test's business and not the bar's.
+    #[test]
+    fn no_file_but_this_one_keeps_its_own_time() {
+        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut strays = Vec::new();
+        for entry in std::fs::read_dir(&sources).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "rs") || path.ends_with("motion.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let shipped = text
+                .find("#[cfg(test)]\nmod ")
+                .into_iter()
+                .chain(text.find("#[cfg(test)]\npub mod "))
+                .min()
+                .map_or(text.as_str(), |end| &text[..end]);
+            for (number, line) in shipped.lines().enumerate() {
+                if ["from_millis", "from_secs", "timeout_add_seconds"]
+                    .iter()
+                    .any(|time| line.contains(time))
+                {
+                    strays.push(format!("{}:{}: {}", path.display(), number + 1, line.trim()));
+                }
+            }
+        }
+        assert!(strays.is_empty(), "waits kept outside motion.rs:\n{}", strays.join("\n"));
     }
 }

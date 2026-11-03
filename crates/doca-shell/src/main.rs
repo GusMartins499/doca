@@ -194,9 +194,6 @@ fn within((x, y): (f64, f64), (left, top, width, height): (i32, i32, i32, i32)) 
         && y < (top + height) as f64
 }
 
-/// How often a drag over the dock is asked whether it is still there.
-const DRAG_SETTLES: std::time::Duration = std::time::Duration::from_millis(200);
-
 impl Default for Hide {
     fn default() -> Self {
         Self {
@@ -224,8 +221,7 @@ impl Hide {
     /// Take the config's waits, in milliseconds. A move already waiting
     /// keeps the wait it started with.
     fn waits(&self, reveal: i32, hide: i32) {
-        let millis = |wait: i32| Duration::from_millis(wait.max(0) as u64);
-        self.waits.set((millis(reveal), millis(hide)));
+        self.waits.set((motion::millis(reveal), motion::millis(hide)));
     }
 
     /// How long the bar waits before believing where the pointer went.
@@ -372,8 +368,9 @@ impl Hide {
 
     /// Let go of a drag once the pointer is off the dock.
     ///
-    /// Asked of the X server every [`DRAG_SETTLES`] rather than waited for as
-    /// a `drag-leave`: GTK sends that only under conditions on the drop site,
+    /// Asked of the X server every [`motion::DRAG_SETTLES`] rather than
+    /// waited for as a `drag-leave`: GTK sends that only under conditions on
+    /// the drop site,
     /// and measured in check-live.sh it never came — the bar stayed up after
     /// the drag had gone. Where the pointer is can be asked even while
     /// another app holds it, and the answer does not depend on which widget
@@ -407,7 +404,7 @@ impl Hide {
     fn watch_drag(&self, window: &gtk::Window) {
         let watching = self.clone();
         let dock = window.clone();
-        glib::timeout_add_local(DRAG_SETTLES, move || {
+        glib::timeout_add_local(motion::DRAG_SETTLES, move || {
             if watching.pointer_is_over_its_place(&dock) {
                 return glib::ControlFlow::Continue;
             }
