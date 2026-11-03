@@ -22,6 +22,13 @@ const SHARED: &str = "
     #widget { border-radius: 12px; padding: 2px; }
     #indicator-idle { background: transparent; }
     #tooltip { border-radius: 8px; padding: 5px 10px; }
+    /* The padding here must stay preview::CARD's: how many windows fit on a
+       screen is worked out from it. A button by birth, so the GTK theme's
+       button is taken off it first. */
+    #preview-window {
+        background: transparent; background-image: none; border: none; box-shadow: none;
+        border-radius: 8px; padding: 6px;
+    }
     #indicator { border-radius: 2px; }
     #indicator-active { border-radius: 2px; }
 ";
@@ -47,6 +54,7 @@ const NATIVE: &str = "
     #overflow { color: rgba(255,255,255,0.55); font-weight: 700; }
     #tooltip { background: rgba(38,38,42,0.96); border: 1px solid rgba(255,255,255,0.10); }
     #tooltip-label { color: #f2f2f2; font-size: 12px; }
+    #preview-window:hover { background: rgba(255,255,255,0.10); }
 ";
 
 const MIDNIGHT: &str = "
@@ -70,6 +78,7 @@ const MIDNIGHT: &str = "
     #overflow { color: #6b7488; font-weight: 700; }
     #tooltip { background: #11141b; border: 1px solid #232a38; }
     #tooltip-label { color: #d8e0f0; font-size: 12px; }
+    #preview-window:hover { background: #1a1f2b; }
 ";
 
 const PAPER: &str = "
@@ -93,6 +102,7 @@ const PAPER: &str = "
     #overflow { color: rgba(0,0,0,0.45); font-weight: 700; }
     #tooltip { background: rgba(250,248,243,0.98); border: 1px solid rgba(0,0,0,0.12); }
     #tooltip-label { color: #26241f; font-size: 12px; }
+    #preview-window:hover { background: rgba(0,0,0,0.06); }
 ";
 
 /// The bar in whatever colours the GTK theme already uses.
@@ -133,6 +143,7 @@ const SYSTEM_CSS: &str = "
         border: 1px solid alpha(@borders, 0.8);
     }
     #tooltip-label { color: @theme_fg_color; font-size: 12px; }
+    #preview-window:hover { background: alpha(@theme_fg_color, 0.10); }
 ";
 
 /// The themes on offer, from the contract rather than from here.
@@ -626,6 +637,7 @@ mod tests {
             "#widget-progress",
             "#empty",
             "#overflow",
+            "#preview-window:hover",
         ];
 
         for name in names() {

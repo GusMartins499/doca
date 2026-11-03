@@ -73,6 +73,19 @@ Under an icon there is a dot for each window the app has open, up to three:
 three means three or more, and the tooltip has the number. The colour says
 which app has the focus.
 
+Rest the pointer on an app that has windows open and, a moment after its
+name, its windows come up over it: a picture of each and its title. Click
+one to bring that window forward. The pointer can leave the icon to reach
+them — they wait a moment for it — and the bar stays up while they are open.
+The pictures come from the daemon's `WindowPreview(u, u, u)` → `(uuay)`,
+which reads the window from the X server and shrinks it on that side of the
+bus, and answers only for windows on the dock. Under a compositor, which
+GNOME always has, a window covered by others still shows as itself; without
+one, what is covered comes out black. A minimised window, or one on another
+workspace, has no pixels to read and shows the app's icon instead. Right
+clicking still lists the windows by title, for the keyboard and for a
+pointer that does not wait.
+
 Drag a pinned icon along the bar to give it another place: the icons it
 passes make way, and it is pinned where you let go — written to the config,
 comments and all, through `PinItemAt`. A running app that is not pinned can
@@ -696,7 +709,5 @@ DISPLAY=:9 cargo run -p docad --example warp-pointer -- 700 1035 click:3
 
 ## Not implemented
 
-Thumbnail previews on window-list hover: on X11 they need composite redirect
-and per-window pixmap capture, which is a great deal of machinery for a hover
-effect. Right clicking an app with more than one window still lists the
-windows by title, and clicking a title raises that window.
+Live window previews: the picture over an icon is taken once, when the
+windows come up, and does not move while you look at it.
