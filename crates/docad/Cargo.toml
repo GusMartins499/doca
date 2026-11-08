@@ -41,7 +41,10 @@ rrule = "0.14"
 
 # Claude Code's usage (#32) is JSON Lines. Only four fields of each line are
 # kept; the rest — which is the conversation — is parsed past and dropped.
-serde_json = "1"
+# In order, because the status line (#76) rewrites Claude Code's own
+# `settings.json`, and a user's file should come back with its keys where
+# they put them rather than sorted.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 futures-lite = "2"

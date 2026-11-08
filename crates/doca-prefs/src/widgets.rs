@@ -164,6 +164,7 @@ pub struct Tab {
     claude_window: gtk::ComboBoxText,
     claude_window_row: gtk::Widget,
     budget: gtk::Adjustment,
+    plan: gtk::CheckButton,
     minutes: gtk::Adjustment,
     goal: gtk::Adjustment,
     bottle: gtk::Adjustment,
@@ -354,7 +355,23 @@ impl Tab {
                 "Counted from Claude Code's own files on this machine — only the \
                  numbers, never what was said, and nothing leaves the machine. \
                  Your plan's limit is not in those files, so there is no percentage \
-                 until you set a budget of your own.",
+                 until you set a budget of your own, or read it from the status line.",
+            ),
+            false,
+            false,
+            0,
+        );
+        // Its own switch, off until asked for: on is a change to Claude Code's
+        // settings, and the hint says which one before it is made.
+        let plan = gtk::CheckButton::with_label("Read the plan's limits from Claude Code's status line");
+        claude.pack_start(&plan, false, false, 0);
+        claude.pack_start(
+            &hint(
+                "Claude Code hands its status line the plan's five-hour and weekly \
+                 share. This sets the dock as that status line in Claude Code's \
+                 settings.json, keeping only those two numbers and when each resets. \
+                 A status line you already had still runs and is what you see; \
+                 switching this off puts it back as it was.",
             ),
             false,
             false,
@@ -400,6 +417,7 @@ impl Tab {
             claude_window,
             claude_window_row,
             budget,
+            plan,
             trouble,
             state: Rc::new(State::default()),
         };
@@ -615,6 +633,19 @@ impl Tab {
             });
         });
 
+        let writing = put.clone();
+        let filling = self.state.filling.clone();
+        self.plan.connect_toggled(move |check| {
+            if filling.is_filling() {
+                return;
+            }
+            writing(Wrote::Flag {
+                widget: key::CLAUDE,
+                key: key::PLAN,
+                flag: check.is_active(),
+            });
+        });
+
         for (adjustment, widget, name) in [
             (&self.budget, key::CLAUDE, key::BUDGET),
             (&self.minutes, key::TIMER, key::MINUTES),
@@ -670,6 +701,7 @@ impl Tab {
             self.claude_window
                 .set_active_id(Some(doca_ipc::claude_window::resolve(&settings.claude_window)));
             self.budget.set_value(settings.claude_budget as f64);
+            self.plan.set_active(settings.claude_plan);
         });
         self.trouble.set_text("");
     }
@@ -756,6 +788,7 @@ pub mod on_a_display {
             claude_mode: "five-hours".to_string(),
             claude_window: "today".to_string(),
             claude_budget: 0,
+            claude_plan: false,
         }
     }
 
@@ -797,6 +830,7 @@ pub mod on_a_display {
             note_colour: "pink".to_string(),
             calendar_ahead: "month".to_string(),
             calendar_all_day: false,
+            claude_plan: true,
             ..settings()
         });
 
@@ -1005,6 +1039,8 @@ pub mod on_a_display {
         assert!(tab.claude_window_row.property::<bool>("visible"), "the tokens mode lost its window");
         tab.claude_window.set_active_id(Some("7-days"));
         tab.budget.set_value(5_000_000.0);
+        assert!(!tab.plan.is_active(), "the status line is never on unless asked for");
+        tab.plan.set_active(true);
 
         assert_eq!(
             *written.borrow(),
@@ -1012,6 +1048,7 @@ pub mod on_a_display {
                 Wrote::Text { widget: "claude", key: "mode", text: "tokens".to_string() },
                 Wrote::Text { widget: "claude", key: "window", text: "7-days".to_string() },
                 Wrote::Count { widget: "claude", key: "budget", count: 5_000_000 },
+                Wrote::Flag { widget: "claude", key: "plan", flag: true },
             ]
         );
     }

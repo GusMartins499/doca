@@ -275,6 +275,12 @@ pub struct ClaudeSettings {
     /// default: the plan's own limit is not on disk to be read.
     #[serde(default)]
     pub budget: u32,
+    /// Read the plan's own limits from Claude Code's status line (#76).
+    ///
+    /// Off unless asked for, because on is a change to Claude Code's
+    /// `settings.json` — see `status_line`.
+    #[serde(default)]
+    pub plan: bool,
 }
 
 fn default_claude_mode() -> String {
@@ -287,7 +293,7 @@ fn default_claude_window() -> String {
 
 impl Default for ClaudeSettings {
     fn default() -> Self {
-        Self { mode: default_claude_mode(), window: default_claude_window(), budget: 0 }
+        Self { mode: default_claude_mode(), window: default_claude_window(), budget: 0, plan: false }
     }
 }
 
@@ -343,6 +349,7 @@ impl WidgetSettings {
                 mode: doca_ipc::claude_mode::resolve(self.claude.mode.trim()).to_string(),
                 window: doca_ipc::claude_window::resolve(self.claude.window.trim()).to_string(),
                 budget: self.claude.budget,
+                plan: self.claude.plan,
             },
             countdown: CountdownSettings {
                 date: self.countdown.date.trim().to_string(),
@@ -379,6 +386,7 @@ impl WidgetSettings {
             (k::CLAUDE, k::MODE) => self.claude.mode = value.into_text()?,
             (k::CLAUDE, k::WINDOW) => self.claude.window = value.into_text()?,
             (k::CLAUDE, k::BUDGET) => self.claude.budget = value.into_count()?,
+            (k::CLAUDE, k::PLAN) => self.claude.plan = value.into_flag()?,
             (k::COUNTDOWN, k::DATE) => self.countdown.date = value.into_text()?,
             (k::COUNTDOWN, k::LABEL) => self.countdown.label = value.into_text()?,
             (k::NOTE, k::TEXT) => self.note.text = value.into_text()?,

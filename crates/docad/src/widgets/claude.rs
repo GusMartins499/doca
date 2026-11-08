@@ -5,18 +5,22 @@
 //!
 //! # Where the limit comes from, decided
 //!
-//! It does not, and the tile does not pretend otherwise. Usage can be
-//! counted from Claude Code's own files (`usage`); the plan's ceiling is not
-//! in them, nor anywhere else on disk — measured, see `usage`. A percentage
-//! needs a denominator, and an invented one is the thing the issue asked
-//! this widget never to show. So:
+//! Usage can be counted from Claude Code's own files (`usage`); the plan's
+//! ceiling is not in them, nor anywhere else on disk — measured, see
+//! `usage`. A percentage needs a denominator, and an invented one is the
+//! thing the issue asked this widget never to show. So, in this order:
 //!
-//! - With no budget set, every mode shows what was spent, as a number, and
-//!   no bar.
+//! - With `claude.plan` on, the five-hour and the week modes show the
+//!   plan's own share, as Claude Code handed it to its status line (#76,
+//!   see `status_line`), and say it is *the plan's*. Only while that window
+//!   has not reset: a share whose `resets_at` has passed is about a window
+//!   that is over, and the tile falls through to the next rule.
 //! - With `claude.budget` set — the user's own figure, in tokens — the mode
 //!   shows its share of that budget, with the bar, and says it is *of the
 //!   budget*. It is the user's number standing in for the plan's, by their
 //!   choice, and the tile does not call it the plan's limit.
+//! - With neither, every mode shows what was spent, as a number, and no
+//!   bar.
 //!
 //! # Near the limit
 //!
@@ -30,6 +34,7 @@
 //! dropped. Nothing is logged but that the files could not be understood,
 //! once.
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -40,6 +45,7 @@ use doca_ipc::{claude_mode, claude_window, Body, WidgetState, NO_PROGRESS};
 use super::usage::{self, Found, Ledger, Spend, Tokens};
 use super::Widget;
 use crate::config::ClaudeSettings;
+use crate::status_line::{self, Limits};
 
 /// The share of the budget at which the tile marks itself.
 pub const NEAR: f64 = 0.8;
@@ -61,6 +67,9 @@ pub struct Claude {
     zone: Tz,
     reading: Option<Reading>,
     readings: Option<mpsc::Receiver<Reading>>,
+    /// Where the status line leaves the plan's limits; `None` with no
+    /// runtime directory to leave them in.
+    limits: Option<PathBuf>,
 }
 
 impl Claude {
@@ -77,6 +86,7 @@ impl Claude {
             zone: super::calendar::local_zone(),
             reading: None,
             readings: Some(rx),
+            limits: status_line::limits_path(),
         }
     }
 }
@@ -105,7 +115,14 @@ impl Widget for Claude {
                 }
             }
         }
-        state_at(self.reading.as_ref(), Utc::now(), self.zone, &self.settings)
+        // Four numbers on a tmpfs, read each poll rather than watched: the
+        // status line rewrites them while Claude Code works, and a file this
+        // small costs less to read than to watch.
+        let limits = match &self.limits {
+            Some(path) if self.settings.plan => Limits::read(path),
+            _ => None,
+        };
+        state_at(self.reading.as_ref(), limits.as_ref(), Utc::now(), self.zone, &self.settings)
     }
 
     fn adopt(&mut self, settings: &crate::config::WidgetSettings) {
@@ -139,18 +156,38 @@ fn read_forever(tx: mpsc::Sender<Reading>) {
 }
 
 /// What the tile shows at `now`, and what the panel breaks it into.
-pub fn state_at(reading: Option<&Reading>, now: DateTime<Utc>, zone: Tz, settings: &ClaudeSettings) -> WidgetState {
+///
+/// `limits` is what the status line last recorded, already `None` unless
+/// `claude.plan` is on.
+pub fn state_at(
+    reading: Option<&Reading>,
+    limits: Option<&Limits>,
+    now: DateTime<Utc>,
+    zone: Tz,
+    settings: &ClaudeSettings,
+) -> WidgetState {
     let mode = claude_mode::resolve(&settings.mode);
+    let plan = plan_window(limits, mode, now);
     let body = |label: String, detail: String, tokens: Tokens, turns: String, budget: u32| {
-        let (label, detail, progress, near) = if budget == 0 || label.is_empty() {
-            (if label.is_empty() { "Claude".to_string() } else { label }, detail, NO_PROGRESS, false)
+        let (label, detail, progress, near, turns) = if let Some((window, what)) = plan {
+            let share = window.used_percentage / 100.0;
+            (
+                format!("{:.0}%", window.used_percentage.floor()),
+                format!("{what} · {}", until(now, window.resets_at)),
+                share.clamp(0.0, 1.0),
+                share >= NEAR,
+                until(now, window.resets_at),
+            )
+        } else if budget == 0 || label.is_empty() {
+            (if label.is_empty() { "Claude".to_string() } else { label }, detail, NO_PROGRESS, false, turns)
         } else {
             let share = tokens.spent() as f64 / budget as f64;
             (
                 format!("{:.0}%", (share * 100.0).floor()),
-                format!("{} of {} · {detail}", compact(tokens.spent()), compact(budget as u64)),
+                format!("{} of {} budget · {detail}", compact(tokens.spent()), compact(budget as u64)),
                 share.clamp(0.0, 1.0),
                 share >= NEAR,
+                turns,
             )
         };
         WidgetState::new(
@@ -171,6 +208,9 @@ pub fn state_at(reading: Option<&Reading>, now: DateTime<Utc>, zone: Tz, setting
     };
     // Said in words, never as a zero: a zero would read as a quiet day. An
     // empty label is how `body` is told there is no number to show.
+    // The plan's share stands without the files: it is Claude Code's own
+    // number, and a breakdown of zeroes under it is only a breakdown not
+    // read yet.
     let missing = |words: &str| body(String::new(), words.to_string(), Tokens::default(), String::new(), 0);
     let Some(reading) = reading else {
         return missing("");
@@ -221,6 +261,35 @@ pub fn state_at(reading: Option<&Reading>, now: DateTime<Utc>, zone: Tz, setting
     body(compact(tokens.spent()), what, tokens, turns, settings.budget)
 }
 
+/// The plan's window for this mode, with what to call it, while it lasts.
+///
+/// Only the five-hour and the week modes have one: the tokens mode counts
+/// over a window of the user's choosing, which the plan knows nothing of.
+fn plan_window(limits: Option<&Limits>, mode: &str, now: DateTime<Utc>) -> Option<(status_line::Window, &'static str)> {
+    let limits = limits?;
+    let (window, what) = match mode {
+        claude_mode::FIVE_HOURS => (limits.five_hour?, "5h plan"),
+        claude_mode::WEEK => (limits.seven_day?, "weekly plan"),
+        _ => return None,
+    };
+    (window.resets_at > now.timestamp()).then_some((window, what))
+}
+
+/// How long until `at`, the way the tile's small line says it: `2d 23h`,
+/// `4h 12m`, `12m`. Rounded up to the minute, so it never reads `0m` while
+/// there is still time on it.
+pub fn until(now: DateTime<Utc>, at: i64) -> String {
+    let minutes = ((at - now.timestamp()).max(0) as u64).div_ceil(60);
+    let (days, hours, minutes) = (minutes / (24 * 60), minutes / 60 % 24, minutes % 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 fn midnight_of(now: DateTime<Utc>, zone: Tz) -> DateTime<Utc> {
     let day = now.with_timezone(&zone).date_naive();
     zone.from_local_datetime(&day.and_time(NaiveTime::MIN))
@@ -254,7 +323,7 @@ mod tests {
     }
 
     fn settings(mode: &str, window: &str, budget: u32) -> ClaudeSettings {
-        ClaudeSettings { mode: mode.to_string(), window: window.to_string(), budget }
+        ClaudeSettings { mode: mode.to_string(), window: window.to_string(), budget, plan: false }
     }
 
     // 21:00 UTC is 18:00 in São Paulo.
@@ -273,7 +342,7 @@ mod tests {
 
     #[test]
     fn the_session_mode_counts_the_open_session_and_says_when_it_closes() {
-        let state = state_at(Some(&day()), now(), SAO_PAULO, &settings("five-hours", "5h", 0));
+        let state = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("five-hours", "5h", 0));
         assert_eq!(state.label(), "2.4M");
         assert_eq!(state.detail(), "session · until 20:30", "18:30 UTC opened it; 23:30 UTC is 20:30 there");
         assert_eq!(state.progress(), NO_PROGRESS, "no budget, no bar");
@@ -281,35 +350,35 @@ mod tests {
 
     #[test]
     fn with_no_session_open_it_says_so_rather_than_counting_an_old_one() {
-        let state = state_at(Some(&day()), at(18, 2, 0), SAO_PAULO, &settings("five-hours", "5h", 0));
+        let state = state_at(Some(&day()), None, at(18, 2, 0), SAO_PAULO, &settings("five-hours", "5h", 0));
         assert_eq!((state.label().as_str(), state.detail().as_str()), ("0", "no session open"));
     }
 
     #[test]
     fn the_week_and_the_token_windows_count_what_they_say() {
-        let week = state_at(Some(&day()), now(), SAO_PAULO, &settings("week", "5h", 0));
+        let week = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("week", "5h", 0));
         assert_eq!((week.label().as_str(), week.detail().as_str()), ("2.7M", "last 7 days"));
 
-        let today = state_at(Some(&day()), now(), SAO_PAULO, &settings("tokens", "today", 0));
+        let today = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("tokens", "today", 0));
         // 04:00 UTC on the 17th is the 17th's 01:00 in São Paulo: today.
         assert_eq!((today.label().as_str(), today.detail().as_str()), ("2.7M", "today"));
 
-        let five = state_at(Some(&day()), now(), SAO_PAULO, &settings("tokens", "5h", 0));
+        let five = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("tokens", "5h", 0));
         assert_eq!(five.label(), "2.4M");
     }
 
     #[test]
     fn a_budget_is_a_share_with_a_bar_and_lights_up_near_its_end() {
-        let state = state_at(Some(&day()), now(), SAO_PAULO, &settings("five-hours", "5h", 3_000_000));
+        let state = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("five-hours", "5h", 3_000_000));
         assert_eq!(state.label(), "80%");
-        assert_eq!(state.detail(), "2.4M of 3M · session · until 20:30");
+        assert_eq!(state.detail(), "2.4M of 3M budget · session · until 20:30");
         assert!((state.progress() - 0.8).abs() < 1e-9);
         assert!(state.active(), "at four fifths the tile marks itself");
 
-        let calm = state_at(Some(&day()), now(), SAO_PAULO, &settings("five-hours", "5h", 10_000_000));
+        let calm = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("five-hours", "5h", 10_000_000));
         assert!(!calm.active());
 
-        let over = state_at(Some(&day()), now(), SAO_PAULO, &settings("week", "5h", 1_000_000));
+        let over = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("week", "5h", 1_000_000));
         assert_eq!(over.label(), "270%", "over budget says how far over");
         assert_eq!(over.progress(), 1.0, "and the bar stops at full");
     }
@@ -317,7 +386,7 @@ mod tests {
     #[test]
     fn missing_and_misread_are_said_in_words_never_as_zero() {
         let s = settings("week", "5h", 0);
-        let said = |found| state_at(Some(&Reading { found, spends: Vec::new() }), now(), SAO_PAULO, &s).detail();
+        let said = |found| state_at(Some(&Reading { found, spends: Vec::new() }), None, now(), SAO_PAULO, &s).detail();
         assert_eq!(said(Found::NoFolder), "Claude Code not found");
         assert_eq!(said(Found::Empty), "no usage yet");
         assert_eq!(said(Found::NotUnderstood), "usage format not understood");
@@ -325,18 +394,125 @@ mod tests {
 
     #[test]
     fn the_panel_gets_the_breakdown_and_when_the_window_turns() {
-        let state = state_at(Some(&day()), now(), SAO_PAULO, &settings("five-hours", "5h", 0));
+        let state = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("five-hours", "5h", 0));
         let Ok(Body::Claude(claude)) = state.body() else { panic!("not a usage body") };
         assert_eq!(claude.mode, "five-hours");
         assert_eq!((claude.input, claude.cache_read), (2_400_000, 2_000_000), "two replies in the session");
         assert_eq!(claude.turns, "20:30");
 
-        let today = state_at(Some(&day()), now(), SAO_PAULO, &settings("tokens", "today", 0));
+        let today = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("tokens", "today", 0));
         let Ok(Body::Claude(claude)) = today.body() else { panic!("not a usage body") };
         assert_eq!(claude.turns, "midnight");
-        let week = state_at(Some(&day()), now(), SAO_PAULO, &settings("week", "today", 0));
+        let week = state_at(Some(&day()), None, now(), SAO_PAULO, &settings("week", "today", 0));
         let Ok(Body::Claude(claude)) = week.body() else { panic!("not a usage body") };
         assert_eq!(claude.turns, "", "seven days roll; they do not turn");
+    }
+
+    /// Both windows as the status line records them: the session's turns in
+    /// four hours and twelve minutes, the week's in two days and 23 hours.
+    fn limits(five: f64, week: f64) -> Limits {
+        let now = now().timestamp();
+        Limits {
+            five_hour: Some(status_line::Window { used_percentage: five, resets_at: now + 4 * 3600 + 12 * 60 }),
+            seven_day: Some(status_line::Window {
+                used_percentage: week,
+                resets_at: now + 2 * 86_400 + 23 * 3600 + 5 * 60,
+            }),
+        }
+    }
+
+    fn with_plan(mode: &str, budget: u32) -> ClaudeSettings {
+        ClaudeSettings { plan: true, ..settings(mode, "today", budget) }
+    }
+
+    #[test]
+    fn the_plan_share_wins_over_the_budget_and_says_it_is_the_plans() {
+        let both = limits(72.4, 41.0);
+        let five = state_at(Some(&day()), Some(&both), now(), SAO_PAULO, &with_plan("five-hours", 3_000_000));
+        assert_eq!(five.label(), "72%");
+        assert_eq!(five.detail(), "5h plan · 4h 12m");
+        assert!((five.progress() - 0.724).abs() < 1e-9);
+        assert!(!five.active());
+
+        let week = state_at(Some(&day()), Some(&both), now(), SAO_PAULO, &with_plan("week", 0));
+        assert_eq!((week.label().as_str(), week.detail().as_str()), ("41%", "weekly plan · 2d 23h"));
+        let Ok(Body::Claude(claude)) = week.body() else { panic!("not a usage body") };
+        assert_eq!(claude.turns, "2d 23h", "the small line of the reference");
+        assert_eq!(claude.input, 2_700_000, "the panel keeps its breakdown");
+
+        let near = state_at(Some(&day()), Some(&limits(85.0, 0.0)), now(), SAO_PAULO, &with_plan("five-hours", 0));
+        assert!(near.active(), "near the plan's end lights up as near the budget's does");
+    }
+
+    #[test]
+    fn a_window_that_has_reset_falls_back_to_the_budget() {
+        let mut over = limits(72.0, 41.0);
+        over.five_hour.as_mut().unwrap().resets_at = now().timestamp() - 60;
+
+        let state = state_at(Some(&day()), Some(&over), now(), SAO_PAULO, &with_plan("five-hours", 3_000_000));
+        assert_eq!(state.label(), "80%");
+        assert_eq!(state.detail(), "2.4M of 3M budget · session · until 20:30");
+
+        let bare = state_at(Some(&day()), Some(&over), now(), SAO_PAULO, &with_plan("five-hours", 0));
+        assert_eq!((bare.label().as_str(), bare.progress()), ("2.4M", NO_PROGRESS), "and with no budget, to the spend");
+    }
+
+    #[test]
+    fn a_missing_window_falls_back_and_the_other_still_counts() {
+        let only_week = Limits { five_hour: None, ..limits(0.0, 41.0) };
+        let five = state_at(Some(&day()), Some(&only_week), now(), SAO_PAULO, &with_plan("five-hours", 0));
+        assert_eq!((five.label().as_str(), five.detail().as_str()), ("2.4M", "session · until 20:30"));
+        let week = state_at(Some(&day()), Some(&only_week), now(), SAO_PAULO, &with_plan("week", 0));
+        assert_eq!(week.label(), "41%");
+    }
+
+    #[test]
+    fn the_tokens_mode_counts_its_own_window_whatever_the_plan_says() {
+        let state = state_at(Some(&day()), Some(&limits(72.0, 41.0)), now(), SAO_PAULO, &with_plan("tokens", 0));
+        assert_eq!((state.label().as_str(), state.detail().as_str()), ("2.7M", "today"));
+    }
+
+    #[test]
+    fn the_plan_share_shows_before_the_files_have_been_read() {
+        let state = state_at(None, Some(&limits(72.0, 41.0)), now(), SAO_PAULO, &with_plan("five-hours", 0));
+        assert_eq!(state.label(), "72%");
+    }
+
+    #[test]
+    fn with_the_option_off_the_file_is_not_read() {
+        let scratch = std::env::temp_dir().join(format!("doca-claude-plan-{}", std::process::id()));
+        let path = scratch.join("claude-limits.json");
+        // Against the real clock, since `poll` reads it.
+        let resets_at = Utc::now().timestamp() + 3600;
+        let recorded = Limits {
+            five_hour: Some(status_line::Window { used_percentage: 72.0, resets_at }),
+            seven_day: None,
+        };
+        crate::atomic::write(&path, serde_json::to_vec(&recorded).unwrap()).unwrap();
+        let mut widget = Claude {
+            settings: settings("five-hours", "5h", 0),
+            zone: SAO_PAULO,
+            reading: Some(day()),
+            readings: None,
+            limits: Some(path),
+        };
+        let off = widget.poll().label();
+        widget.settings.plan = true;
+        let on = widget.poll().label();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert_ne!(off, "72%", "the plan's share shown with the option off");
+        assert_eq!(on, "72%");
+    }
+
+    #[test]
+    fn time_left_reads_in_the_largest_two_units() {
+        let now = now();
+        let t = now.timestamp();
+        assert_eq!(until(now, t + 2 * 86_400 + 23 * 3600 + 59 * 60), "2d 23h");
+        assert_eq!(until(now, t + 4 * 3600 + 12 * 60), "4h 12m");
+        assert_eq!(until(now, t + 12 * 60), "12m");
+        assert_eq!(until(now, t + 10), "1m", "never 0m while there is time left");
+        assert_eq!(until(now, t - 10), "0m");
     }
 
     #[test]
