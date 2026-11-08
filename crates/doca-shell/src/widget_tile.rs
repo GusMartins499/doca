@@ -710,6 +710,17 @@ const BATTERY_LOW_GAUGE: Gauge = Gauge {
 /// desktops start warning.
 const LOW_BATTERY: f64 = 0.20;
 
+/// The day, the week or the year going by: dusk violet, for time.
+const TIME_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.14, 0.10, 0.25),
+        to: (0.08, 0.08, 0.19),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.70, 0.60, 1.0),
+};
+
 /// Which meter, if any, this widget is, and what it is wearing now.
 ///
 /// Read off the widget's id, because a meter arrives as a [`Simple`] like
@@ -729,6 +740,7 @@ fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
         "battery" if simple.active => Some(BATTERY_CHARGING_GAUGE),
         "battery" if simple.progress <= LOW_BATTERY => Some(BATTERY_LOW_GAUGE),
         "battery" => Some(BATTERY_GAUGE),
+        "time-progress" => Some(TIME_GAUGE),
         _ => None,
     }
 }
@@ -3007,6 +3019,8 @@ pub mod tests {
             reading("battery", "18%", "25m", 0.18, false),
             reading("battery", "64%", "11h 59 to full", 0.64, true),
             reading("battery", "—", "no battery", NO_PROGRESS, false),
+            reading("time-progress", "100%", "of this year", 1.0, false),
+            reading("time-progress", "0%", "of this week", 0.0, false),
         ]
     }
 
@@ -3719,15 +3733,16 @@ pub mod tests {
     }
 
     /// The widgets that are meters.
-    const METERS: [&str; 2] = ["cpu", "battery"];
+    const METERS: [&str; 3] = ["cpu", "battery", "time-progress"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 5] = [
+    const GAUGES: [(&str, Gauge); 6] = [
         ("cpu", CPU_GAUGE),
         ("hot cpu", CPU_HOT_GAUGE),
         ("battery", BATTERY_GAUGE),
         ("charging battery", BATTERY_CHARGING_GAUGE),
         ("low battery", BATTERY_LOW_GAUGE),
+        ("time", TIME_GAUGE),
     ];
 
     /// A meter's words are white on its glass, and its share stands off the
@@ -3798,6 +3813,7 @@ pub mod tests {
             None,
             "a machine with no battery has nothing to measure"
         );
+        assert_eq!(gauge_for(&reading("time-progress", "63%", "of today", 0.63, false)), Some(TIME_GAUGE));
         // A share that is not a meter's: the pomodoro's is the next issue's.
         assert_eq!(gauge_for(&reading("pomodoro", "18:42", "focus", 0.25, false)), None);
         assert_eq!(gauge_for(&reading("clock", "14:05", "Sun 8 Nov", NO_PROGRESS, false)), None);
