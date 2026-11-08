@@ -498,16 +498,7 @@ fn draw_in(
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
         Ok(Body::Calendar(calendar)) => draw_calendar(&calendar, look, area, cr, width, height),
-        // Two lines and a bar: the simple tile, which is all the usage tile
-        // is. The breakdown it carries is the panel's.
-        Ok(Body::Claude(claude)) => draw_simple(
-            &Simple { label: claude.label, detail: claude.detail, progress: claude.progress, active: claude.near },
-            look,
-            area,
-            cr,
-            width,
-            height,
-        ),
+        Ok(Body::Claude(claude)) => draw_claude(&claude, look, area, cr, width, height),
         Err(_) => {
             let layout = line(area, "\u{2014}", text_size(look.icon_size, 0.30), true, width);
             let (_, logical) = layout.pixel_extents();
@@ -557,12 +548,17 @@ pub fn spoken(state: &WidgetState) -> String {
             Some(next) => format!("{name}: {} {}, {} {}", calendar.weekday, calendar.day, next.when, next.title),
             None => format!("{name}: {} {}, nothing ahead", calendar.weekday, calendar.day),
         },
-        Ok(Body::Claude(claude)) => match (claude.label.is_empty(), claude.detail.is_empty()) {
-            (false, false) => format!("{name}: {}, {}", claude.label, claude.detail),
-            (false, true) => format!("{name}: {}", claude.label),
-            (true, false) => format!("{name}: {}", claude.detail),
-            (true, true) => name,
-        },
+        // The number and the small line under it, which is what the card
+        // says when it has the room to say all of it.
+        Ok(Body::Claude(claude)) => {
+            let under = claude_under(&claude);
+            match (claude.label.is_empty(), under.is_empty()) {
+                (false, false) => format!("{name}: {}, {under}", claude.label),
+                (false, true) => format!("{name}: {}", claude.label),
+                (true, false) => format!("{name}: {under}"),
+                (true, true) => name,
+            }
+        }
         Err(_) => name,
     }
 }
@@ -624,7 +620,7 @@ fn draw_simple(
     }
     if let Some(thickness) = bar {
         let fraction = simple.progress.clamp(0.0, 1.0);
-        groove(cr, 0.0, y + GAP, width, thickness, fraction, look.palette);
+        groove(cr, 0.0, y + GAP, width, thickness, fraction, look.palette.track, look.palette.fill);
     }
 }
 
@@ -818,6 +814,293 @@ fn wave_crest(cr: &cairo::Context, width: f64, surface: f64, swell: f64, phase: 
             cr.line_to(x, y);
         }
     }
+}
+
+/// Claude: how much of the budget is spent, as a ring or as a card.
+///
+/// A tile one icon wide is a square of ember with a ring round the share
+/// and the share written in it — the shape a crowded bar can still read at a
+/// glance. Any wider and it is a card of dark glass: the mark on the left, the
+/// share large, what it is a share of small under it, and the pill along the
+/// bottom.
+///
+/// With no budget there is no share, and the card says what was spent instead
+/// — `2.4M` — with no ring and no pill. A ring or a pill with nothing to
+/// measure would be a percentage the tile made up.
+///
+/// Like water, the card brings its own colours: orange in the dark reads on
+/// every desktop, and the words on it are white under every theme.
+fn draw_claude(
+    claude: &doca_ipc::Claude,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let room = claude_card(cr, claude, look.level, look.icon_size, width, height, composited(area));
+    let (number, under) = claude_says(claude, look.level, room.square);
+    let ink = gdk::RGBA::WHITE;
+
+    // The number at the size the shape gives it, made smaller only if it
+    // would not otherwise fit — a ring round `270%` must not cut the `%` off.
+    let share = if room.square { 0.25 } else { 0.34 };
+    let mut size = text_size(look.icon_size, share);
+    let mut big = line(area, &number, size, true, room.width);
+    let wide = big.pixel_extents().1.width() as f64;
+    if wide > room.width && wide > 0.0 {
+        size = (size * room.width / wide).max(7.0);
+        big = line(area, &number, size, true, room.width);
+    }
+    let small = under.map(|words| line(area, &words, text_size(look.icon_size, 0.17), false, room.width));
+    if !room.centred {
+        big.set_alignment(pango::Alignment::Left);
+        if let Some(small) = &small {
+            small.set_alignment(pango::Alignment::Left);
+        }
+    }
+
+    let big_height = big.pixel_extents().1.height() as f64;
+    let small_height = small.as_ref().map_or(0.0, |small| small.pixel_extents().1.height() as f64);
+    let stack = big_height + small_height;
+    let y = room.y + ((room.height - stack) / 2.0).max(0.0);
+    paint(cr, &big, room.x, y, ink);
+    if let Some(small) = &small {
+        paint(cr, small, room.x, y + big_height, faded(ink, CLAUDE_QUIET));
+    }
+}
+
+/// What a Claude card writes: its number, and the small line when there is
+/// room for one.
+///
+/// The small line is the first thing a crowded bar loses — the wide card
+/// keeps it only whole, and the square only while it is not the bare value
+/// a minimal bar asks for. The number never goes.
+fn claude_says(claude: &doca_ipc::Claude, level: Level, square: bool) -> (String, Option<String>) {
+    let under = claude_under(claude);
+    let keeps = if square {
+        level != Level::Minimal
+    } else {
+        level == Level::Full
+    };
+    (claude.label.clone(), (keeps && !under.is_empty()).then_some(under))
+}
+
+/// The small line: what the number is of, and when the window turns over.
+///
+/// `turns` is said as the daemon says it, `until 20:30`, and only when the
+/// detail has not already said it — a session's detail ends `until 20:30`
+/// on its own. A window that rolls has no `turns`, and nothing is made up
+/// for it: a countdown is #76's, once the daemon knows when the limit resets.
+fn claude_under(claude: &doca_ipc::Claude) -> String {
+    let (detail, turns) = (claude.detail.trim(), claude.turns.trim());
+    if turns.is_empty() || detail.contains(turns) {
+        detail.to_string()
+    } else if detail.is_empty() {
+        format!("until {turns}")
+    } else {
+        format!("{detail} \u{b7} until {turns}")
+    }
+}
+
+/// Where a Claude card has left room for its words, once it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Words {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    /// In the middle of a square, or flush left beside the mark.
+    centred: bool,
+    /// Whether the card is the square one, with the ring.
+    square: bool,
+}
+
+/// Everything on a Claude card but the words: the glass, the ring or the
+/// pill, the mark, and the rim it wears near the end of its budget.
+///
+/// Kept apart from the words because it is all of the card that is shape
+/// rather than text, and shape can be checked by counting pixels with no
+/// display to lay text out on.
+fn claude_card(
+    cr: &cairo::Context,
+    claude: &doca_ipc::Claude,
+    level: Level,
+    icon_size: i32,
+    width: f64,
+    height: f64,
+    composited: bool,
+) -> Words {
+    let icon = icon_size as f64;
+    let corner = (icon * 0.22).max(3.0).min(height / 2.0);
+    let measured = claude.progress != NO_PROGRESS;
+    let fraction = claude.progress.clamp(0.0, 1.0);
+    let fill = if claude.near { claude_hot() } else { claude_orange() };
+    // A tile one icon wide — which is what a minimal bar gives a wide one —
+    // is too narrow for the mark and a number side by side.
+    let square = width < height * 1.4;
+    let glass = if square { CLAUDE_EMBER } else { CLAUDE_SMOKE };
+    let (x0, y0, w, h) = card(cr, width, height, corner, glass, composited, |_, _, _| {});
+    let pad = (icon * 0.14).max(3.0);
+
+    let words = if square {
+        claude_square(cr, claude, level, icon, (x0, y0, w, h), measured, fraction, fill)
+    } else {
+        // The pill along the bottom, under the words and clear of the mark.
+        let diameter = (h * 0.38).min(icon * 0.40);
+        let left = x0 + pad + diameter + pad * 0.8;
+        let right = x0 + w - pad;
+        // A compact card gives its number the room the mark would take.
+        let marked = level == Level::Full || right - left >= icon * 0.8;
+        let left = if marked { left } else { x0 + pad };
+        if marked {
+            spark(cr, x0 + pad + diameter / 2.0, y0 + h / 2.0, diameter / 2.0, fill);
+        }
+        let mut bottom = y0 + h - pad * 0.5;
+        if measured {
+            let thickness = bar_height(icon_size);
+            let y = y0 + h - pad - thickness;
+            groove(cr, left, y, (right - left).max(0.0), thickness, fraction, claude_track(), fill);
+            bottom = y - GAP;
+        }
+        let top = y0 + pad * 0.5;
+        Words {
+            x: left,
+            y: top,
+            width: (right - left).max(0.0),
+            height: (bottom - top).max(0.0),
+            centred: false,
+            square: false,
+        }
+    };
+
+    // Near the end of the budget the card says so in its own rim: the wash
+    // `mark` puts behind the tile is under the glass, where nobody sees it.
+    if claude.near {
+        let _ = cr.save();
+        cr.translate(x0, y0);
+        rounded(cr, 0.75, 0.75, w - 1.5, h - 1.5, corner);
+        let hot = claude_hot();
+        cr.set_source_rgba(hot.red(), hot.green(), hot.blue(), 1.0);
+        cr.set_line_width(1.5);
+        let _ = cr.stroke();
+        let _ = cr.restore();
+    }
+    words
+}
+
+/// The square card: a ring round the share, or the mark over the spend when
+/// there is no share to ring.
+#[allow(clippy::too_many_arguments)]
+fn claude_square(
+    cr: &cairo::Context,
+    claude: &doca_ipc::Claude,
+    level: Level,
+    icon: f64,
+    (x0, y0, w, h): (f64, f64, f64, f64),
+    measured: bool,
+    fraction: f64,
+    fill: gdk::RGBA,
+) -> Words {
+    let inset = (icon * 0.08).max(2.0);
+    // The small line under the ring, when the bar has not asked for the bare
+    // value and the square is tall enough to keep the ring readable over it.
+    let line_room = text_size(icon as i32, 0.17) * 1.3;
+    let under = claude_says(claude, level, true).1.is_some() && h - line_room >= icon * 0.7;
+    let lower = if under { line_room } else { 0.0 };
+    let (cx, cy) = (x0 + w / 2.0, y0 + (h - lower) / 2.0);
+
+    if !measured {
+        let diameter = ((h - lower) * 0.32).min(w * 0.4);
+        spark(cr, cx, y0 + inset + diameter / 2.0 + 1.0, diameter / 2.0, fill);
+        let top = y0 + inset + diameter + GAP;
+        return Words {
+            x: x0 + inset,
+            y: top,
+            width: (w - inset * 2.0).max(0.0),
+            height: (y0 + h - inset * 0.5 - top).max(0.0),
+            centred: true,
+            square: true,
+        };
+    }
+
+    let thickness = (icon * 0.075).max(2.5);
+    let radius = ((w.min(h - lower)) / 2.0 - thickness / 2.0 - inset).max(1.0);
+    ring(cr, cx, cy, radius, thickness, fraction, claude_track(), fill);
+    // The number goes in the ring; the small line, if any, under it.
+    let inner = ((radius - thickness / 2.0) * 2.0 * 0.92).max(0.0);
+    let (y, height) = if under {
+        (cy - inner / 2.0, (y0 + h - inset * 0.5) - (cy - inner / 2.0))
+    } else {
+        (cy - inner / 2.0, inner)
+    };
+    Words {
+        x: if under { x0 + inset } else { cx - inner / 2.0 },
+        y,
+        width: if under { (w - inset * 2.0).max(0.0) } else { inner },
+        height: height.max(0.0),
+        centred: true,
+        square: true,
+    }
+}
+
+/// Claude's mark: a six-armed asterisk with round ends, drawn as a path.
+///
+/// Deliberately a generic spark of the kind a typeface already has (✱), and
+/// not Anthropic's logo. The logo is theirs, and a tile on somebody's dock is
+/// not something they made; where it was in doubt, the issue says to draw a
+/// glyph of our own, and this is it.
+fn spark(cr: &cairo::Context, cx: f64, cy: f64, radius: f64, colour: gdk::RGBA) {
+    let thickness = (radius * 0.42).max(1.5);
+    let reach = (radius - thickness / 2.0).max(0.5);
+    let _ = cr.save();
+    cr.new_path();
+    cr.set_line_width(thickness);
+    cr.set_line_cap(cairo::LineCap::Round);
+    for arm in 0..6 {
+        let angle = arm as f64 * std::f64::consts::PI / 3.0 - std::f64::consts::FRAC_PI_2;
+        cr.move_to(cx, cy);
+        cr.line_to(cx + reach * angle.cos(), cy + reach * angle.sin());
+    }
+    cr.set_source_rgba(colour.red(), colour.green(), colour.blue(), colour.alpha());
+    let _ = cr.stroke();
+    let _ = cr.restore();
+}
+
+/// The square card's glass: ember, deep orange going to nearly brown.
+const CLAUDE_EMBER: Glass = Glass {
+    from: (0.42, 0.17, 0.07),
+    to: (0.19, 0.07, 0.04),
+    rim: (0.30, 0.06),
+    lifted: false,
+};
+
+/// The wide card's glass: smoke, nearly black, with a rim light enough to
+/// stand the card off a dark bar.
+const CLAUDE_SMOKE: Glass = Glass {
+    from: (0.17, 0.16, 0.16),
+    to: (0.08, 0.08, 0.09),
+    rim: (0.34, 0.10),
+    lifted: false,
+};
+
+/// How bright the small line is against the number, which is white.
+const CLAUDE_QUIET: f64 = 0.74;
+
+/// The orange the ring, the pill and the mark are drawn in.
+fn claude_orange() -> gdk::RGBA {
+    gdk::RGBA::new(0.99, 0.60, 0.31, 1.0)
+}
+
+/// The orange gone hot, for a budget nearly spent: redder, so it reads as a
+/// warning even to an eye that does not compare it with the other.
+fn claude_hot() -> gdk::RGBA {
+    gdk::RGBA::new(1.0, 0.33, 0.24, 1.0)
+}
+
+/// The groove the ring and the pill run in.
+fn claude_track() -> gdk::RGBA {
+    gdk::RGBA::new(1.0, 1.0, 1.0, 0.16)
 }
 
 /// A note, on the paper it was written on.
@@ -1229,9 +1512,6 @@ fn box_blur(data: &mut [u8], stride: usize, width: usize, height: usize, radius:
 /// Nothing at all is no arc, not a dot at twelve — an empty ring says it is
 /// empty — and a whole one is a closed circle, so its two round ends do not
 /// overlap into a bump at the top.
-// Drawn by nothing yet: the Claude tile and the meters are the first to
-// wear it (#77, #78), and they come after this.
-#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn ring(
     cr: &cairo::Context,
@@ -1443,6 +1723,10 @@ fn paint(cr: &cairo::Context, layout: &pango::Layout, x: f64, y: f64, colour: gd
 /// Both are pills, rounded at the ends by half their thickness. The share is
 /// never shorter than it is thick, so that a little is a dot and not a
 /// sliver, and is clipped to the groove so its round end sits inside it.
+///
+/// The two colours rather than a [`Palette`], because a card brings its own:
+/// Claude's pill is orange on its glass whatever the theme's bar is.
+#[allow(clippy::too_many_arguments)]
 fn groove(
     cr: &cairo::Context,
     x: f64,
@@ -1450,10 +1734,10 @@ fn groove(
     width: f64,
     thickness: f64,
     fraction: f64,
-    palette: Palette,
+    track: gdk::RGBA,
+    fill: gdk::RGBA,
 ) {
     let radius = thickness / 2.0;
-    let track = palette.track;
     cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
     rounded(cr, x, y, width, thickness, radius);
     let _ = cr.fill_preserve();
@@ -1464,7 +1748,6 @@ fn groove(
     }
     let _ = cr.save();
     cr.clip();
-    let fill = palette.fill;
     cr.set_source_rgba(fill.red(), fill.green(), fill.blue(), fill.alpha());
     rounded(cr, x, y, (width * fraction).max(thickness), thickness, radius);
     let _ = cr.fill();
@@ -2046,6 +2329,21 @@ pub mod tests {
             format!("{named}: Sat 17, no calendar service"),
             "what is missing, never an empty day"
         );
+        let claude = |label: &str, detail: &str, progress, turns: &str| {
+            WidgetState::new("claude", Body::Claude(usage(label, detail, progress, false, turns)))
+        };
+        let named = crate::panel::name_of("claude");
+        assert_eq!(
+            spoken(&claude("72%", "1.8M of 2.5M \u{b7} today", 0.72, "midnight")),
+            format!("{named}: 72%, 1.8M of 2.5M \u{b7} today \u{b7} until midnight"),
+            "the small line the card writes, turning time and all"
+        );
+        assert_eq!(
+            spoken(&claude("2.4M", "session \u{b7} until 20:30", NO_PROGRESS, "20:30")),
+            format!("{named}: 2.4M, session \u{b7} until 20:30"),
+            "a time the detail already says is not said twice"
+        );
+        assert_eq!(spoken(&claude("2.7M", "last 7 days", NO_PROGRESS, "")), format!("{named}: 2.7M, last 7 days"));
     }
 
     pub fn simple(id: &str) -> WidgetState {
@@ -2427,28 +2725,34 @@ pub mod tests {
         ]
     }
 
+    /// A Claude body as the daemon sends one.
+    fn usage(label: &str, detail: &str, progress: f64, near: bool, turns: &str) -> doca_ipc::Claude {
+        doca_ipc::Claude {
+            mode: doca_ipc::claude_mode::ALL[0].to_string(),
+            label: label.to_string(),
+            detail: detail.to_string(),
+            progress,
+            near,
+            input: 0,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+            turns: turns.to_string(),
+        }
+    }
+
     fn usages() -> Vec<WidgetState> {
-        let claude = |label: &str, detail: &str, progress, near| {
-            WidgetState::new(
-                "claude",
-                Body::Claude(doca_ipc::Claude {
-                    mode: doca_ipc::claude_mode::ALL[0].to_string(),
-                    label: label.to_string(),
-                    detail: detail.to_string(),
-                    progress,
-                    near,
-                    input: 0,
-                    output: 0,
-                    cache_write: 0,
-                    cache_read: 0,
-                    turns: String::new(),
-                }),
-            )
+        let claude = |label: &str, detail: &str, progress, near, turns: &str| {
+            WidgetState::new("claude", Body::Claude(usage(label, detail, progress, near, turns)))
         };
         vec![
-            claude("2.4M", "of 2.5M this week", 0.96, true),
-            claude("2.4M", "last 5 hours", NO_PROGRESS, false),
-            claude("?", "Claude Code not found", NO_PROGRESS, false),
+            claude("2.4M", "of 2.5M this week", 0.96, true, ""),
+            claude("2.4M", "last 5 hours", NO_PROGRESS, false, ""),
+            claude("?", "Claude Code not found", NO_PROGRESS, false, ""),
+            claude("Claude", "usage format not understood", NO_PROGRESS, false, ""),
+            claude("72%", "1.8M of 2.5M \u{b7} session \u{b7} until 20:30", 0.72, false, "20:30"),
+            claude("270%", "6.8M of 2.5M \u{b7} today", 1.0, true, "midnight"),
+            claude("0%", "0 of 2.5M \u{b7} last 7 days", 0.0, false, ""),
         ]
     }
 
@@ -2501,6 +2805,58 @@ pub mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A Claude card brings its own colours, so the theme has no say in it:
+    /// the same card under every theme comes out the same pixels, at every
+    /// level the bar can ask for.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_claude_card_looks_the_same_whatever_the_desktop_is_wearing() {
+        let area = gtk::DrawingArea::new();
+        for state in usages() {
+            let Ok(Body::Claude(claude)) = state.body() else { unreachable!() };
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let (width, height) = (level.width(Tile::Wide, ICON), ICON);
+                let mut first: Option<Vec<u8>> = None;
+                for theme in crate::theme::names() {
+                    let look = Look { icon_size: ICON, palette: crate::theme::palette(theme), level };
+                    let (pixels, _) = pixels(width, height, |cr| {
+                        draw_claude(&claude, look, &area, cr, width as f64, height as f64)
+                    });
+                    match &first {
+                        None => first = Some(pixels),
+                        Some(before) => assert!(
+                            *before == pixels,
+                            "{level:?}: {} came out differently under {theme}",
+                            spoken(&state)
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The number is written at every level, the bare square included, and
+    /// written in white: a crowded bar can lose the small line and the mark,
+    /// never what the tile is for.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_claude_card_writes_its_number_at_every_level() {
+        let area = gtk::DrawingArea::new();
+        for level in [Level::Full, Level::Compact, Level::Minimal] {
+            let (width, height) = (level.width(Tile::Wide, ICON), ICON);
+            let look = Look { level, ..look(ICON) };
+            let white = |claude: &doca_ipc::Claude| {
+                let (data, _) = pixels(width, height, |cr| {
+                    draw_claude(claude, look, &area, cr, width as f64, height as f64)
+                });
+                data.chunks(4).filter(|p| p[0] > 230 && p[1] > 230 && p[2] > 230).count()
+            };
+            let written = white(&usage("72%", "1.8M of 2.5M", 0.72, false, "20:30"));
+            let blank = white(&usage("", "", 0.72, false, ""));
+            assert!(written > blank, "{level:?}: the number is not on the card");
         }
     }
 
@@ -3406,6 +3762,118 @@ pub mod tests {
         let (on_card, round_card, off_tile) = card_ink(WATER_GLASS, true);
         assert!(on_card > 0);
         assert_eq!(round_card + off_tile, 0, "a card with no shadow drew one");
+    }
+
+    /// A Claude card's shape, with no words on it, at the width the bar
+    /// gives it at this level.
+    fn claude_pixels(claude: &doca_ipc::Claude, level: Level) -> (Vec<u8>, usize, i32, i32) {
+        let (width, height) = (level.width(Tile::Wide, ICON), ICON);
+        let (data, stride) = pixels(width, height, |cr| {
+            claude_card(cr, claude, level, ICON, width as f64, height as f64, false);
+        });
+        (data, stride, width, height)
+    }
+
+    /// How many pixels in this part of a card are the orange, and how many
+    /// the orange gone hot. The card is opaque, so no unpremultiplying.
+    fn oranges(
+        (data, stride, width, height): &(Vec<u8>, usize, i32, i32),
+        keep: impl Fn(i32, i32) -> bool,
+    ) -> (usize, usize) {
+        let (mut orange, mut hot) = (0, 0);
+        for y in 0..*height {
+            for x in 0..*width {
+                if !keep(x, y) {
+                    continue;
+                }
+                let at = y as usize * stride + x as usize * 4;
+                let (blue, green, red) = (data[at] as i32, data[at + 1] as i32, data[at + 2] as i32);
+                if red > 200 && (110..200).contains(&green) && blue < 130 {
+                    orange += 1;
+                } else if red > 220 && green < 110 && blue < 100 {
+                    hot += 1;
+                }
+            }
+        }
+        (orange, hot)
+    }
+
+    #[test]
+    fn a_share_is_ringed_on_the_square_and_a_pill_on_the_card() {
+        let shared = usage("72%", "1.8M of 2.5M", 0.72, false, "");
+        let spent = usage("2.4M", "last 5 hours", NO_PROGRESS, false, "");
+
+        // The square: the ring goes all round, so its lower half has orange
+        // in it; the mark of a square with no share stays in the top half.
+        let lower = |_: i32, y: i32| y > ICON / 2 + 2;
+        let (ring, _) = oranges(&claude_pixels(&shared, Level::Minimal), lower);
+        let (none, _) = oranges(&claude_pixels(&spent, Level::Minimal), lower);
+        assert!(ring > 0, "a share on the square has no ring");
+        assert_eq!(none, 0, "a square with no share drew a ring round nothing");
+
+        // The card: right of the mark there is only the pill to be orange.
+        let clear_of_the_mark = |x: i32, _: i32| x > ICON * 3 / 4;
+        for level in [Level::Full, Level::Compact] {
+            let (pill, _) = oranges(&claude_pixels(&shared, level), clear_of_the_mark);
+            let (none, _) = oranges(&claude_pixels(&spent, level), clear_of_the_mark);
+            assert!(pill > 0, "{level:?}: a share on the card has no pill");
+            assert_eq!(none, 0, "{level:?}: a card with no share drew a pill for nothing");
+        }
+    }
+
+    #[test]
+    fn a_budget_nearly_spent_is_plain_on_the_card_itself() {
+        let calm = usage("72%", "1.8M of 2.5M", 0.72, false, "");
+        let near = usage("91%", "2.3M of 2.5M", 0.91, true, "");
+        for level in [Level::Full, Level::Compact, Level::Minimal] {
+            let (_, cool) = oranges(&claude_pixels(&calm, level), |_, _| true);
+            let (_, lit) = oranges(&claude_pixels(&near, level), |_, _| true);
+            assert_eq!(cool, 0, "{level:?}: a card nowhere near its budget looks alarmed");
+            // The rim at least: all round the card, so more than its height.
+            assert!(lit > ICON as usize * 2, "{level:?}: near the end of the budget the card looks the same");
+        }
+    }
+
+    #[test]
+    fn a_crowded_bar_takes_the_small_line_first_and_never_the_number() {
+        let claude = usage("72%", "1.8M of 2.5M", 0.72, false, "20:30");
+        let says = |level, square| claude_says(&claude, level, square);
+        let line = Some("1.8M of 2.5M \u{b7} until 20:30".to_string());
+        assert_eq!(says(Level::Full, false), ("72%".to_string(), line.clone()));
+        assert_eq!(says(Level::Compact, false), ("72%".to_string(), None));
+        assert_eq!(says(Level::Minimal, true), ("72%".to_string(), None), "the bare value is the number");
+        assert_eq!(says(Level::Full, true), ("72%".to_string(), line), "a square with room keeps its line");
+
+        let quiet = usage("2.7M", "", NO_PROGRESS, false, "");
+        assert_eq!(claude_says(&quiet, Level::Full, false), ("2.7M".to_string(), None), "nothing to say is no line");
+    }
+
+    #[test]
+    fn the_small_line_says_when_the_window_turns_and_only_once() {
+        let under = |detail: &str, turns: &str| claude_under(&usage("", detail, NO_PROGRESS, false, turns));
+        assert_eq!(under("today", "midnight"), "today \u{b7} until midnight");
+        assert_eq!(under("session \u{b7} until 20:30", "20:30"), "session \u{b7} until 20:30");
+        assert_eq!(under("last 7 days", ""), "last 7 days", "a window that rolls is given no time");
+        assert_eq!(under("", "20:30"), "until 20:30");
+    }
+
+    /// The words on a Claude card are white, or white let down a little for
+    /// the small line, and both stand 4.5:1 off every part of both glasses —
+    /// which is the whole of their contrast, because the theme never reaches
+    /// the card.
+    #[test]
+    fn the_words_on_a_claude_card_stand_off_its_glass() {
+        use crate::theme::{contrast, over};
+        let white = gdk::RGBA::WHITE;
+        for glass in [CLAUDE_EMBER, CLAUDE_SMOKE] {
+            for (r, g, b) in [glass.from, glass.to] {
+                let pane = gdk::RGBA::new(r, g, b, 1.0);
+                for (name, ink) in [("number", white), ("small line", faded(white, CLAUDE_QUIET))] {
+                    let ratio = contrast(over(ink, pane), pane);
+                    assert!(ratio >= 4.5, "the {name} stands {ratio:.2} off {glass:?}");
+                }
+            }
+        }
     }
 
     #[test]
