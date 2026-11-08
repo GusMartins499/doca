@@ -671,6 +671,45 @@ const CPU_HOT_GAUGE: Gauge = Gauge {
     fill: (1.0, 0.58, 0.30),
 };
 
+/// A battery being run on: slate glass, and the charge in a spring green.
+const BATTERY_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.12, 0.14, 0.18),
+        to: (0.08, 0.09, 0.14),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.56, 0.90, 0.44),
+};
+
+/// A battery on the charger — what the daemon marks it for: the glass goes
+/// green with it.
+const BATTERY_CHARGING_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.06, 0.21, 0.12),
+        to: (0.06, 0.13, 0.12),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.42, 0.95, 0.55),
+};
+
+/// A battery running low and not on the charger: red glass, so it is seen
+/// before it is read. The number is still what says how low.
+const BATTERY_LOW_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.29, 0.08, 0.09),
+        to: (0.17, 0.06, 0.10),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.45, 0.42),
+};
+
+/// The charge at and under which a battery is low: a fifth, where most
+/// desktops start warning.
+const LOW_BATTERY: f64 = 0.20;
+
 /// Which meter, if any, this widget is, and what it is wearing now.
 ///
 /// Read off the widget's id, because a meter arrives as a [`Simple`] like
@@ -685,6 +724,11 @@ fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
     match id {
         "cpu" if simple.active => Some(CPU_HOT_GAUGE),
         "cpu" => Some(CPU_GAUGE),
+        // Marked is charging; low is read off the charge itself, so neither
+        // needs the daemon to say anything it does not already.
+        "battery" if simple.active => Some(BATTERY_CHARGING_GAUGE),
+        "battery" if simple.progress <= LOW_BATTERY => Some(BATTERY_LOW_GAUGE),
+        "battery" => Some(BATTERY_GAUGE),
         _ => None,
     }
 }
@@ -2959,6 +3003,10 @@ pub mod tests {
             reading("cpu", "63%", "CPU", 0.63, false),
             reading("cpu", "100%", "CPU", 1.0, true),
             reading("cpu", "0%", "CPU", 0.0, false),
+            reading("battery", "100%", "full", 1.0, false),
+            reading("battery", "18%", "25m", 0.18, false),
+            reading("battery", "64%", "11h 59 to full", 0.64, true),
+            reading("battery", "—", "no battery", NO_PROGRESS, false),
         ]
     }
 
@@ -3035,7 +3083,8 @@ pub mod tests {
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_meter_looks_the_same_whatever_the_desktop_is_wearing() {
         let area = gtk::DrawingArea::new();
-        for state in meters() {
+        // A meter with nothing to measure is two lines in the theme's ink.
+        for state in meters().into_iter().filter(|state| gauge_for(state).is_some()) {
             for level in [Level::Full, Level::Compact, Level::Minimal] {
                 let mut first: Option<Vec<u8>> = None;
                 for theme in crate::theme::names() {
@@ -3670,10 +3719,16 @@ pub mod tests {
     }
 
     /// The widgets that are meters.
-    const METERS: [&str; 1] = ["cpu"];
+    const METERS: [&str; 2] = ["cpu", "battery"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 2] = [("cpu", CPU_GAUGE), ("hot cpu", CPU_HOT_GAUGE)];
+    const GAUGES: [(&str, Gauge); 5] = [
+        ("cpu", CPU_GAUGE),
+        ("hot cpu", CPU_HOT_GAUGE),
+        ("battery", BATTERY_GAUGE),
+        ("charging battery", BATTERY_CHARGING_GAUGE),
+        ("low battery", BATTERY_LOW_GAUGE),
+    ];
 
     /// A meter's words are white on its glass, and its share stands off the
     /// track it runs in, whatever the glass: 4.5:1 for the words, WCAG's
@@ -3724,6 +3779,25 @@ pub mod tests {
             "a processor the daemon marks is hot"
         );
         assert_eq!(gauge_for(&reading("cpu", "—", "CPU", NO_PROGRESS, false)), None, "nothing to measure");
+
+        assert_eq!(gauge_for(&reading("battery", "64%", "3h 10", 0.64, false)), Some(BATTERY_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("battery", "18%", "25m", 0.18, false)),
+            Some(BATTERY_LOW_GAUGE),
+            "a fifth or less and not charging is low"
+        );
+        assert_eq!(gauge_for(&reading("battery", "20%", "", 0.20, false)), Some(BATTERY_LOW_GAUGE));
+        assert_eq!(gauge_for(&reading("battery", "21%", "", 0.21, false)), Some(BATTERY_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("battery", "18%", "1h 20 to full", 0.18, true)),
+            Some(BATTERY_CHARGING_GAUGE),
+            "a low battery on the charger is charging, not low"
+        );
+        assert_eq!(
+            gauge_for(&reading("battery", "—", "no battery", NO_PROGRESS, false)),
+            None,
+            "a machine with no battery has nothing to measure"
+        );
         // A share that is not a meter's: the pomodoro's is the next issue's.
         assert_eq!(gauge_for(&reading("pomodoro", "18:42", "focus", 0.25, false)), None);
         assert_eq!(gauge_for(&reading("clock", "14:05", "Sun 8 Nov", NO_PROGRESS, false)), None);
