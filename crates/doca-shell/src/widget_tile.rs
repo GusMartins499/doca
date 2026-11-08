@@ -983,7 +983,7 @@ fn draw_calendar(
                 let layout = line(area, "", size, false, room);
                 layout.set_alignment(pango::Alignment::Left);
                 layout.set_markup(&format!(
-                    "<b>{}</b> {}",
+                    "<span font_features=\"{TABULAR}\"><b>{}</b> {}</span>",
                     glib::markup_escape_text(&up.when),
                     glib::markup_escape_text(&up.title)
                 ));
@@ -1197,8 +1197,20 @@ fn line(
     // would shove its neighbours along the bar.
     layout.set_ellipsize(pango::EllipsizeMode::End);
     layout.set_single_paragraph_mode(true);
+    // Every digit the same width, so a number that changes in place — a
+    // clock, a countdown, a percentage — changes its digits and not its
+    // width. Letters are not affected.
+    let attributes = pango::AttrList::new();
+    attributes.insert(pango::AttrFontFeatures::new(TABULAR));
+    layout.set_attributes(Some(&attributes));
     layout
 }
+
+/// The OpenType feature for digits of one width.
+///
+/// Markup set on a [`line`] replaces its attributes, so markup has to ask
+/// for it again in a span of its own.
+const TABULAR: &str = "tnum";
 
 fn paint(cr: &cairo::Context, layout: &pango::Layout, x: f64, y: f64, colour: gdk::RGBA) {
     cr.set_source_rgba(colour.red(), colour.green(), colour.blue(), colour.alpha());
@@ -1207,6 +1219,10 @@ fn paint(cr: &cairo::Context, layout: &pango::Layout, x: f64, y: f64, colour: gd
 }
 
 /// A bar in its groove: the whole width faintly, the share of it brightly.
+///
+/// Both are pills, rounded at the ends by half their thickness. The share is
+/// never shorter than it is thick, so that a little is a dot and not a
+/// sliver, and is clipped to the groove so its round end sits inside it.
 fn groove(
     cr: &cairo::Context,
     x: f64,
@@ -1216,18 +1232,23 @@ fn groove(
     fraction: f64,
     palette: Palette,
 ) {
+    let radius = thickness / 2.0;
     let track = palette.track;
     cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
-    cr.rectangle(x, y, width, thickness);
-    let _ = cr.fill();
+    rounded(cr, x, y, width, thickness, radius);
+    let _ = cr.fill_preserve();
 
     if fraction <= 0.0 {
+        cr.new_path();
         return;
     }
+    let _ = cr.save();
+    cr.clip();
     let fill = palette.fill;
     cr.set_source_rgba(fill.red(), fill.green(), fill.blue(), fill.alpha());
-    cr.rectangle(x, y, width * fraction, thickness);
+    rounded(cr, x, y, (width * fraction).max(thickness), thickness, radius);
     let _ = cr.fill();
+    let _ = cr.restore();
 }
 
 /// What one [`Shelf::show`] did: tiles reused, tiles built, tiles dropped.
