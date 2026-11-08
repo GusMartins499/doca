@@ -778,6 +778,20 @@ const TIMER_DONE_GAUGE: Gauge = Gauge {
     edge: Some((1.0, 0.33, 0.24)),
 };
 
+/// A stopwatch: graphite, because it measures nothing against anything and
+/// so has no share to colour. The fill is the one a share would be drawn in,
+/// and never is.
+const STOPWATCH_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.16, 0.17, 0.19),
+        to: (0.09, 0.10, 0.12),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.80, 0.84, 0.90),
+    edge: None,
+};
+
 /// Whether a timer has rung. The daemon marks a timer that is running as
 /// well as one that has rung, so the mark alone cannot tell; one that has
 /// rung is marked with all of its time gone.
@@ -797,8 +811,13 @@ fn on_a_break(simple: &Simple) -> bool {
 /// every other widget without a body of its own, and off what the state
 /// already says — whether it is marked, how full it is — and nothing else.
 /// A meter with nothing to measure is no meter: it is two lines, like the
-/// battery on a machine without one.
+/// battery on a machine without one. A count with no end is the exception:
+/// it wears the card with no share on it, because the number is all it ever
+/// had to say.
 fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
+    if id == "stopwatch" {
+        return Some(STOPWATCH_GAUGE);
+    }
     if simple.progress == NO_PROGRESS {
         return None;
     }
@@ -839,6 +858,9 @@ fn rgb((red, green, blue): (f64, f64, f64)) -> gdk::RGBA {
 /// a pill worth reading, so the share goes round a ring and the number sits
 /// in the middle of it — the last two things a meter gives up, because they
 /// are the meter.
+///
+/// A count with no end has no share, and gets neither: no ring and no pill,
+/// not even an empty one pretending to measure. See [`count_on_glass`].
 fn draw_meter(
     simple: &Simple,
     gauge: Gauge,
@@ -850,11 +872,16 @@ fn draw_meter(
 ) {
     let icon = look.icon_size as f64;
     let corner = (icon * 0.22).max(3.0).min(height / 2.0);
+    let measured = simple.progress != NO_PROGRESS;
     let fraction = simple.progress.clamp(0.0, 1.0);
     let track = faded(ON_A_GAUGE, GAUGE_TRACK);
     let fill = rgb(gauge.fill);
 
     let (x0, y0, w, h) = card(cr, width, height, corner, gauge.glass, composited(area), |cr, width, height| {
+        if !measured {
+            count_on_glass(simple, look, area, cr, width, height);
+            return;
+        }
         if look.level == Level::Minimal {
             let (cx, cy, radius, thickness) = ring_in(width, height);
             ring(cr, cx, cy, radius, thickness, fraction, track, fill);
@@ -908,6 +935,51 @@ fn draw_meter(
         cr.set_line_width(1.5);
         let _ = cr.stroke();
         let _ = cr.restore();
+    }
+}
+
+/// The inside of a card that counts with no end: the number large, and what
+/// it is counting under it when the tile is whole.
+///
+/// Wide, the number and the detail sit at the left, one over the other, in
+/// the room a pill would have taken. One icon wide, the number alone, in the
+/// middle — written smaller rather than cut off, since there is no ring for
+/// it to lean on.
+fn count_on_glass(
+    simple: &Simple,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let icon = look.icon_size as f64;
+    if look.level == Level::Minimal {
+        let pad = (icon * 0.10).max(2.0);
+        let room = (width - pad * 2.0).max(0.0);
+        let number = fitted(area, &simple.label, text_size(look.icon_size, 0.26), room);
+        let (_, logical) = number.pixel_extents();
+        paint(cr, &number, pad, (height - logical.height() as f64) / 2.0, ON_A_GAUGE);
+        return;
+    }
+
+    let pad = (icon * 0.14).max(3.0);
+    let room = (width - pad * 2.0).max(0.0);
+    let number = fitted(area, &simple.label, text_size(look.icon_size, 0.34), room);
+    number.set_alignment(pango::Alignment::Left);
+    let number_height = number.pixel_extents().1.height() as f64;
+
+    let detail = (look.level == Level::Full && !simple.detail.is_empty()).then(|| {
+        let detail = line(area, &simple.detail, text_size(look.icon_size, 0.19), false, room);
+        detail.set_alignment(pango::Alignment::Left);
+        detail
+    });
+    let detail_height = detail.as_ref().map_or(0.0, |detail| detail.pixel_extents().1.height() as f64);
+
+    let y = ((height - number_height - detail_height) / 2.0).max(0.0);
+    paint(cr, &number, pad, y, ON_A_GAUGE);
+    if let Some(detail) = detail {
+        paint(cr, &detail, pad, y + number_height, faded(ON_A_GAUGE, QUIET_ON_A_GAUGE));
     }
 }
 
@@ -3474,6 +3546,9 @@ pub mod tests {
             reading("timer", "04:10", "running", 0.70, true),
             reading("timer", "1440:00", "paused", 0.0, false),
             reading("timer", "00:00", "done", 1.0, true),
+            reading("stopwatch", "00:00", "stopped", NO_PROGRESS, false),
+            reading("stopwatch", "12:34", "lap 2", NO_PROGRESS, true),
+            reading("stopwatch", "123:59:59", "99 laps", NO_PROGRESS, false),
         ]
     }
 
@@ -3540,6 +3615,39 @@ pub mod tests {
                     metered(&at(0.5, ""), level).0,
                     "{id} {level:?}: a tile giving way still says what its number is a share of"
                 );
+            }
+        }
+    }
+
+    /// The counts with no end: a card, and no ring or pill on it.
+    const COUNTS: [&str; 1] = ["stopwatch"];
+
+    /// A count with no end is its number on glass, and nothing else: with
+    /// its words taken away, what is left is the bare card, at every level —
+    /// no ring, no pill, not even the track of one. The number is there at
+    /// every level, and the detail only when the tile is whole.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_count_with_no_end_is_its_number_and_no_ring() {
+        let area = gtk::DrawingArea::new();
+        for id in COUNTS {
+            let at = |label: &str, detail: &str| reading(id, label, detail, NO_PROGRESS, false);
+            let glass = gauge_for(&at("", "")).expect("a count wears a card").glass;
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let (bare, _, width, height) = metered(&at("", ""), level);
+                let corner = (ICON as f64 * 0.22).max(3.0).min(height as f64 / 2.0);
+                let (card_only, _) = pixels(width as i32, height as i32, |cr| {
+                    card(cr, width as f64, height as f64, corner, glass, composited(&area), |_, _, _| {});
+                });
+                assert!(bare == card_only, "{id} {level:?}: something besides the card and its words");
+
+                let words = |state: &WidgetState| {
+                    let (data, _, _, _) = metered(state, level);
+                    data.chunks(4).filter(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200).count()
+                };
+                assert!(words(&at("12:34", "")) > 0, "{id} {level:?}: the number is gone");
+                let said = words(&at("12:34", "lap 2")) > words(&at("12:34", ""));
+                assert_eq!(said, level == Level::Full, "{id} {level:?}: the detail is shown {said}");
             }
         }
     }
@@ -4217,7 +4325,7 @@ pub mod tests {
     const METERS: [&str; 5] = ["cpu", "battery", "time-progress", "pomodoro", "timer"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 10] = [
+    const GAUGES: [(&str, Gauge); 11] = [
         ("cpu", CPU_GAUGE),
         ("hot cpu", CPU_HOT_GAUGE),
         ("battery", BATTERY_GAUGE),
@@ -4228,6 +4336,7 @@ pub mod tests {
         ("pomodoro break", POMODORO_BREAK_GAUGE),
         ("timer", TIMER_GAUGE),
         ("timer done", TIMER_DONE_GAUGE),
+        ("stopwatch", STOPWATCH_GAUGE),
     ];
 
     /// A meter's words are white on its glass, and its share stands off the
@@ -4320,6 +4429,17 @@ pub mod tests {
         }
         assert_ne!(POMODORO_FOCUS_GAUGE.glass, POMODORO_BREAK_GAUGE.glass);
         assert_ne!(POMODORO_FOCUS_GAUGE.fill, POMODORO_BREAK_GAUGE.fill);
+    }
+
+    #[test]
+    fn a_stopwatch_wears_a_card_with_nothing_to_measure() {
+        for (detail, running) in [("running", true), ("lap 3", true), ("stopped", false), ("2 laps", false)] {
+            assert_eq!(
+                gauge_for(&reading("stopwatch", "12:34", detail, NO_PROGRESS, running)),
+                Some(STOPWATCH_GAUGE),
+                "{detail}"
+            );
+        }
     }
 
     #[test]
