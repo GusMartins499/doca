@@ -628,13 +628,16 @@ fn draw_simple(
     }
 }
 
-/// Water: a bottle that fills, and what is in it.
+/// Water: a glass card with the day poured into it.
 ///
-/// A bottle and not a ring, because a ring is a share and water is a
-/// quantity: you look at a bottle on a desk and know how much is left
-/// without reading a number off it. The fill is the day against the goal and
-/// the number beside it is the day in millilitres, so the glance and the
-/// reading answer the same question at two different speeds.
+/// The card is the tile, and the water in it rises with the day against the
+/// goal — a surface you read at a glance, the way you read a glass on a desk.
+/// The amount is written over the water in white, the week stands beside it
+/// as seven little bars, and a round `+` says what a press does.
+///
+/// Like a note, the card brings its own colours rather than the theme's:
+/// water is blue on every desktop, and white on deep blue reads under all of
+/// them.
 fn draw_water(
     water: &Water,
     look: Look,
@@ -649,91 +652,191 @@ fn draw_water(
         (water.drunk as f64 / water.goal as f64).clamp(0.0, 1.0)
     };
     let done = water.goal > 0 && water.drunk >= water.goal;
+    let icon = look.icon_size as f64;
+    let corner = (icon * 0.22).max(3.0).min(height / 2.0);
 
-    // The bottle keeps its own proportions whatever the tile is doing: it is
-    // a picture of a bottle, and a bottle stretched to fill a box stops being
-    // one.
-    let bottle_height = (height * 0.88).max(1.0);
-    let bottle_width = (bottle_height * 0.46).min(width);
-    let gap = (look.icon_size as f64 * 0.14).max(3.0);
-    let top = (height - bottle_height) / 2.0;
+    // The glass: deep teal going to night blue, the way the card in the
+    // design does, so the water has something dark to be bright against.
+    let _ = cr.save();
+    rounded(cr, 0.0, 0.0, width, height, corner);
+    let glass = cairo::LinearGradient::new(0.0, 0.0, width, height);
+    glass.add_color_stop_rgb(0.0, 0.07, 0.20, 0.22);
+    glass.add_color_stop_rgb(1.0, 0.09, 0.13, 0.25);
+    let _ = cr.set_source(&glass);
+    let _ = cr.fill_preserve();
+    // `clip` consumes the path, so the waves below are their own shapes and
+    // not the card's rectangle added to them.
+    cr.clip();
 
-    // The water first and the glass over it, so the outline stays crisp
-    // however full the bottle is. Stroked first, the inner half of the line
-    // is painted over and a full bottle loses its edge.
     if fraction > 0.0 {
-        let _ = cr.save();
-        bottle(cr, 0.0, top, bottle_width, bottle_height);
-        // `clip` and not `clip_preserve`: the bottle has to stop being the
-        // current path once it is the clip, or the fill below adds the water
-        // to it and paints the pair — which is a bottle full at every level,
-        // and was.
-        cr.clip();
-        let fill = look.palette.fill;
-        cr.set_source_rgba(fill.red(), fill.green(), fill.blue(), fill.alpha());
-        let surface = top + bottle_height * (1.0 - fraction);
-        cr.rectangle(0.0, surface, bottle_width, top + bottle_height - surface);
-        let _ = cr.fill();
-        let _ = cr.restore();
-    }
+        // Even a full card keeps a little air over the surface, or the wave
+        // would be cut off by the top edge and a full day would read as flat.
+        let surface = height - (height * 0.86) * fraction - height * 0.04;
+        let swell = (height * 0.045).max(1.0);
 
-    bottle(cr, 0.0, top, bottle_width, bottle_height);
-    let track = look.palette.track;
-    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
-    cr.set_line_width((look.icon_size as f64 * 0.045).max(1.0));
+        // The wave behind: paler, a step out of phase, so the water has depth.
+        wave(cr, width, height, surface - swell * 0.6, swell, 0.9);
+        cr.set_source_rgba(0.42, 0.72, 1.0, 0.35);
+        let _ = cr.fill();
+
+        // The water itself, lighter at the surface and deeper at the bottom.
+        wave(cr, width, height, surface, swell, 0.0);
+        let deep = cairo::LinearGradient::new(0.0, surface - swell, 0.0, height);
+        deep.add_color_stop_rgb(0.0, 0.36, 0.68, 1.0);
+        deep.add_color_stop_rgb(1.0, 0.10, 0.36, 0.86);
+        let _ = cr.set_source(&deep);
+        let _ = cr.fill();
+
+        // A light along the crest, which is most of what makes it look wet.
+        wave_crest(cr, width, surface, swell, 0.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+        cr.set_line_width((icon * 0.025).max(1.0));
+        let _ = cr.stroke();
+
+        // A few bubbles, always in the same places, inside whatever water
+        // there is.
+        for (x, y, r) in [(0.18, 0.80, 0.030), (0.31, 0.62, 0.020), (0.55, 0.86, 0.025), (0.72, 0.70, 0.018), (0.86, 0.90, 0.022)] {
+            let (bx, by) = (width * x, height * y);
+            if by - r * height > surface + swell {
+                cr.new_path();
+                cr.arc(bx, by, (r * height).max(1.0), 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.30);
+                let _ = cr.fill();
+            }
+        }
+    }
+    let _ = cr.restore();
+
+    // The rim of the glass: a hairline of white, brighter at the top.
+    rounded(cr, 0.5, 0.5, width - 1.0, height - 1.0, corner);
+    let rim = cairo::LinearGradient::new(0.0, 0.0, 0.0, height);
+    rim.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.22);
+    rim.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.06);
+    let _ = cr.set_source(&rim);
+    cr.set_line_width(1.0);
     let _ = cr.stroke();
 
-    // At the narrowest the bar ever squeezes a tile, the bottle is the whole
-    // of it: the fill still says how the day is going, and a number in the
-    // room left would be two characters of nothing.
+    let pad = (icon * 0.12).max(3.0);
+    let ink = gdk::RGBA::WHITE;
+    let quiet = faded(ink, 0.82);
+
+    // A card one icon wide is a glass and a count: bottles drunk of the
+    // bottles in a day, which is a number you can check against your desk.
     if look.level == Level::Minimal {
+        let bottles = water.drunk / water.bottle.max(1);
+        let of = water.goal.div_ceil(water.bottle.max(1));
+        let count = line(area, &format!("{bottles}/{of}"), text_size(look.icon_size, 0.30), true, width);
+        let (_, logical) = count.pixel_extents();
+        paint(cr, &count, 0.0, (height - logical.height() as f64) / 2.0, ink);
         return;
     }
 
-    let text_left = bottle_width + gap;
-    let room = (width - text_left).max(0.0);
+    // The `+` and the week, right to left, and only when the card is whole.
+    let mut right = width - pad;
+    if look.level == Level::Full {
+        let diameter = (height * 0.40).min(icon * 0.42);
+        let (cx, cy) = (right - diameter / 2.0, height / 2.0);
+        // A soft shadow under it, so it still stands out of a full card.
+        cr.new_path();
+        cr.arc(cx, cy + 1.0, diameter / 2.0 + 1.0, 0.0, std::f64::consts::TAU);
+        cr.set_source_rgba(0.02, 0.08, 0.25, 0.45);
+        let _ = cr.fill();
+        cr.new_path();
+        cr.arc(cx, cy, diameter / 2.0, 0.0, std::f64::consts::TAU);
+        cr.set_source_rgb(0.16, 0.52, 1.0);
+        let _ = cr.fill_preserve();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+        cr.set_line_width(1.0);
+        let _ = cr.stroke();
+        let arm = diameter * 0.24;
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.set_line_width((diameter * 0.11).max(1.2));
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.move_to(cx - arm, cy);
+        cr.line_to(cx + arm, cy);
+        cr.move_to(cx, cy - arm);
+        cr.line_to(cx, cy + arm);
+        let _ = cr.stroke();
+        cr.set_line_cap(cairo::LineCap::Butt);
+        right = cx - diameter / 2.0 - pad * 0.8;
+
+        let days = water.week.len();
+        if days > 0 {
+            let bar = (icon * 0.045).max(2.0);
+            let spacing = bar * 0.9;
+            let span = days as f64 * bar + (days - 1) as f64 * spacing;
+            let tallest = height * 0.46;
+            let floor = height / 2.0 + tallest / 2.0;
+            let most = water.week.iter().copied().max().unwrap_or(0).max(water.goal).max(1);
+            let left = right - span;
+            for (index, ml) in water.week.iter().enumerate() {
+                let tall = (tallest * (*ml as f64 / most as f64)).max(bar);
+                let x = left + index as f64 * (bar + spacing);
+                rounded(cr, x, floor - tall, bar, tall, bar / 2.0);
+                let today = index + 1 == days;
+                cr.set_source_rgba(1.0, 1.0, 1.0, if today { 0.95 } else { 0.55 });
+                let _ = cr.fill();
+            }
+            right = left - pad * 0.8;
+        }
+    }
+
+    let room = (right - pad).max(0.0);
     if room <= 0.0 {
         return;
     }
 
-    let amount = line(
+    let amount = if water.drunk < 10_000 {
+        format!("{} ml", water.drunk)
+    } else {
+        compact_ml(water.drunk)
+    };
+    let amount = line(area, &amount, text_size(look.icon_size, 0.30), true, room);
+    amount.set_alignment(pango::Alignment::Left);
+    let against = line(
         area,
-        &compact_ml(water.drunk),
-        text_size(look.icon_size, 0.34),
+        &if done {
+            "goal met".to_string()
+        } else {
+            format!("of {}", compact_ml(water.goal))
+        },
+        text_size(look.icon_size, 0.19),
         true,
         room,
     );
-    // The goal under the amount, and only when the tile is drawing whole —
-    // it is the one thing here the fill already says.
-    let against = (look.level == Level::Full).then(|| {
-        line(
-            area,
-            &if done {
-                "done".to_string()
-            } else {
-                format!("of {}", compact_ml(water.goal))
-            },
-            text_size(look.icon_size, 0.21),
-            false,
-            room,
-        )
-    });
+    against.set_alignment(pango::Alignment::Left);
 
+    // The goal over the amount, small, the way the design has its caption.
+    let against_height = against.pixel_extents().1.height() as f64;
     let amount_height = amount.pixel_extents().1.height() as f64;
-    let against_height = against
-        .as_ref()
-        .map(|layout| layout.pixel_extents().1.height() as f64)
-        .unwrap_or(0.0);
-    let mut y = ((height - amount_height - against_height) / 2.0).max(0.0);
+    let y = ((height - amount_height - against_height) / 2.0).max(0.0);
+    paint(cr, &against, pad, y, quiet);
+    paint(cr, &amount, pad, y + against_height, ink);
+}
 
-    // A day that reached its goal says so in the colour the water is drawn
-    // in, and says it by standing still. A tile that blinks to be noticed is
-    // a tile you end up covering up.
-    let ink = if done { look.palette.accent } else { look.palette.label };
-    paint(cr, &amount, text_left, y, ink);
-    y += amount_height;
-    if let Some(against) = against {
-        paint(cr, &against, text_left, y, look.palette.detail);
+/// The top of the water as a closed path: a gentle swell across the card,
+/// then down its sides and along the bottom.
+fn wave(cr: &cairo::Context, width: f64, height: f64, surface: f64, swell: f64, phase: f64) {
+    cr.new_path();
+    wave_crest(cr, width, surface, swell, phase);
+    cr.line_to(width, height);
+    cr.line_to(0.0, height);
+    cr.close_path();
+}
+
+/// Just the crest of [`wave`], left open, for the light along it.
+fn wave_crest(cr: &cairo::Context, width: f64, surface: f64, swell: f64, phase: f64) {
+    let steps = (width / 2.0).ceil().max(8.0) as usize;
+    // About a wave and a half across the card, whatever its width.
+    let period = width / 1.5;
+    for step in 0..=steps {
+        let x = width * step as f64 / steps as f64;
+        let y = surface + swell * (std::f64::consts::TAU * x / period + phase * std::f64::consts::PI).sin();
+        if step == 0 {
+            cr.move_to(x, y);
+        } else {
+            cr.line_to(x, y);
+        }
     }
 }
 
@@ -1053,36 +1156,6 @@ fn veil(cr: &cairo::Context, width: f64, height: f64) {
     let _ = cr.set_source(&shade);
     cr.rectangle(0.0, 0.0, width, height);
     let _ = cr.fill();
-}
-
-/// The outline of a bottle, left on `cr` as the current path.
-///
-/// Left rather than stroked so the caller can both draw it and pour into it
-/// without describing the shape twice.
-fn bottle(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64) {
-    let neck_width = width * 0.44;
-    let neck_height = height * 0.20;
-    let shoulder = height * 0.14;
-    let corner = width * 0.26;
-    let (left, right) = (x, x + width);
-    let neck_left = x + (width - neck_width) / 2.0;
-    let neck_right = x + (width + neck_width) / 2.0;
-    let shoulder_top = y + neck_height;
-    let body_top = shoulder_top + shoulder;
-    let bottom = y + height;
-
-    cr.new_path();
-    cr.move_to(neck_left, y);
-    cr.line_to(neck_right, y);
-    cr.line_to(neck_right, shoulder_top);
-    cr.curve_to(neck_right, body_top, right, shoulder_top, right, body_top);
-    cr.line_to(right, bottom - corner);
-    cr.curve_to(right, bottom, right, bottom, right - corner, bottom);
-    cr.line_to(left + corner, bottom);
-    cr.curve_to(left, bottom, left, bottom, left, bottom - corner);
-    cr.line_to(left, body_top);
-    cr.curve_to(left, shoulder_top, neck_left, body_top, neck_left, shoulder_top);
-    cr.close_path();
 }
 
 /// The gap between two things in a tile, and the one tunable in here.
@@ -2378,7 +2451,7 @@ pub mod tests {
         path.display().to_string()
     }
 
-    /// The bottle holds as much water as the day has in it.
+    /// The card holds as much water as the day has in it.
     ///
     /// Drawing is the one part of a tile no assertion about state can reach,
     /// and it is where the mistakes are: the first bottle written here was
@@ -2387,7 +2460,7 @@ pub mod tests {
     /// counting pixels would have said so.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
-    pub fn the_bottle_holds_as_much_as_the_day_has_in_it() {
+    pub fn the_card_holds_as_much_as_the_day_has_in_it() {
         let poured = |drunk: u32| {
             let (width, height) = (120, 48);
             let mut surface = gtk::cairo::ImageSurface::create(
@@ -2412,16 +2485,18 @@ pub mod tests {
             surface.flush();
             let stride = surface.stride() as usize;
             let data = surface.data().expect("the surface is still borrowed");
-            // Only the left third, where the bottle is: the amount beside it
-            // is text, and text that got longer would read as more water.
+            // Only the left third, clear of the `+` and the week, and only
+            // pixels that are water: blue well over red. The glass behind is
+            // dark and the words over it are white, so neither counts.
             //
-            // Any alpha at all, not a threshold: the outline is drawn in the
-            // groove colour, which is a fourteen-percent white — asking for
-            // half-opaque pixels finds the water and calls the glass nothing.
+            // Cairo's ARGB32 is native-endian, so on this machine a pixel is
+            // blue, green, red, alpha in memory.
             let mut painted = 0usize;
             for row in 0..height as usize {
                 for column in 0..(width as usize / 3) {
-                    if data[row * stride + column * 4 + 3] > 0 {
+                    let at = row * stride + column * 4;
+                    let (blue, red) = (data[at] as i32, data[at + 2] as i32);
+                    if blue > 150 && blue - red > 80 {
                         painted += 1;
                     }
                 }
@@ -2431,14 +2506,14 @@ pub mod tests {
 
         let (empty, quarter, half, full) = (poured(0), poured(500), poured(1000), poured(2000));
 
-        assert!(empty > 0, "nothing was drawn at all");
+        assert_eq!(empty, 0, "an empty day already has water in it");
         assert!(
             quarter > empty && half > quarter && full > half,
-            "the bottle does not track the day: {empty} < {quarter} < {half} < {full}"
+            "the card does not track the day: {empty} < {quarter} < {half} < {full}"
         );
         assert!(
-            full > empty * 2,
-            "a full bottle is barely fuller than an empty one: {empty} against {full}"
+            full > quarter * 2,
+            "a full card is barely fuller than a quarter one: {quarter} against {full}"
         );
     }
 
@@ -2987,3 +3062,4 @@ pub mod tests {
         assert!(text_size(96, 0.30) > text_size(24, 0.30));
     }
 }
+
