@@ -2270,6 +2270,9 @@ fn on_a_display() {
     widget_tile::tests::a_cover_of_any_colour_is_made_dark_enough_to_write_on();
     widget_tile::tests::words_on_a_cover_are_white_whatever_the_theme_is();
     widget_tile::tests::the_card_holds_as_much_as_the_day_has_in_it();
+    widget_tile::tests::a_meter_one_icon_wide_rings_as_much_as_its_share();
+    widget_tile::tests::a_meter_keeps_its_share_and_its_number_as_it_gives_way();
+    widget_tile::tests::a_meter_looks_the_same_whatever_the_desktop_is_wearing();
     widget_tile::tests::a_calendar_tile_keeps_its_date_and_gives_up_its_list();
     widget_tile::tests::showing_the_same_widgets_again_keeps_the_very_same_tiles();
     widget_tile::tests::a_note_being_typed_is_on_the_tile_before_the_daemon_hears();
@@ -2296,6 +2299,8 @@ fn on_a_display() {
     widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
     widget_tile::tests::every_word_on_these_tiles_stands_off_the_bar_on_every_theme();
     widget_tile::tests::these_tiles_stay_inside_themselves_at_every_size();
+    widget_tile::tests::a_claude_card_looks_the_same_whatever_the_desktop_is_wearing();
+    widget_tile::tests::a_claude_card_writes_its_number_at_every_level();
     panel::tests::reading_a_note_and_closing_writes_nothing();
     panel::tests::typing_is_shown_at_every_key_and_written_once();
     panel::tests::the_weeks_bars_stand_for_the_days_they_are_drawn_from();
