@@ -493,7 +493,12 @@ fn draw_in(
     }
 
     match state.body() {
-        Ok(Body::Simple(simple)) => draw_simple(&simple, look, area, cr, width, height),
+        // A widget that measures a share wears it on a card; the rest of the
+        // simple ones, and a meter with nothing to measure, are two lines.
+        Ok(Body::Simple(simple)) => match gauge_of(&state.id, &simple) {
+            Some(gauge) => draw_meter(&simple, gauge, look, area, cr, width, height),
+            None => draw_simple(&simple, look, area, cr, width, height),
+        },
         Ok(Body::Water(water)) => draw_water(&water, look, area, cr, width, height),
         Ok(Body::Music(music)) => draw_music(&music, look, area, cr, width, height),
         Ok(Body::Note(note)) => draw_note(&note, look, area, cr, width, height),
@@ -622,6 +627,208 @@ fn draw_simple(
         let fraction = simple.progress.clamp(0.0, 1.0);
         groove(cr, 0.0, y + GAP, width, thickness, fraction, look.palette.track, look.palette.fill);
     }
+}
+
+/// What a meter wears: the glass of its card, and the colour its share is
+/// drawn in on that glass.
+///
+/// A meter brings its own colours, the way water does, rather than the
+/// theme's. The theme's palette is chosen to stand off the bar, and inside a
+/// card the bar is not what the words stand on: the glass is. Colours of its
+/// own let every meter be dark glass with white on it, which reads the same
+/// under all four themes, and let a meter say something with its colour — a
+/// hot processor, a battery running low — that one accent per theme cannot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Gauge {
+    glass: Glass,
+    fill: (f64, f64, f64),
+}
+
+/// The processor at work: a cool green, on glass to match.
+const CPU_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.07, 0.18, 0.16),
+        to: (0.07, 0.11, 0.17),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.33, 0.87, 0.67),
+};
+
+/// The processor working hard enough that the daemon marks the tile: the
+/// same card gone the colour of heat.
+const CPU_HOT_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.27, 0.10, 0.06),
+        to: (0.17, 0.07, 0.10),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.58, 0.30),
+};
+
+/// A battery being run on: slate glass, and the charge in a spring green.
+const BATTERY_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.12, 0.14, 0.18),
+        to: (0.08, 0.09, 0.14),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.56, 0.90, 0.44),
+};
+
+/// A battery on the charger — what the daemon marks it for: the glass goes
+/// green with it.
+const BATTERY_CHARGING_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.06, 0.21, 0.12),
+        to: (0.06, 0.13, 0.12),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.42, 0.95, 0.55),
+};
+
+/// A battery running low and not on the charger: red glass, so it is seen
+/// before it is read. The number is still what says how low.
+const BATTERY_LOW_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.29, 0.08, 0.09),
+        to: (0.17, 0.06, 0.10),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.45, 0.42),
+};
+
+/// The charge at and under which a battery is low: a fifth, where most
+/// desktops start warning.
+const LOW_BATTERY: f64 = 0.20;
+
+/// The day, the week or the year going by: dusk violet, for time.
+const TIME_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.14, 0.10, 0.25),
+        to: (0.08, 0.08, 0.19),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.70, 0.60, 1.0),
+};
+
+/// Which meter, if any, this widget is, and what it is wearing now.
+///
+/// Read off the widget's id, because a meter arrives as a [`Simple`] like
+/// every other widget without a body of its own, and off what the state
+/// already says — whether it is marked, how full it is — and nothing else.
+/// A meter with nothing to measure is no meter: it is two lines, like the
+/// battery on a machine without one.
+fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
+    if simple.progress == NO_PROGRESS {
+        return None;
+    }
+    match id {
+        "cpu" if simple.active => Some(CPU_HOT_GAUGE),
+        "cpu" => Some(CPU_GAUGE),
+        // Marked is charging; low is read off the charge itself, so neither
+        // needs the daemon to say anything it does not already.
+        "battery" if simple.active => Some(BATTERY_CHARGING_GAUGE),
+        "battery" if simple.progress <= LOW_BATTERY => Some(BATTERY_LOW_GAUGE),
+        "battery" => Some(BATTERY_GAUGE),
+        "time-progress" => Some(TIME_GAUGE),
+        _ => None,
+    }
+}
+
+/// The ink on a meter's card, and the quieter ink of its second word.
+const ON_A_GAUGE: gdk::RGBA = gdk::RGBA::WHITE;
+const QUIET_ON_A_GAUGE: f64 = 0.78;
+
+/// How much of the white the track a share runs in is.
+const GAUGE_TRACK: f64 = 0.16;
+
+fn rgb((red, green, blue): (f64, f64, f64)) -> gdk::RGBA {
+    gdk::RGBA::new(red, green, blue, 1.0)
+}
+
+/// A meter: a share with its number, on a card.
+///
+/// Wide, the number and what it is a share of sit over a pill as long as the
+/// card, filled as far as the share goes. One icon wide there is no room for
+/// a pill worth reading, so the share goes round a ring and the number sits
+/// in the middle of it — the last two things a meter gives up, because they
+/// are the meter.
+fn draw_meter(
+    simple: &Simple,
+    gauge: Gauge,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let icon = look.icon_size as f64;
+    let corner = (icon * 0.22).max(3.0).min(height / 2.0);
+    let fraction = simple.progress.clamp(0.0, 1.0);
+    let track = faded(ON_A_GAUGE, GAUGE_TRACK);
+    let fill = rgb(gauge.fill);
+
+    card(cr, width, height, corner, gauge.glass, composited(area), |cr, width, height| {
+        if look.level == Level::Minimal {
+            let (cx, cy, radius, thickness) = ring_in(width, height);
+            ring(cr, cx, cy, radius, thickness, fraction, track, fill);
+
+            // The number inside the ring, and without its `%` when that is
+            // what it takes to fit: the ring already says it is a share.
+            let inner = ((radius - thickness / 2.0) * 2.0 - 2.0).max(0.0);
+            let size = text_size(look.icon_size, 0.22);
+            let mut number = line(area, &simple.label, size, true, inner);
+            if number.is_ellipsized() {
+                if let Some(bare) = simple.label.strip_suffix('%') {
+                    number = line(area, bare, size, true, inner);
+                }
+            }
+            let (_, logical) = number.pixel_extents();
+            paint(cr, &number, cx - inner / 2.0, cy - logical.height() as f64 / 2.0, ON_A_GAUGE);
+            return;
+        }
+
+        let pad = (icon * 0.14).max(3.0);
+        let room = (width - pad * 2.0).max(0.0);
+        let thickness = (icon * 0.08).round().max(2.0);
+
+        let number = line(area, &simple.label, text_size(look.icon_size, 0.30), true, room);
+        number.set_alignment(pango::Alignment::Left);
+        let (_, logical) = number.pixel_extents();
+        let number_height = logical.height() as f64;
+
+        let gap = (icon * 0.08).max(GAP);
+        let y = ((height - number_height - gap - thickness) / 2.0).max(0.0);
+        paint(cr, &number, pad, y, ON_A_GAUGE);
+
+        // What the number is a share of, on the same line and level with it
+        // at the right, in whatever room the number leaves.
+        if look.level == Level::Full && !simple.detail.is_empty() {
+            let used = logical.width() as f64 + pad * 0.6;
+            let of = line(area, &simple.detail, text_size(look.icon_size, 0.19), false, (room - used).max(0.0));
+            of.set_alignment(pango::Alignment::Right);
+            let lift = (number.baseline() - of.baseline()) as f64 / pango::SCALE as f64;
+            paint(cr, &of, pad + used, y + lift, faded(ON_A_GAUGE, QUIET_ON_A_GAUGE));
+        }
+
+        groove(cr, pad, y + number_height + gap, room, thickness, fraction, track, fill);
+    });
+}
+
+/// Where a ring sits in a card one icon wide: in the middle, as big as the
+/// card leaves room for, and thick enough to read as a share and not a line.
+fn ring_in(width: f64, height: f64) -> (f64, f64, f64, f64) {
+    let side = width.min(height);
+    let thickness = (side * 0.09).max(2.0);
+    let margin = (side * 0.10).max(2.0);
+    let radius = (side / 2.0 - margin - thickness / 2.0).max(1.0);
+    (width / 2.0, height / 2.0, radius, thickness)
 }
 
 /// Water: a glass card with the day poured into it.
@@ -2797,7 +3004,7 @@ pub mod tests {
             for level in [Level::Full, Level::Compact, Level::Minimal] {
                 for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
                     let look = Look { icon_size, palette, level };
-                    for state in calendars().iter().chain(usages().iter()) {
+                    for state in calendars().iter().chain(usages().iter()).chain(meters().iter()) {
                         let (inside, outside) = ink_of(state, look);
                         let said = spoken(state);
                         assert!(inside > 0, "{theme} {level:?} {icon_size}: {said} drew nothing");
@@ -3091,6 +3298,168 @@ pub mod tests {
             full > quarter * 2,
             "a full card is barely fuller than a quarter one: {quarter} against {full}"
         );
+    }
+
+    /// A meter as the bar would draw it: at its declared size for this level,
+    /// under the default theme, and its pixels.
+    fn metered(state: &WidgetState, level: Level) -> (Vec<u8>, usize, usize, usize) {
+        let look = Look { level, ..look(ICON) };
+        let (width, height) = (declared_width(state, look), height_of(ICON));
+        let (data, stride) = pixels(width, height, |cr| {
+            let area = gtk::DrawingArea::new();
+            draw_in(state, look, &area, cr, width as f64, height as f64);
+        });
+        (data, stride, width as usize, height as usize)
+    }
+
+    /// Whether a pixel is the share: near the colour it is drawn in, which is
+    /// none of the glass, the white or the track. Blue, green, red in memory.
+    fn is_share(pixel: &[u8], fill: (f64, f64, f64)) -> bool {
+        let near = |byte: u8, channel: f64| (byte as f64 - channel * 255.0).abs() < 40.0;
+        near(pixel[2], fill.0) && near(pixel[1], fill.1) && near(pixel[0], fill.2)
+    }
+
+    /// The share's pixels, by quarter of the tile: top right, bottom right,
+    /// bottom left, top left.
+    fn share_quarters(state: &WidgetState, level: Level) -> [usize; 4] {
+        let fill = gauge_for(state).expect("not a meter").fill;
+        let (data, stride, width, height) = metered(state, level);
+        let mut quarters = [0; 4];
+        for y in 0..height {
+            for x in 0..width {
+                if is_share(&data[y * stride + x * 4..], fill) {
+                    let quarter = match (x >= width / 2, y >= height / 2) {
+                        (true, false) => 0,
+                        (true, true) => 1,
+                        (false, true) => 2,
+                        (false, false) => 3,
+                    };
+                    quarters[quarter] += 1;
+                }
+            }
+        }
+        quarters
+    }
+
+    /// How many columns of the tile the share reaches across.
+    fn share_columns(state: &WidgetState, level: Level) -> usize {
+        let fill = gauge_for(state).expect("not a meter").fill;
+        let (data, stride, width, height) = metered(state, level);
+        (0..width)
+            .filter(|x| (0..height).any(|y| is_share(&data[y * stride + x * 4..], fill)))
+            .count()
+    }
+
+    /// The meters at their longest and their emptiest, for the checks that
+    /// go through every tile.
+    fn meters() -> Vec<WidgetState> {
+        vec![
+            reading("cpu", "63%", "CPU", 0.63, false),
+            reading("cpu", "100%", "CPU", 1.0, true),
+            reading("cpu", "0%", "CPU", 0.0, false),
+            reading("battery", "100%", "full", 1.0, false),
+            reading("battery", "18%", "25m", 0.18, false),
+            reading("battery", "64%", "11h 59 to full", 0.64, true),
+            reading("battery", "—", "no battery", NO_PROGRESS, false),
+            reading("time-progress", "100%", "of this year", 1.0, false),
+            reading("time-progress", "0%", "of this week", 0.0, false),
+        ]
+    }
+
+    /// One icon wide, a meter's share goes round a ring, as far round as the
+    /// share is, from twelve o'clock.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_meter_one_icon_wide_rings_as_much_as_its_share() {
+        for id in METERS {
+            let at = |share: f64| reading(id, &format!("{}%", (share * 100.0).round()), "", share, false);
+            let total = |share: f64| share_quarters(&at(share), Level::Minimal).iter().sum::<usize>();
+
+            let [top_right, bottom_right, bottom_left, top_left] = share_quarters(&at(0.25), Level::Minimal);
+            assert!(
+                top_right > (bottom_right + bottom_left + top_left) * 3,
+                "{id}: a quarter is not the top right: {top_right} against {}",
+                bottom_right + bottom_left + top_left
+            );
+            assert_eq!(total(0.0), 0, "{id}: nothing measured, and a share drawn");
+            let ratio = total(0.5) as f64 / total(1.0) as f64;
+            assert!((0.42..0.58).contains(&ratio), "{id}: half a ring is {ratio:.2} of a whole one");
+        }
+    }
+
+    /// Wide, the share is a pill as long as the share, at both the widths a
+    /// wide tile has; one icon wide it is a ring and no pill. The number is
+    /// there at every level, and what it is a share of only when the tile is
+    /// whole.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_meter_keeps_its_share_and_its_number_as_it_gives_way() {
+        for id in METERS {
+            let at = |share: f64, detail: &str| reading(id, "63%", detail, share, false);
+            for level in [Level::Full, Level::Compact] {
+                let ratio = share_columns(&at(0.5, ""), level) as f64 / share_columns(&at(1.0, ""), level) as f64;
+                assert!((0.42..0.58).contains(&ratio), "{id} {level:?}: half a pill is {ratio:.2} of a whole one");
+                let [top_right, bottom_right, bottom_left, top_left] = share_quarters(&at(1.0, ""), level);
+                assert!(
+                    bottom_right + bottom_left > (top_right + top_left) * 3,
+                    "{id} {level:?}: the pill is not under the number"
+                );
+            }
+            let [top_right, bottom_right, bottom_left, top_left] = share_quarters(&at(1.0, ""), Level::Minimal);
+            assert!(
+                [top_right, bottom_right, bottom_left, top_left].iter().all(|quarter| *quarter > 0),
+                "{id}: a whole ring is not all the way round"
+            );
+
+            // The words: white, and only the words are.
+            let words = |state: &WidgetState, level| {
+                let (data, _, _, _) = metered(state, level);
+                data.chunks(4).filter(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200).count()
+            };
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                assert!(words(&at(0.5, ""), level) > 0, "{id} {level:?}: the number is gone");
+            }
+            assert!(
+                words(&at(0.5, "CPU"), Level::Full) > words(&at(0.5, ""), Level::Full),
+                "{id}: a whole tile does not say what its number is a share of"
+            );
+            for level in [Level::Compact, Level::Minimal] {
+                assert_eq!(
+                    metered(&at(0.5, "CPU"), level).0,
+                    metered(&at(0.5, ""), level).0,
+                    "{id} {level:?}: a tile giving way still says what its number is a share of"
+                );
+            }
+        }
+    }
+
+    /// The theme has no say in a meter: the same reading under all four
+    /// themes is the same pixels, at every level.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_meter_looks_the_same_whatever_the_desktop_is_wearing() {
+        let area = gtk::DrawingArea::new();
+        // A meter with nothing to measure is two lines in the theme's ink.
+        for state in meters().into_iter().filter(|state| gauge_for(state).is_some()) {
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let mut first: Option<Vec<u8>> = None;
+                for theme in crate::theme::names() {
+                    let look = Look { icon_size: ICON, palette: crate::theme::palette_for(theme, &area.style_context()), level };
+                    let (width, height) = (declared_width(&state, look), height_of(ICON));
+                    let (data, _) = pixels(width, height, |cr| {
+                        draw_in(&state, look, &area, cr, width as f64, height as f64);
+                    });
+                    match &first {
+                        None => first = Some(data),
+                        Some(before) => assert!(
+                            *before == data,
+                            "{} {level:?} came out differently under {theme}, so the theme reached it",
+                            spoken(&state)
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     /// The calendar draws its date always, its list only when there is room,
@@ -3703,6 +4072,108 @@ pub mod tests {
         let (data, _) = pixels(100, 100, |cr| ring(cr, 50.0, 50.0, 40.0, 8.0, 0.0, track, fill));
         let inked = data.chunks(4).filter(|pixel| pixel[3] > 0).count();
         assert!(inked > 0, "an empty ring is not there at all");
+    }
+
+    /// The widgets that are meters.
+    const METERS: [&str; 3] = ["cpu", "battery", "time-progress"];
+
+    /// Every glass a meter can wear.
+    const GAUGES: [(&str, Gauge); 6] = [
+        ("cpu", CPU_GAUGE),
+        ("hot cpu", CPU_HOT_GAUGE),
+        ("battery", BATTERY_GAUGE),
+        ("charging battery", BATTERY_CHARGING_GAUGE),
+        ("low battery", BATTERY_LOW_GAUGE),
+        ("time", TIME_GAUGE),
+    ];
+
+    /// A meter's words are white on its glass, and its share stands off the
+    /// track it runs in, whatever the glass: 4.5:1 for the words, WCAG's
+    /// figure for small text, and 3:1 for the share, its figure for a shape
+    /// that has to be seen. Across the whole gradient, since a word can sit
+    /// anywhere on it. The theme is not in this at all, which is the point of
+    /// a meter bringing its own colours.
+    #[test]
+    fn a_meter_is_readable_on_every_glass_it_wears() {
+        use crate::theme::{contrast, over};
+        for (name, gauge) in GAUGES {
+            let Glass { from, to, .. } = gauge.glass;
+            for step in 0..=4 {
+                let t = step as f64 / 4.0;
+                let mix = |a: f64, b: f64| a + (b - a) * t;
+                let glass = gdk::RGBA::new(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2), 1.0);
+                for (what, ink) in [("number", ON_A_GAUGE), ("detail", faded(ON_A_GAUGE, QUIET_ON_A_GAUGE))] {
+                    let ratio = contrast(over(ink, glass), glass);
+                    assert!(ratio >= 4.5, "{name}: the {what} stands {ratio:.2} off its glass");
+                }
+                let track = over(faded(ON_A_GAUGE, GAUGE_TRACK), glass);
+                let ratio = contrast(rgb(gauge.fill), track);
+                assert!(ratio >= 3.0, "{name}: the share stands {ratio:.2} off its track");
+            }
+        }
+    }
+
+    fn reading(id: &str, label: &str, detail: &str, progress: f64, active: bool) -> WidgetState {
+        WidgetState::new(
+            id,
+            Body::Simple(Simple { label: label.to_string(), detail: detail.to_string(), progress, active }),
+        )
+    }
+
+    fn gauge_for(state: &WidgetState) -> Option<Gauge> {
+        match state.body() {
+            Ok(Body::Simple(simple)) => gauge_of(&state.id, &simple),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn only_a_widget_that_measures_a_share_is_a_meter() {
+        assert_eq!(gauge_for(&reading("cpu", "63%", "CPU", 0.63, false)), Some(CPU_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("cpu", "93%", "CPU", 0.93, true)),
+            Some(CPU_HOT_GAUGE),
+            "a processor the daemon marks is hot"
+        );
+        assert_eq!(gauge_for(&reading("cpu", "—", "CPU", NO_PROGRESS, false)), None, "nothing to measure");
+
+        assert_eq!(gauge_for(&reading("battery", "64%", "3h 10", 0.64, false)), Some(BATTERY_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("battery", "18%", "25m", 0.18, false)),
+            Some(BATTERY_LOW_GAUGE),
+            "a fifth or less and not charging is low"
+        );
+        assert_eq!(gauge_for(&reading("battery", "20%", "", 0.20, false)), Some(BATTERY_LOW_GAUGE));
+        assert_eq!(gauge_for(&reading("battery", "21%", "", 0.21, false)), Some(BATTERY_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("battery", "18%", "1h 20 to full", 0.18, true)),
+            Some(BATTERY_CHARGING_GAUGE),
+            "a low battery on the charger is charging, not low"
+        );
+        assert_eq!(
+            gauge_for(&reading("battery", "—", "no battery", NO_PROGRESS, false)),
+            None,
+            "a machine with no battery has nothing to measure"
+        );
+        assert_eq!(gauge_for(&reading("time-progress", "63%", "of today", 0.63, false)), Some(TIME_GAUGE));
+        // A share that is not a meter's: the pomodoro's is the next issue's.
+        assert_eq!(gauge_for(&reading("pomodoro", "18:42", "focus", 0.25, false)), None);
+        assert_eq!(gauge_for(&reading("clock", "14:05", "Sun 8 Nov", NO_PROGRESS, false)), None);
+    }
+
+    #[test]
+    fn a_ring_fits_the_card_it_is_on_at_every_size() {
+        for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
+            let side = Level::Minimal.width(Tile::Wide, icon_size) as f64;
+            let height = height_of(icon_size) as f64;
+            let (cx, cy, radius, thickness) = ring_in(side, height);
+            let reach = radius + thickness / 2.0;
+            assert!(
+                cx - reach >= 1.0 && cx + reach <= side - 1.0 && cy - reach >= 1.0 && cy + reach <= height - 1.0,
+                "{icon_size}: a ring of {reach:.1} round ({cx:.1}, {cy:.1}) leaves a {side}x{height} card"
+            );
+            assert!(radius - thickness / 2.0 > thickness, "{icon_size}: a ring with no middle to write in");
+        }
     }
 
     /// Where a card puts ink, drawn at the middle of a surface with room
