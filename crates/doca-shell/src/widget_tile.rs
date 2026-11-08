@@ -1325,6 +1325,9 @@ fn claude_track() -> gdk::RGBA {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Face {
     glass: Glass,
+    /// The colour a leading `↓` or `↑` is picked out in, for a widget whose
+    /// words say which way something is going.
+    arrow: Option<(f64, f64, f64)>,
 }
 
 /// The clock: graphite going to night, the colour of a watch face.
@@ -1335,6 +1338,19 @@ const CLOCK_FACE: Face = Face {
         rim: (0.22, 0.06),
         lifted: false,
     },
+    arrow: None,
+};
+
+/// The network: deep sea blue, with the arrows in a sky blue on it, so the
+/// way the traffic goes is seen apart from how much of it there is.
+const NETWORK_FACE: Face = Face {
+    glass: Glass {
+        from: (0.05, 0.14, 0.25),
+        to: (0.05, 0.08, 0.17),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    arrow: Some((0.48, 0.82, 1.0)),
 };
 
 /// Which widget, if any, wears a plain card, read off its id the way a
@@ -1342,6 +1358,7 @@ const CLOCK_FACE: Face = Face {
 fn face_of(id: &str) -> Option<Face> {
     match id {
         "clock" => Some(CLOCK_FACE),
+        "network" => Some(NETWORK_FACE),
         _ => None,
     }
 }
@@ -1350,27 +1367,63 @@ fn face_of(id: &str) -> Option<Face> {
 const ON_A_FACE: gdk::RGBA = gdk::RGBA::WHITE;
 const QUIET_ON_A_FACE: f64 = 0.76;
 
-/// What a plain card writes at a level: the loud words, and the small ones
-/// under them while there is room for them.
+/// What a plain card writes at a level: the loud words, and either the small
+/// ones under them or loud ones of the same weight beside them, while there
+/// is room for them.
 #[derive(Debug, Clone, PartialEq)]
 struct Says {
     main: String,
+    beside: Option<String>,
     under: Option<String>,
 }
 
 /// The small words are the first thing a crowded bar takes: only a whole
 /// tile keeps them. The loud ones — the time — are kept at every level,
 /// because a clock that cannot say the time is not worth the pixels.
-fn face_says(simple: &Simple, level: Level) -> Says {
-    let keeps = level == Level::Full && !simple.detail.is_empty();
+///
+/// The network's two rates are both loud, so a whole tile writes them side
+/// by side, down on the left and up on the right where they always are; a
+/// tile giving way keeps the busier of the two, its arrow saying which.
+fn face_says(id: &str, simple: &Simple, level: Level) -> Says {
+    let whole = level == Level::Full && !simple.detail.is_empty();
+    if id == "network" {
+        let main = if whole || rate_of(&simple.label) >= rate_of(&simple.detail) {
+            &simple.label
+        } else {
+            &simple.detail
+        };
+        return Says {
+            main: main.clone(),
+            beside: whole.then(|| simple.detail.clone()),
+            under: None,
+        };
+    }
     Says {
         main: simple.label.clone(),
-        under: keeps.then(|| simple.detail.clone()),
+        beside: None,
+        under: whole.then(|| simple.detail.clone()),
     }
 }
 
+/// The arrows the network writes its rates behind.
+const ARROWS: [char; 2] = ['\u{2193}', '\u{2191}'];
+
+/// Bytes a second, read back off a rate as the daemon writes it: `↓1.2M`,
+/// `↑180K`. Anything else is nothing, which only ever decides which of two
+/// rates a narrow tile shows.
+fn rate_of(words: &str) -> f64 {
+    let rate = words.trim().trim_start_matches(ARROWS);
+    let (number, unit) = match rate.char_indices().last() {
+        Some((at, 'M')) => (&rate[..at], 1024.0 * 1024.0),
+        Some((at, 'K')) => (&rate[..at], 1024.0),
+        _ => (rate, 1.0),
+    };
+    number.parse::<f64>().map_or(0.0, |number| number * unit)
+}
+
 /// A plain card: the loud words large in white in the middle, the small ones
-/// under them quieter, inside the glass so nothing is drawn past its corners.
+/// under them quieter — or two loud ones side by side, in a half each —
+/// inside the glass so nothing is drawn past its corners.
 fn draw_face(
     id: &str,
     simple: &Simple,
@@ -1383,7 +1436,7 @@ fn draw_face(
     let Some(face) = face_of(id) else { return };
     let icon = look.icon_size as f64;
     let corner = (icon * 0.22).max(3.0).min(height / 2.0);
-    let says = face_says(simple, look.level);
+    let says = face_says(id, simple, look.level);
 
     card(cr, width, height, corner, face.glass, composited(area), |cr, width, height| {
         // One icon wide the words take what the corners leave them, which is
@@ -1394,8 +1447,48 @@ fn draw_face(
             (icon * 0.14).max(3.0)
         };
         let room = (width - pad * 2.0).max(0.0);
+        let tint = |layout: &pango::Layout| {
+            if let Some(arrow) = face.arrow {
+                picked_out(layout, arrow);
+            }
+        };
+
+        // Two loud lines share the card in two halves and one size: the
+        // wider of the two is fitted, and the other wears the font it got.
+        if let Some(beside) = &says.beside {
+            let gap = pad * 0.5;
+            let half = ((room - gap) / 2.0).max(0.0);
+            let size = text_size(look.icon_size, 0.30);
+            let natural = |words: &str| {
+                let layout = line(area, words, size, true, half);
+                layout.set_width(-1);
+                layout.pixel_extents().1.width()
+            };
+            let (wider, other) = if natural(&says.main) >= natural(beside) {
+                (&says.main, beside)
+            } else {
+                (beside, &says.main)
+            };
+            // Both arrows or neither, so the whole line is fitted here.
+            let fitted_wider = fitted_whole(area, wider, size, half);
+            let fitted_other = line(area, other, size, true, half);
+            fitted_other.set_font_description(fitted_wider.font_description().as_ref());
+            let (left, right) = if *wider == says.main {
+                (fitted_wider, fitted_other)
+            } else {
+                (fitted_other, fitted_wider)
+            };
+            tint(&left);
+            tint(&right);
+            let y = ((height - left.pixel_extents().1.height() as f64) / 2.0).max(0.0);
+            paint(cr, &left, pad, y, ON_A_FACE);
+            paint(cr, &right, pad + half + gap, y, ON_A_FACE);
+            return;
+        }
+
         let share = if look.level == Level::Minimal { 0.30 } else { 0.36 };
         let main = fitted(area, &says.main, text_size(look.icon_size, share), room);
+        tint(&main);
         let under = says.under.as_deref().map(|words| line(area, words, text_size(look.icon_size, 0.19), false, room));
 
         let main_height = main.pixel_extents().1.height() as f64;
@@ -1413,8 +1506,17 @@ fn draw_face(
 ///
 /// Never smaller than [`text_size`] lets text be: at that size it gives up
 /// its weight instead, since a semibold digit is a good part wider than a
-/// regular one. Past that it is ellipsised like any line.
+/// regular one, and then the arrow in front of a rate, the way a meter one
+/// icon wide gives up its `%`. Past that it is ellipsised like any line.
 fn fitted(area: &gtk::DrawingArea, text: &str, size: f64, room: f64) -> pango::Layout {
+    let layout = fitted_whole(area, text, size, room);
+    match text.strip_prefix(ARROWS) {
+        Some(bare) if layout.is_ellipsized() => fitted_whole(area, bare, size, room),
+        _ => layout,
+    }
+}
+
+fn fitted_whole(area: &gtk::DrawingArea, text: &str, size: f64, room: f64) -> pango::Layout {
     let mut size = size;
     let mut layout = line(area, text, size, true, room);
     // Hinting rounds a smaller size its own way, so the first guess can still
@@ -1432,6 +1534,23 @@ fn fitted(area: &gtk::DrawingArea, text: &str, size: f64, room: f64) -> pango::L
         layout = line(area, text, size, false, room);
     }
     layout
+}
+
+/// A leading arrow in a colour of its own; the rest of the line keeps the
+/// ink it is painted in.
+fn picked_out(layout: &pango::Layout, (red, green, blue): (f64, f64, f64)) {
+    let text = layout.text();
+    let Some(arrow) = text.chars().next().filter(|first| ARROWS.contains(first)) else { return };
+    // A copy, and not the layout's own list changed in place: a layout handed
+    // back the list it already has takes it to be no change, and keeps the
+    // lines it laid out before the arrow had a colour.
+    let attributes = layout.attributes().and_then(|own| own.copy()).unwrap_or_default();
+    let channel = |value: f64| (value * u16::MAX as f64).round() as u16;
+    let mut colour = pango::AttrColor::new_foreground(channel(red), channel(green), channel(blue));
+    colour.set_start_index(0);
+    colour.set_end_index(arrow.len_utf8() as u32);
+    attributes.insert(colour);
+    layout.set_attributes(Some(&attributes));
 }
 
 /// A note, on the paper it was written on.
@@ -3592,6 +3711,10 @@ pub mod tests {
         vec![
             reading("clock", "14:05", "Sun 08/11", NO_PROGRESS, false),
             reading("clock", "00:00", "Wed 30/09", NO_PROGRESS, false),
+            reading("network", "\u{2193}1.2M", "\u{2191}180K", NO_PROGRESS, true),
+            reading("network", "\u{2193}12K", "\u{2191}3.4M", NO_PROGRESS, true),
+            reading("network", "\u{2193}888K", "\u{2191}888K", NO_PROGRESS, true),
+            reading("network", "\u{2193}0K", "\u{2191}0K", NO_PROGRESS, false),
         ]
     }
 
@@ -3635,9 +3758,10 @@ pub mod tests {
     }
 
     /// The small words go first and the loud ones never: a whole tile writes
-    /// both, a tile giving way writes the same pixels whatever its small
-    /// words are, and the loud ones are there at every level — whole, made
-    /// smaller rather than cut, at every icon size one icon wide.
+    /// both, a tile giving way writes the same pixels as one that only ever
+    /// had the words it kept, and the loud ones are there at every level —
+    /// whole, made smaller rather than cut, at every icon size one icon wide.
+    /// For the network the words given up are the quieter of its two rates.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
     pub fn a_plain_card_gives_up_its_small_words_first() {
@@ -3652,21 +3776,28 @@ pub mod tests {
                 "{said}: a whole tile does not write its small words"
             );
             for level in [Level::Compact, Level::Minimal] {
+                let kept = reading(&state.id, &face_says(&state.id, &simple, level).main, "", NO_PROGRESS, false);
                 assert!(
-                    faced(&state, level, "midnight") == faced(&quiet, level, "midnight"),
+                    faced(&state, level, "midnight") == faced(&kept, level, "midnight"),
                     "{said} {level:?}: a tile giving way still writes its small words"
                 );
             }
             for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let written = faced(&state, level, "midnight");
                 assert!(
-                    white_on(&faced(&state, level, "midnight")) > white_on(&faced(&silent, level, "midnight")),
+                    white_on(&written) > white_on(&faced(&silent, level, "midnight")),
                     "{said} {level:?}: the loud words are gone"
                 );
+                // A rate's arrow in its own sky blue: far bluer than it is red,
+                // which nothing else on the card is.
+                let sky = written.chunks(4).filter(|pixel| pixel[0] as i32 > pixel[2] as i32 + 90).count();
+                let arrowed = face_of(&state.id).and_then(|face| face.arrow).is_some();
+                assert_eq!(sky > 0, arrowed, "{said} {level:?}: an arrow picked out is {}", sky > 0);
             }
             for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
                 let side = Level::Minimal.width(Tile::Wide, icon_size) as f64;
                 let room = side - (icon_size as f64 * 0.08).max(2.0) * 2.0;
-                let says = face_says(&simple, Level::Minimal);
+                let says = face_says(&state.id, &simple, Level::Minimal);
                 let main = fitted(&area, &says.main, text_size(icon_size, 0.30), room);
                 assert!(!main.is_ellipsized(), "{said} {icon_size}: {} is cut off one icon wide", says.main);
             }
@@ -4392,7 +4523,7 @@ pub mod tests {
     }
 
     /// Every glass a plain card can wear.
-    const FACES: [(&str, Face); 1] = [("clock", CLOCK_FACE)];
+    const FACES: [(&str, Face); 2] = [("clock", CLOCK_FACE), ("network", NETWORK_FACE)];
 
     /// A plain card's words are white on its glass, and the small ones white
     /// let down a little, both 4.5:1 off every part of the gradient.
@@ -4409,6 +4540,10 @@ pub mod tests {
                     let ratio = contrast(over(ink, glass), glass);
                     assert!(ratio >= 4.5, "{name}: the {what} stand {ratio:.2} off its glass");
                 }
+                if let Some(arrow) = face.arrow {
+                    let ratio = contrast(rgb(arrow), glass);
+                    assert!(ratio >= 4.5, "{name}: the arrows stand {ratio:.2} off its glass");
+                }
             }
         }
     }
@@ -4416,6 +4551,7 @@ pub mod tests {
     #[test]
     fn only_a_widget_that_measures_nothing_wears_a_plain_card() {
         assert_eq!(face_of("clock"), Some(CLOCK_FACE));
+        assert_eq!(face_of("network"), Some(NETWORK_FACE));
         for id in ["cpu", "battery", "time-progress", "pomodoro", "timer", "weather"] {
             assert_eq!(face_of(id), None, "{id} is not a plain card");
         }
@@ -4427,12 +4563,52 @@ pub mod tests {
             unreachable!()
         };
         assert_eq!(
-            face_says(&clock, Level::Full),
-            Says { main: "14:05".to_string(), under: Some("Sun 08/11".to_string()) }
+            face_says("clock", &clock, Level::Full),
+            Says { main: "14:05".to_string(), beside: None, under: Some("Sun 08/11".to_string()) }
         );
         for level in [Level::Compact, Level::Minimal] {
-            assert_eq!(face_says(&clock, level), Says { main: "14:05".to_string(), under: None }, "{level:?}");
+            assert_eq!(
+                face_says("clock", &clock, level),
+                Says { main: "14:05".to_string(), beside: None, under: None },
+                "{level:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_network_writes_both_rates_when_whole_and_the_busier_when_not() {
+        let says = |down: &str, up: &str, level| {
+            let Ok(Body::Simple(network)) = reading("network", down, up, NO_PROGRESS, false).body() else {
+                unreachable!()
+            };
+            face_says("network", &network, level)
+        };
+        let (down, up) = ("\u{2193}1.2M", "\u{2191}180K");
+        assert_eq!(
+            says(down, up, Level::Full),
+            Says { main: down.to_string(), beside: Some(up.to_string()), under: None },
+            "down on the left and up on the right"
+        );
+        assert_eq!(
+            says("\u{2193}12K", "\u{2191}3.4M", Level::Full).main,
+            "\u{2193}12K",
+            "a whole tile does not swap its rates round"
+        );
+        for level in [Level::Compact, Level::Minimal] {
+            assert_eq!(says(down, up, level), Says { main: down.to_string(), beside: None, under: None });
+            assert_eq!(says("\u{2193}12K", "\u{2191}3.4M", level).main, "\u{2191}3.4M", "{level:?}: the busier");
+            assert_eq!(says("\u{2193}900K", "\u{2191}1.0M", level).main, "\u{2191}1.0M", "{level:?}: units count");
+            assert_eq!(says("\u{2193}0K", "\u{2191}0K", level).main, "\u{2193}0K", "{level:?}: still, it is down");
+        }
+    }
+
+    #[test]
+    fn a_rate_is_read_back_as_the_daemon_wrote_it() {
+        assert_eq!(rate_of("\u{2193}0K"), 0.0);
+        assert_eq!(rate_of("\u{2191}180K"), 180.0 * 1024.0);
+        assert_eq!(rate_of("\u{2193}1.2M"), 1.2 * 1024.0 * 1024.0);
+        assert_eq!(rate_of(""), 0.0);
+        assert_eq!(rate_of("offline"), 0.0, "words that are not a rate are nothing");
     }
 
     #[test]
