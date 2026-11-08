@@ -629,8 +629,8 @@ fn draw_simple(
     }
 }
 
-/// What a meter wears: the glass of its card, and the colour its share is
-/// drawn in on that glass.
+/// What a meter wears: the glass of its card, the colour its share is drawn
+/// in on that glass, and the rim it lights when it wants to be seen.
 ///
 /// A meter brings its own colours, the way water does, rather than the
 /// theme's. The theme's palette is chosen to stand off the bar, and inside a
@@ -642,6 +642,10 @@ fn draw_simple(
 struct Gauge {
     glass: Glass,
     fill: (f64, f64, f64),
+    /// A rim drawn over the glass's own, for a state that should be seen
+    /// before it is read. The `.active` wash `mark` puts behind the tile is
+    /// under the card, where nobody sees it.
+    edge: Option<(f64, f64, f64)>,
 }
 
 /// The processor at work: a cool green, on glass to match.
@@ -653,6 +657,7 @@ const CPU_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (0.33, 0.87, 0.67),
+    edge: None,
 };
 
 /// The processor working hard enough that the daemon marks the tile: the
@@ -665,6 +670,7 @@ const CPU_HOT_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (1.0, 0.58, 0.30),
+    edge: None,
 };
 
 /// A battery being run on: slate glass, and the charge in a spring green.
@@ -676,6 +682,7 @@ const BATTERY_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (0.56, 0.90, 0.44),
+    edge: None,
 };
 
 /// A battery on the charger — what the daemon marks it for: the glass goes
@@ -688,6 +695,7 @@ const BATTERY_CHARGING_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (0.42, 0.95, 0.55),
+    edge: None,
 };
 
 /// A battery running low and not on the charger: red glass, so it is seen
@@ -700,6 +708,7 @@ const BATTERY_LOW_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (1.0, 0.45, 0.42),
+    edge: None,
 };
 
 /// The charge at and under which a battery is low: a fifth, where most
@@ -715,7 +724,39 @@ const TIME_GAUGE: Gauge = Gauge {
         lifted: false,
     },
     fill: (0.70, 0.60, 1.0),
+    edge: None,
 };
+
+/// A block of focus: tomato, which is what the technique is named after.
+const POMODORO_FOCUS_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.30, 0.09, 0.07),
+        to: (0.18, 0.06, 0.08),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.47, 0.36),
+    edge: None,
+};
+
+/// A break, short or long: cool sea glass, so a glance tells a break from
+/// work without reading the word.
+const POMODORO_BREAK_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.06, 0.17, 0.22),
+        to: (0.06, 0.11, 0.18),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (0.42, 0.85, 0.93),
+    edge: None,
+};
+
+/// Whether a pomodoro is on a break: the phase is the first thing its
+/// detail says, `break` or `long break`, with `· paused` after it when it is.
+fn on_a_break(simple: &Simple) -> bool {
+    simple.detail.starts_with("break") || simple.detail.starts_with("long break")
+}
 
 /// Which meter, if any, this widget is, and what it is wearing now.
 ///
@@ -737,6 +778,10 @@ fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
         "battery" if simple.progress <= LOW_BATTERY => Some(BATTERY_LOW_GAUGE),
         "battery" => Some(BATTERY_GAUGE),
         "time-progress" => Some(TIME_GAUGE),
+        // The phase is read off the detail, which already says it; the
+        // daemon marks only a running block of focus, so the mark cannot.
+        "pomodoro" if on_a_break(simple) => Some(POMODORO_BREAK_GAUGE),
+        "pomodoro" => Some(POMODORO_FOCUS_GAUGE),
         _ => None,
     }
 }
@@ -780,15 +825,15 @@ fn draw_meter(
             ring(cr, cx, cy, radius, thickness, fraction, track, fill);
 
             // The number inside the ring, and without its `%` when that is
-            // what it takes to fit: the ring already says it is a share.
+            // what it takes to fit: the ring already says it is a share. A
+            // time has nothing to drop, so it is written smaller instead.
             let inner = ((radius - thickness / 2.0) * 2.0 - 2.0).max(0.0);
             let size = text_size(look.icon_size, 0.22);
-            let mut number = line(area, &simple.label, size, true, inner);
-            if number.is_ellipsized() {
-                if let Some(bare) = simple.label.strip_suffix('%') {
-                    number = line(area, bare, size, true, inner);
-                }
+            let mut said = simple.label.as_str();
+            if line(area, said, size, true, inner).is_ellipsized() {
+                said = said.strip_suffix('%').unwrap_or(said);
             }
+            let number = fitted(area, said, size, inner);
             let (_, logical) = number.pixel_extents();
             paint(cr, &number, cx - inner / 2.0, cy - logical.height() as f64 / 2.0, ON_A_GAUGE);
             return;
@@ -819,6 +864,21 @@ fn draw_meter(
 
         groove(cr, pad, y + number_height + gap, room, thickness, fraction, track, fill);
     });
+}
+
+/// A number as big as `size` and no bigger than its room: written smaller
+/// rather than cut off, which would leave `18:…` of a time. Down to a floor
+/// past which it would not be read anyway, and cut off there.
+fn fitted(area: &gtk::DrawingArea, text: &str, size: f64, room: f64) -> pango::Layout {
+    let floor = (size * 0.7).max(7.0).min(size);
+    let mut size = size;
+    loop {
+        let layout = line(area, text, size, true, room);
+        if !layout.is_ellipsized() || size <= floor {
+            return layout;
+        }
+        size = (size * 0.92).max(floor);
+    }
 }
 
 /// Where a ring sits in a card one icon wide: in the middle, as big as the
@@ -3350,8 +3410,8 @@ pub mod tests {
             .count()
     }
 
-    /// The meters at their longest and their emptiest, for the checks that
-    /// go through every tile.
+    /// The meters and the counts at their longest and their emptiest, for
+    /// the checks that go through every tile.
     fn meters() -> Vec<WidgetState> {
         vec![
             reading("cpu", "63%", "CPU", 0.63, false),
@@ -3363,6 +3423,9 @@ pub mod tests {
             reading("battery", "—", "no battery", NO_PROGRESS, false),
             reading("time-progress", "100%", "of this year", 1.0, false),
             reading("time-progress", "0%", "of this week", 0.0, false),
+            reading("pomodoro", "25:00", "focus \u{b7} paused", 0.0, false),
+            reading("pomodoro", "18:42", "focus", 0.25, true),
+            reading("pomodoro", "14:59", "long break \u{b7} paused", 0.0, false),
         ]
     }
 
@@ -4074,17 +4137,20 @@ pub mod tests {
         assert!(inked > 0, "an empty ring is not there at all");
     }
 
-    /// The widgets that are meters.
-    const METERS: [&str; 3] = ["cpu", "battery", "time-progress"];
+    /// The widgets that are meters, and the counts that have an end to
+    /// measure against.
+    const METERS: [&str; 4] = ["cpu", "battery", "time-progress", "pomodoro"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 6] = [
+    const GAUGES: [(&str, Gauge); 8] = [
         ("cpu", CPU_GAUGE),
         ("hot cpu", CPU_HOT_GAUGE),
         ("battery", BATTERY_GAUGE),
         ("charging battery", BATTERY_CHARGING_GAUGE),
         ("low battery", BATTERY_LOW_GAUGE),
         ("time", TIME_GAUGE),
+        ("pomodoro focus", POMODORO_FOCUS_GAUGE),
+        ("pomodoro break", POMODORO_BREAK_GAUGE),
     ];
 
     /// A meter's words are white on its glass, and its share stands off the
@@ -4156,9 +4222,27 @@ pub mod tests {
             "a machine with no battery has nothing to measure"
         );
         assert_eq!(gauge_for(&reading("time-progress", "63%", "of today", 0.63, false)), Some(TIME_GAUGE));
-        // A share that is not a meter's: the pomodoro's is the next issue's.
-        assert_eq!(gauge_for(&reading("pomodoro", "18:42", "focus", 0.25, false)), None);
         assert_eq!(gauge_for(&reading("clock", "14:05", "Sun 8 Nov", NO_PROGRESS, false)), None);
+    }
+
+    #[test]
+    fn a_pomodoro_wears_one_glass_for_focus_and_another_for_a_break() {
+        for (detail, active) in [("focus", true), ("focus \u{b7} paused", false)] {
+            assert_eq!(
+                gauge_for(&reading("pomodoro", "18:42", detail, 0.25, active)),
+                Some(POMODORO_FOCUS_GAUGE),
+                "{detail}"
+            );
+        }
+        for detail in ["break", "break \u{b7} paused", "long break", "long break \u{b7} paused"] {
+            assert_eq!(
+                gauge_for(&reading("pomodoro", "03:10", detail, 0.37, false)),
+                Some(POMODORO_BREAK_GAUGE),
+                "{detail}"
+            );
+        }
+        assert_ne!(POMODORO_FOCUS_GAUGE.glass, POMODORO_BREAK_GAUGE.glass);
+        assert_ne!(POMODORO_FOCUS_GAUGE.fill, POMODORO_BREAK_GAUGE.fill);
     }
 
     #[test]
