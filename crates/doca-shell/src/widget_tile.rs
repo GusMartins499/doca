@@ -792,6 +792,19 @@ const STOPWATCH_GAUGE: Gauge = Gauge {
     edge: None,
 };
 
+/// A countdown to a day: plum, the colour of something to look forward to,
+/// and as with the stopwatch a fill no share is ever drawn in.
+const COUNTDOWN_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.24, 0.08, 0.18),
+        to: (0.13, 0.07, 0.15),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.55, 0.75),
+    edge: None,
+};
+
 /// Whether a timer has rung. The daemon marks a timer that is running as
 /// well as one that has rung, so the mark alone cannot tell; one that has
 /// rung is marked with all of its time gone.
@@ -815,8 +828,10 @@ fn on_a_break(simple: &Simple) -> bool {
 /// it wears the card with no share on it, because the number is all it ever
 /// had to say.
 fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
-    if id == "stopwatch" {
-        return Some(STOPWATCH_GAUGE);
+    match id {
+        "stopwatch" => return Some(STOPWATCH_GAUGE),
+        "countdown" => return Some(COUNTDOWN_GAUGE),
+        _ => {}
     }
     if simple.progress == NO_PROGRESS {
         return None;
@@ -944,7 +959,8 @@ fn draw_meter(
 /// Wide, the number and the detail sit at the left, one over the other, in
 /// the room a pill would have taken. One icon wide, the number alone, in the
 /// middle — written smaller rather than cut off, since there is no ring for
-/// it to lean on.
+/// it to lean on. A count of days stands its number over its unit there,
+/// because `12 days` on one line would be too small to read in that room.
 fn count_on_glass(
     simple: &Simple,
     look: Look,
@@ -957,6 +973,18 @@ fn count_on_glass(
     if look.level == Level::Minimal {
         let pad = (icon * 0.10).max(2.0);
         let room = (width - pad * 2.0).max(0.0);
+        if let Some((count, unit)) = count_and_unit(&simple.label) {
+            let number = fitted(area, count, text_size(look.icon_size, 0.34), room);
+            let unit = line(area, unit, text_size(look.icon_size, 0.17), false, room);
+            let number_height = number.pixel_extents().1.height() as f64;
+            let unit_height = unit.pixel_extents().1.height() as f64;
+            // Pulled up into the number's descent, which digits never use.
+            let tuck = (number_height * 0.12).round();
+            let y = ((height - number_height - unit_height + tuck) / 2.0).max(0.0);
+            paint(cr, &number, pad, y, ON_A_GAUGE);
+            paint(cr, &unit, pad, y + number_height - tuck, faded(ON_A_GAUGE, QUIET_ON_A_GAUGE));
+            return;
+        }
         let number = fitted(area, &simple.label, text_size(look.icon_size, 0.26), room);
         let (_, logical) = number.pixel_extents();
         paint(cr, &number, pad, (height - logical.height() as f64) / 2.0, ON_A_GAUGE);
@@ -981,6 +1009,13 @@ fn count_on_glass(
     if let Some(detail) = detail {
         paint(cr, &detail, pad, y + number_height, faded(ON_A_GAUGE, QUIET_ON_A_GAUGE));
     }
+}
+
+/// A count and what it counts, when a label is one: `12 days` is `12` and
+/// `days`, `5 days ago` is `5` and `days ago`. `today` and `12:34` are not.
+fn count_and_unit(label: &str) -> Option<(&str, &str)> {
+    let (count, unit) = label.split_once(' ')?;
+    (!count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) && !unit.is_empty()).then_some((count, unit))
 }
 
 /// A number as big as `size` and no bigger than its room: written smaller
@@ -3549,6 +3584,10 @@ pub mod tests {
             reading("stopwatch", "00:00", "stopped", NO_PROGRESS, false),
             reading("stopwatch", "12:34", "lap 2", NO_PROGRESS, true),
             reading("stopwatch", "123:59:59", "99 laps", NO_PROGRESS, false),
+            reading("countdown", "12 days", "until the trip", NO_PROGRESS, false),
+            reading("countdown", "today", "the trip", NO_PROGRESS, true),
+            reading("countdown", "1234 days ago", "since the very long trip away", NO_PROGRESS, false),
+            reading("countdown", "\u{2014}", "bad date", NO_PROGRESS, false),
         ]
     }
 
@@ -3620,7 +3659,7 @@ pub mod tests {
     }
 
     /// The counts with no end: a card, and no ring or pill on it.
-    const COUNTS: [&str; 1] = ["stopwatch"];
+    const COUNTS: [&str; 2] = ["stopwatch", "countdown"];
 
     /// A count with no end is its number on glass, and nothing else: with
     /// its words taken away, what is left is the bare card, at every level —
@@ -3645,7 +3684,9 @@ pub mod tests {
                     let (data, _, _, _) = metered(state, level);
                     data.chunks(4).filter(|pixel| pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200).count()
                 };
-                assert!(words(&at("12:34", "")) > 0, "{id} {level:?}: the number is gone");
+                for label in ["12:34", "12 days"] {
+                    assert!(words(&at(label, "")) > 0, "{id} {level:?}: {label} is gone");
+                }
                 let said = words(&at("12:34", "lap 2")) > words(&at("12:34", ""));
                 assert_eq!(said, level == Level::Full, "{id} {level:?}: the detail is shown {said}");
             }
@@ -4325,7 +4366,7 @@ pub mod tests {
     const METERS: [&str; 5] = ["cpu", "battery", "time-progress", "pomodoro", "timer"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 11] = [
+    const GAUGES: [(&str, Gauge); 12] = [
         ("cpu", CPU_GAUGE),
         ("hot cpu", CPU_HOT_GAUGE),
         ("battery", BATTERY_GAUGE),
@@ -4337,6 +4378,7 @@ pub mod tests {
         ("timer", TIMER_GAUGE),
         ("timer done", TIMER_DONE_GAUGE),
         ("stopwatch", STOPWATCH_GAUGE),
+        ("countdown", COUNTDOWN_GAUGE),
     ];
 
     /// A meter's words are white on its glass, and its share stands off the
@@ -4439,6 +4481,27 @@ pub mod tests {
                 Some(STOPWATCH_GAUGE),
                 "{detail}"
             );
+        }
+    }
+
+    #[test]
+    fn a_countdown_wears_a_card_with_nothing_to_measure() {
+        for (label, today) in [("12 days", false), ("today", true), ("5 days ago", false), ("\u{2014}", false)] {
+            assert_eq!(
+                gauge_for(&reading("countdown", label, "", NO_PROGRESS, today)),
+                Some(COUNTDOWN_GAUGE),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_of_days_stands_its_number_over_its_unit() {
+        assert_eq!(count_and_unit("12 days"), Some(("12", "days")));
+        assert_eq!(count_and_unit("1 day"), Some(("1", "day")));
+        assert_eq!(count_and_unit("5 days ago"), Some(("5", "days ago")));
+        for whole in ["today", "yesterday", "\u{2014}", "12:34", "1:02:03", "", "12 ", " days"] {
+            assert_eq!(count_and_unit(whole), None, "{whole:?}");
         }
     }
 
