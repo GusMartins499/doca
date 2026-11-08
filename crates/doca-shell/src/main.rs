@@ -2299,6 +2299,8 @@ fn on_a_display() {
     widget_tile::tests::a_tile_can_be_given_the_keyboard_back();
     widget_tile::tests::every_word_on_these_tiles_stands_off_the_bar_on_every_theme();
     widget_tile::tests::these_tiles_stay_inside_themselves_at_every_size();
+    widget_tile::tests::a_claude_card_looks_the_same_whatever_the_desktop_is_wearing();
+    widget_tile::tests::a_claude_card_writes_its_number_at_every_level();
     panel::tests::reading_a_note_and_closing_writes_nothing();
     panel::tests::typing_is_shown_at_every_key_and_written_once();
     panel::tests::the_weeks_bars_stand_for_the_days_they_are_drawn_from();
