@@ -493,6 +493,11 @@ fn draw_in(
     }
 
     match state.body() {
+        // A widget that measures nothing still wears a card, with its words
+        // on it and nothing else.
+        Ok(Body::Simple(simple)) if face_of(&state.id).is_some() => {
+            draw_face(&state.id, &simple, look, area, cr, width, height)
+        }
         // A widget that measures a share wears it on a card; the rest of the
         // simple ones, and a meter with nothing to measure, are two lines.
         Ok(Body::Simple(simple)) => match gauge_of(&state.id, &simple) {
@@ -1308,6 +1313,125 @@ fn claude_hot() -> gdk::RGBA {
 /// The groove the ring and the pill run in.
 fn claude_track() -> gdk::RGBA {
     gdk::RGBA::new(1.0, 1.0, 1.0, 0.16)
+}
+
+/// What a widget that measures nothing wears: a card of its own glass.
+///
+/// No ring and no pill, since there is no share for either to be. The card
+/// is the frame and the words on it are the whole of the tile, so it is the
+/// size of the words that says what matters. Its own colours rather than the
+/// theme's, for the reason a meter's are: the words stand on the glass, and
+/// glass of its own reads the same under every theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Face {
+    glass: Glass,
+}
+
+/// The clock: graphite going to night, the colour of a watch face.
+const CLOCK_FACE: Face = Face {
+    glass: Glass {
+        from: (0.13, 0.14, 0.18),
+        to: (0.07, 0.08, 0.12),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+};
+
+/// Which widget, if any, wears a plain card, read off its id the way a
+/// meter is.
+fn face_of(id: &str) -> Option<Face> {
+    match id {
+        "clock" => Some(CLOCK_FACE),
+        _ => None,
+    }
+}
+
+/// The ink on a plain card, and the quieter ink of its small words.
+const ON_A_FACE: gdk::RGBA = gdk::RGBA::WHITE;
+const QUIET_ON_A_FACE: f64 = 0.76;
+
+/// What a plain card writes at a level: the loud words, and the small ones
+/// under them while there is room for them.
+#[derive(Debug, Clone, PartialEq)]
+struct Says {
+    main: String,
+    under: Option<String>,
+}
+
+/// The small words are the first thing a crowded bar takes: only a whole
+/// tile keeps them. The loud ones — the time — are kept at every level,
+/// because a clock that cannot say the time is not worth the pixels.
+fn face_says(simple: &Simple, level: Level) -> Says {
+    let keeps = level == Level::Full && !simple.detail.is_empty();
+    Says {
+        main: simple.label.clone(),
+        under: keeps.then(|| simple.detail.clone()),
+    }
+}
+
+/// A plain card: the loud words large in white in the middle, the small ones
+/// under them quieter, inside the glass so nothing is drawn past its corners.
+fn draw_face(
+    id: &str,
+    simple: &Simple,
+    look: Look,
+    area: &gtk::DrawingArea,
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+) {
+    let Some(face) = face_of(id) else { return };
+    let icon = look.icon_size as f64;
+    let corner = (icon * 0.22).max(3.0).min(height / 2.0);
+    let says = face_says(simple, look.level);
+
+    card(cr, width, height, corner, face.glass, composited(area), |cr, width, height| {
+        // One icon wide the words take what the corners leave them, which is
+        // more than the padding a wide card can afford.
+        let pad = if look.level == Level::Minimal {
+            (icon * 0.08).max(2.0)
+        } else {
+            (icon * 0.14).max(3.0)
+        };
+        let room = (width - pad * 2.0).max(0.0);
+        let share = if look.level == Level::Minimal { 0.30 } else { 0.36 };
+        let main = fitted(area, &says.main, text_size(look.icon_size, share), room);
+        let under = says.under.as_deref().map(|words| line(area, words, text_size(look.icon_size, 0.19), false, room));
+
+        let main_height = main.pixel_extents().1.height() as f64;
+        let under_height = under.as_ref().map_or(0.0, |under| under.pixel_extents().1.height() as f64);
+        let y = ((height - main_height - under_height) / 2.0).max(0.0);
+        paint(cr, &main, pad, y, ON_A_FACE);
+        if let Some(under) = &under {
+            paint(cr, under, pad, y + main_height, faded(ON_A_FACE, QUIET_ON_A_FACE));
+        }
+    });
+}
+
+/// One loud line, made smaller rather than cut off when it is wider than
+/// its room — `14:05` with an ellipsis in it is not a time.
+///
+/// Never smaller than [`text_size`] lets text be: at that size it gives up
+/// its weight instead, since a semibold digit is a good part wider than a
+/// regular one. Past that it is ellipsised like any line.
+fn fitted(area: &gtk::DrawingArea, text: &str, size: f64, room: f64) -> pango::Layout {
+    let mut size = size;
+    let mut layout = line(area, text, size, true, room);
+    // Hinting rounds a smaller size its own way, so the first guess can still
+    // be a pixel too wide: a couple more tries close it.
+    for _ in 0..3 {
+        if !layout.is_ellipsized() || size <= 7.0 {
+            break;
+        }
+        layout.set_width(-1);
+        let natural = layout.pixel_extents().1.width() as f64;
+        size = (size * room / natural.max(1.0) * 0.97).max(7.0);
+        layout = line(area, text, size, true, room);
+    }
+    if layout.is_ellipsized() {
+        layout = line(area, text, size, false, room);
+    }
+    layout
 }
 
 /// A note, on the paper it was written on.
@@ -3004,7 +3128,8 @@ pub mod tests {
             for level in [Level::Full, Level::Compact, Level::Minimal] {
                 for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
                     let look = Look { icon_size, palette, level };
-                    for state in calendars().iter().chain(usages().iter()).chain(meters().iter()) {
+                    let tiles = calendars().into_iter().chain(usages()).chain(meters()).chain(faces());
+                    for state in &tiles.collect::<Vec<_>>() {
                         let (inside, outside) = ink_of(state, look);
                         let said = spoken(state);
                         assert!(inside > 0, "{theme} {level:?} {icon_size}: {said} drew nothing");
@@ -3457,6 +3582,111 @@ pub mod tests {
                             spoken(&state)
                         ),
                     }
+                }
+            }
+        }
+    }
+
+    /// The plain cards as the daemon fills them, longest words included.
+    fn faces() -> Vec<WidgetState> {
+        vec![
+            reading("clock", "14:05", "Sun 08/11", NO_PROGRESS, false),
+            reading("clock", "00:00", "Wed 30/09", NO_PROGRESS, false),
+        ]
+    }
+
+    /// A plain card as the bar would draw it at this level, under the
+    /// default theme or the one given, and its pixels.
+    fn faced(state: &WidgetState, level: Level, theme: &str) -> Vec<u8> {
+        let area = gtk::DrawingArea::new();
+        let look = Look { icon_size: ICON, palette: crate::theme::palette_for(theme, &area.style_context()), level };
+        let (width, height) = (declared_width(state, look), height_of(ICON));
+        pixels(width, height, |cr| draw_in(state, look, &area, cr, width as f64, height as f64)).0
+    }
+
+    /// How many pixels of a plain card are its words: well lighter than any
+    /// glass, which is all dark, and as light in every channel, which is
+    /// white or white let down, and not a colour.
+    fn white_on(data: &[u8]) -> usize {
+        data.chunks(4).filter(|pixel| pixel[0] > 120 && pixel[1] > 120 && pixel[2] > 120).count()
+    }
+
+    /// A plain card with nothing to say is its glass and nothing more: no
+    /// ring, no pill, no mark. Whatever else one draws is its words.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_plain_card_is_glass_and_words_and_nothing_else() {
+        for state in faces() {
+            let face = face_of(&state.id).expect("not a plain card");
+            let blank = reading(&state.id, "", "", NO_PROGRESS, false);
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let width = level.width(Tile::Wide, ICON);
+                let corner = (ICON as f64 * 0.22).max(3.0);
+                let (glass, _) = pixels(width, ICON, |cr| {
+                    card(cr, width as f64, ICON as f64, corner, face.glass, false, |_, _, _| {});
+                });
+                assert!(
+                    faced(&blank, level, "midnight") == glass,
+                    "{} {level:?}: something but the glass on a card with nothing to say",
+                    state.id
+                );
+            }
+        }
+    }
+
+    /// The small words go first and the loud ones never: a whole tile writes
+    /// both, a tile giving way writes the same pixels whatever its small
+    /// words are, and the loud ones are there at every level — whole, made
+    /// smaller rather than cut, at every icon size one icon wide.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_plain_card_gives_up_its_small_words_first() {
+        let area = gtk::DrawingArea::new();
+        for state in faces() {
+            let Ok(Body::Simple(simple)) = state.body() else { unreachable!() };
+            let quiet = reading(&state.id, &simple.label, "", NO_PROGRESS, false);
+            let silent = reading(&state.id, "", "", NO_PROGRESS, false);
+            let said = spoken(&state);
+            assert!(
+                white_on(&faced(&state, Level::Full, "midnight")) > white_on(&faced(&quiet, Level::Full, "midnight")),
+                "{said}: a whole tile does not write its small words"
+            );
+            for level in [Level::Compact, Level::Minimal] {
+                assert!(
+                    faced(&state, level, "midnight") == faced(&quiet, level, "midnight"),
+                    "{said} {level:?}: a tile giving way still writes its small words"
+                );
+            }
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                assert!(
+                    white_on(&faced(&state, level, "midnight")) > white_on(&faced(&silent, level, "midnight")),
+                    "{said} {level:?}: the loud words are gone"
+                );
+            }
+            for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
+                let side = Level::Minimal.width(Tile::Wide, icon_size) as f64;
+                let room = side - (icon_size as f64 * 0.08).max(2.0) * 2.0;
+                let says = face_says(&simple, Level::Minimal);
+                let main = fitted(&area, &says.main, text_size(icon_size, 0.30), room);
+                assert!(!main.is_ellipsized(), "{said} {icon_size}: {} is cut off one icon wide", says.main);
+            }
+        }
+    }
+
+    /// The theme has no say in a plain card: the same words under all four
+    /// themes are the same pixels, at every level.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_plain_card_looks_the_same_whatever_the_desktop_is_wearing() {
+        for state in faces() {
+            for level in [Level::Full, Level::Compact, Level::Minimal] {
+                let first = faced(&state, level, crate::theme::names()[0]);
+                for theme in crate::theme::names() {
+                    assert!(
+                        faced(&state, level, theme) == first,
+                        "{} {level:?} came out differently under {theme}, so the theme reached it",
+                        spoken(&state)
+                    );
                 }
             }
         }
@@ -4159,6 +4389,50 @@ pub mod tests {
         // A share that is not a meter's: the pomodoro's is the next issue's.
         assert_eq!(gauge_for(&reading("pomodoro", "18:42", "focus", 0.25, false)), None);
         assert_eq!(gauge_for(&reading("clock", "14:05", "Sun 8 Nov", NO_PROGRESS, false)), None);
+    }
+
+    /// Every glass a plain card can wear.
+    const FACES: [(&str, Face); 1] = [("clock", CLOCK_FACE)];
+
+    /// A plain card's words are white on its glass, and the small ones white
+    /// let down a little, both 4.5:1 off every part of the gradient.
+    #[test]
+    fn the_words_on_a_plain_card_stand_off_its_glass() {
+        use crate::theme::{contrast, over};
+        for (name, face) in FACES {
+            let Glass { from, to, .. } = face.glass;
+            for step in 0..=4 {
+                let t = step as f64 / 4.0;
+                let mix = |a: f64, b: f64| a + (b - a) * t;
+                let glass = gdk::RGBA::new(mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2), 1.0);
+                for (what, ink) in [("loud words", ON_A_FACE), ("small words", faded(ON_A_FACE, QUIET_ON_A_FACE))] {
+                    let ratio = contrast(over(ink, glass), glass);
+                    assert!(ratio >= 4.5, "{name}: the {what} stand {ratio:.2} off its glass");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_widget_that_measures_nothing_wears_a_plain_card() {
+        assert_eq!(face_of("clock"), Some(CLOCK_FACE));
+        for id in ["cpu", "battery", "time-progress", "pomodoro", "timer", "weather"] {
+            assert_eq!(face_of(id), None, "{id} is not a plain card");
+        }
+    }
+
+    #[test]
+    fn a_clock_gives_up_its_date_before_its_time() {
+        let Ok(Body::Simple(clock)) = reading("clock", "14:05", "Sun 08/11", NO_PROGRESS, false).body() else {
+            unreachable!()
+        };
+        assert_eq!(
+            face_says(&clock, Level::Full),
+            Says { main: "14:05".to_string(), under: Some("Sun 08/11".to_string()) }
+        );
+        for level in [Level::Compact, Level::Minimal] {
+            assert_eq!(face_says(&clock, level), Says { main: "14:05".to_string(), under: None }, "{level:?}");
+        }
     }
 
     #[test]
