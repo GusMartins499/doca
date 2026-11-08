@@ -655,20 +655,10 @@ fn draw_water(
     let icon = look.icon_size as f64;
     let corner = (icon * 0.22).max(3.0).min(height / 2.0);
 
-    // The glass: deep teal going to night blue, the way the card in the
-    // design does, so the water has something dark to be bright against.
-    let _ = cr.save();
-    rounded(cr, 0.0, 0.0, width, height, corner);
-    let glass = cairo::LinearGradient::new(0.0, 0.0, width, height);
-    glass.add_color_stop_rgb(0.0, 0.07, 0.20, 0.22);
-    glass.add_color_stop_rgb(1.0, 0.09, 0.13, 0.25);
-    let _ = cr.set_source(&glass);
-    let _ = cr.fill_preserve();
-    // `clip` consumes the path, so the waves below are their own shapes and
-    // not the card's rectangle added to them.
-    cr.clip();
-
-    if fraction > 0.0 {
+    card(cr, width, height, corner, WATER_GLASS, composited(area), |cr, width, height| {
+        if fraction <= 0.0 {
+            return;
+        }
         // Even a full card keeps a little air over the surface, or the wave
         // would be cut off by the top edge and a full day would read as flat.
         let surface = height - (height * 0.86) * fraction - height * 0.04;
@@ -704,17 +694,7 @@ fn draw_water(
                 let _ = cr.fill();
             }
         }
-    }
-    let _ = cr.restore();
-
-    // The rim of the glass: a hairline of white, brighter at the top.
-    rounded(cr, 0.5, 0.5, width - 1.0, height - 1.0, corner);
-    let rim = cairo::LinearGradient::new(0.0, 0.0, 0.0, height);
-    rim.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.22);
-    rim.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.06);
-    let _ = cr.set_source(&rim);
-    cr.set_line_width(1.0);
-    let _ = cr.stroke();
+    });
 
     let pad = (icon * 0.12).max(3.0);
     let ink = gdk::RGBA::WHITE;
@@ -983,7 +963,7 @@ fn draw_calendar(
                 let layout = line(area, "", size, false, room);
                 layout.set_alignment(pango::Alignment::Left);
                 layout.set_markup(&format!(
-                    "<span font_features=\"{TABULAR}\"><b>{}</b> {}</span>",
+                    "<span font_features=\"{TABULAR}\"><span weight=\"semibold\">{}</span> {}</span>",
                     glib::markup_escape_text(&up.when),
                     glib::markup_escape_text(&up.title)
                 ));
@@ -1044,6 +1024,246 @@ fn rounded(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64, radius:
     cr.arc(x + radius, y + height - radius, radius, half, half * 2.0);
     cr.arc(x + radius, y + radius, radius, half * 2.0, half * 3.0);
     cr.close_path();
+}
+
+/// What a [`card`] is made of.
+///
+/// A card brings its own colours, the way a note brings its paper: what is
+/// drawn inside it is drawn against the glass and not against the theme, so
+/// it reads the same on every desktop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Glass {
+    /// The glass at the top left, and at the bottom right.
+    from: (f64, f64, f64),
+    to: (f64, f64, f64),
+    /// How white the rim is at the top, and at the bottom.
+    rim: (f64, f64),
+    /// Whether the card stands off the bar on a soft shadow.
+    lifted: bool,
+}
+
+/// Water's glass: deep teal going to night blue, the way the card in the
+/// design does, so the water has something dark to be bright against.
+const WATER_GLASS: Glass = Glass {
+    from: (0.07, 0.20, 0.22),
+    to: (0.09, 0.13, 0.25),
+    rim: (0.22, 0.06),
+    lifted: false,
+};
+
+/// A card of glass: a rounded pane in a gradient, with a hairline rim that is
+/// brighter at the top, the way light falls on glass from above.
+///
+/// `inside` draws into the glass — clipped to it, so a wave or a fill cannot
+/// spill over the corners — and is handed the card's own width and height,
+/// with the card's top left as its origin. The rim goes on after it, so it is
+/// never painted over.
+///
+/// A lifted card stands on a shadow, and only where something composites the
+/// bar: without a compositor there is no alpha to blur into, and a shadow
+/// would be a grey smear on the bar. The shadow has to fit in the tile like
+/// everything else does, so a lifted card is that much smaller than the tile,
+/// and the rectangle it took is returned for whatever is drawn over it.
+fn card(
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+    corner: f64,
+    glass: Glass,
+    composited: bool,
+    inside: impl FnOnce(&cairo::Context, f64, f64),
+) -> (f64, f64, f64, f64) {
+    let lift = if glass.lifted && composited {
+        shadow_of(width, height, corner)
+    } else {
+        None
+    };
+    let (x, y, card_width, card_height) = match &lift {
+        Some((blur, _)) => (*blur, blur * 0.5, width - blur * 2.0, height - blur * 2.0),
+        None => (0.0, 0.0, width, height),
+    };
+    if let Some((_, shadow)) = lift {
+        let _ = cr.save();
+        cr.rectangle(0.0, 0.0, width, height);
+        cr.clip();
+        cr.set_source_rgba(0.0, 0.0, 0.0, SHADOW_ALPHA);
+        let _ = cr.mask_surface(&shadow, 0.0, 0.0);
+        let _ = cr.restore();
+    }
+
+    let _ = cr.save();
+    cr.translate(x, y);
+    let _ = cr.save();
+    rounded(cr, 0.0, 0.0, card_width, card_height, corner);
+    let pane = cairo::LinearGradient::new(0.0, 0.0, card_width, card_height);
+    pane.add_color_stop_rgb(0.0, glass.from.0, glass.from.1, glass.from.2);
+    pane.add_color_stop_rgb(1.0, glass.to.0, glass.to.1, glass.to.2);
+    let _ = cr.set_source(&pane);
+    let _ = cr.fill_preserve();
+    // `clip` consumes the path, so what `inside` draws are its own shapes and
+    // not the card's rectangle added to them.
+    cr.clip();
+    inside(cr, card_width, card_height);
+    let _ = cr.restore();
+
+    rounded(cr, 0.5, 0.5, card_width - 1.0, card_height - 1.0, corner);
+    let rim = cairo::LinearGradient::new(0.0, 0.0, 0.0, card_height);
+    rim.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, glass.rim.0);
+    rim.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, glass.rim.1);
+    let _ = cr.set_source(&rim);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+    let _ = cr.restore();
+
+    (x, y, card_width, card_height)
+}
+
+/// Whether the screen this area is on composites, which is what a shadow
+/// needs to be a shadow.
+fn composited(area: &gtk::DrawingArea) -> bool {
+    area.screen().is_some_and(|screen| screen.is_composited())
+}
+
+/// How dark a card's shadow is where it is darkest.
+const SHADOW_ALPHA: f64 = 0.35;
+
+/// How far a shadow spreads past its card, as a share of the tile's height.
+const SHADOW_SPREAD: f64 = 0.08;
+
+thread_local! {
+    /// Shadows already blurred, by the size they were blurred for.
+    ///
+    /// Blurring is the one expensive thing a tile draws, and a tile is
+    /// redrawn at every frame of an animation at a size that does not change.
+    static SHADOWS: RefCell<HashMap<(i32, i32, i32), cairo::ImageSurface>> = RefCell::new(HashMap::new());
+}
+
+/// The shadow under a lifted card the size of this tile, and how far it
+/// spreads — the margin the card has to leave for it.
+///
+/// Cairo has no blur, so this is one: the card's shape in solid alpha,
+/// dropped a little, then three passes of a box blur, which is as near a
+/// gaussian as the eye can tell. Painted once per size and kept.
+fn shadow_of(width: f64, height: f64, corner: f64) -> Option<(f64, cairo::ImageSurface)> {
+    let blur = (height * SHADOW_SPREAD).round().max(2.0);
+    let (across, down) = (width.ceil() as i32, height.ceil() as i32);
+    if across <= blur as i32 * 2 || down <= blur as i32 * 2 {
+        return None;
+    }
+    let key = (across, down, (corner * 4.0).round() as i32);
+    if let Some(shadow) = SHADOWS.with(|shadows| shadows.borrow().get(&key).cloned()) {
+        return Some((blur, shadow));
+    }
+
+    let mut surface = cairo::ImageSurface::create(cairo::Format::A8, across, down).ok()?;
+    {
+        let cr = cairo::Context::new(&surface).ok()?;
+        rounded(&cr, blur, blur, width - blur * 2.0, height - blur * 2.0, corner);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+        let _ = cr.fill();
+    }
+    surface.flush();
+    {
+        let stride = surface.stride() as usize;
+        let mut data = surface.data().ok()?;
+        let radius = (blur / 3.0).round().max(1.0) as usize;
+        for _ in 0..3 {
+            box_blur(&mut data, stride, across as usize, down as usize, radius);
+        }
+    }
+    surface.mark_dirty();
+
+    SHADOWS.with(|shadows| {
+        let mut shadows = shadows.borrow_mut();
+        // A bar has a handful of tile sizes; anything past this is sizes
+        // gone by, from an icon size the bar no longer has.
+        if shadows.len() >= 32 {
+            shadows.clear();
+        }
+        shadows.insert(key, surface.clone());
+    });
+    Some((blur, surface))
+}
+
+/// One pass of a box blur over a single channel, across and then down.
+fn box_blur(data: &mut [u8], stride: usize, width: usize, height: usize, radius: usize) {
+    let span = (radius * 2 + 1) as u32;
+    let mut line = vec![0u8; width.max(height)];
+    let blur_line = |read: &dyn Fn(usize) -> u8, length: usize, out: &mut [u8]| {
+        let mut sum: u32 = 0;
+        let at = |i: isize| -> u32 {
+            if i < 0 || i as usize >= length {
+                0
+            } else {
+                read(i as usize) as u32
+            }
+        };
+        for i in -(radius as isize)..=(radius as isize) {
+            sum += at(i);
+        }
+        for (i, slot) in out.iter_mut().enumerate().take(length) {
+            *slot = (sum / span) as u8;
+            sum += at(i as isize + radius as isize + 1);
+            sum -= at(i as isize - radius as isize);
+        }
+    };
+    for row in 0..height {
+        let start = row * stride;
+        let source = data[start..start + width].to_vec();
+        blur_line(&|i| source[i], width, &mut line);
+        data[start..start + width].copy_from_slice(&line[..width]);
+    }
+    for column in 0..width {
+        let source: Vec<u8> = (0..height).map(|row| data[row * stride + column]).collect();
+        blur_line(&|i| source[i], height, &mut line);
+        for row in 0..height {
+            data[row * stride + column] = line[row];
+        }
+    }
+}
+
+/// A ring round a point: the whole circle faintly, the share of it brightly,
+/// from twelve o'clock round the way a clock goes.
+///
+/// The ends are round, like a pill's, so a little is a dot and not a sliver.
+/// Nothing at all is no arc, not a dot at twelve — an empty ring says it is
+/// empty — and a whole one is a closed circle, so its two round ends do not
+/// overlap into a bump at the top.
+// Drawn by nothing yet: the Claude tile and the meters are the first to
+// wear it (#77, #78), and they come after this.
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn ring(
+    cr: &cairo::Context,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    thickness: f64,
+    fraction: f64,
+    track: gdk::RGBA,
+    fill: gdk::RGBA,
+) {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+
+    let _ = cr.save();
+    cr.set_line_width(thickness);
+    cr.new_path();
+    cr.arc(cx, cy, radius, 0.0, TAU);
+    cr.set_source_rgba(track.red(), track.green(), track.blue(), track.alpha());
+    let _ = cr.stroke();
+
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction > 0.0 {
+        cr.new_path();
+        let start = -FRAC_PI_2;
+        cr.arc(cx, cy, radius, start, start + TAU * fraction);
+        if fraction < 1.0 {
+            cr.set_line_cap(cairo::LineCap::Round);
+        }
+        cr.set_source_rgba(fill.red(), fill.green(), fill.blue(), fill.alpha());
+        let _ = cr.stroke();
+    }
+    let _ = cr.restore();
 }
 
 /// Music: the cover, and the track written over it.
@@ -1188,7 +1408,7 @@ fn line(
     let mut font = pango::FontDescription::new();
     font.set_absolute_size(size * pango::SCALE as f64);
     if bold {
-        font.set_weight(pango::Weight::Bold);
+        font.set_weight(pango::Weight::Semibold);
     }
     layout.set_font_description(Some(&font));
     layout.set_width(width.max(0.0) as i32 * pango::SCALE);
@@ -3050,6 +3270,144 @@ pub mod tests {
     }
 
     /// A progress bar that grows with the icons, and never to nothing.
+    /// Draws into a fresh surface and hands back its pixels, four bytes each:
+    /// blue, green, red and alpha in memory, Cairo's ARGB32 being
+    /// native-endian on this machine.
+    fn pixels(width: i32, height: i32, draw: impl FnOnce(&cairo::Context)) -> (Vec<u8>, usize) {
+        let mut surface =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).expect("no surface");
+        {
+            let cr = cairo::Context::new(&surface).expect("no context");
+            draw(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().expect("the surface is still borrowed").to_vec();
+        (data, stride)
+    }
+
+    /// A ring in pure red over a track nobody can see, and where the red is,
+    /// by quarter of the clock: top right, bottom right, bottom left, top
+    /// left.
+    fn ring_quarters(fraction: f64) -> [usize; 4] {
+        const SIDE: i32 = 100;
+        let clear = gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
+        let red = gdk::RGBA::new(1.0, 0.0, 0.0, 1.0);
+        let (data, stride) = pixels(SIDE, SIDE, |cr| ring(cr, 50.0, 50.0, 40.0, 8.0, fraction, clear, red));
+        let mut quarters = [0; 4];
+        for y in 0..SIDE as usize {
+            for x in 0..SIDE as usize {
+                let at = y * stride + x * 4;
+                if data[at + 2] > 128 && data[at + 3] > 128 {
+                    let quarter = match (x >= 50, y >= 50) {
+                        (true, false) => 0,
+                        (true, true) => 1,
+                        (false, true) => 2,
+                        (false, false) => 3,
+                    };
+                    quarters[quarter] += 1;
+                }
+            }
+        }
+        quarters
+    }
+
+    #[test]
+    fn a_ring_starts_at_twelve_and_goes_the_way_a_clock_does() {
+        let [top_right, bottom_right, bottom_left, top_left] = ring_quarters(0.25);
+        // The round ends reach half their thickness past twelve and three:
+        // two half discs of radius 4, give or take their soft edges, and
+        // nothing else.
+        let spill = bottom_right + bottom_left + top_left;
+        let caps = (std::f64::consts::PI * 4.0 * 4.0 * 1.25).ceil() as usize;
+        assert!(
+            spill <= caps && top_right > spill * 5,
+            "a quarter ring is not the top right quarter: {top_right} there, {spill} elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_ring_fills_as_much_of_itself_as_its_share() {
+        let total = |fraction| ring_quarters(fraction).iter().sum::<usize>();
+        let (empty, half, whole) = (total(0.0), total(0.5), total(1.0));
+
+        assert_eq!(empty, 0, "an empty ring has a dot at twelve");
+        let ratio = half as f64 / whole as f64;
+        assert!(
+            (0.45..0.56).contains(&ratio),
+            "half a ring is {ratio:.2} of a whole one"
+        );
+        assert_eq!(total(1.7), whole, "a ring past full is fuller than full");
+    }
+
+    #[test]
+    fn an_empty_ring_still_shows_its_track() {
+        let track = gdk::RGBA::new(1.0, 1.0, 1.0, 0.2);
+        let fill = gdk::RGBA::new(1.0, 0.0, 0.0, 1.0);
+        let (data, _) = pixels(100, 100, |cr| ring(cr, 50.0, 50.0, 40.0, 8.0, 0.0, track, fill));
+        let inked = data.chunks(4).filter(|pixel| pixel[3] > 0).count();
+        assert!(inked > 0, "an empty ring is not there at all");
+    }
+
+    /// Where a card puts ink, drawn at the middle of a surface with room
+    /// round it: inside the card, in the tile around the card, and outside
+    /// the tile altogether.
+    fn card_ink(glass: Glass, composited: bool) -> (usize, usize, usize) {
+        const MARGIN: i32 = 16;
+        let (width, height) = (120, 48);
+        let mut placed = (0.0, 0.0, 0.0, 0.0);
+        let (data, stride) = pixels(width + MARGIN * 2, height + MARGIN * 2, |cr| {
+            cr.translate(MARGIN as f64, MARGIN as f64);
+            placed = card(cr, width as f64, height as f64, 10.0, glass, composited, |_, _, _| {});
+        });
+        let (x, y, card_width, card_height) = placed;
+        let (mut on_card, mut round_card, mut off_tile) = (0, 0, 0);
+        for row in 0..(height + MARGIN * 2) {
+            for column in 0..(width + MARGIN * 2) {
+                if data[row as usize * stride + column as usize * 4 + 3] == 0 {
+                    continue;
+                }
+                let (tx, ty) = ((column - MARGIN) as f64, (row - MARGIN) as f64);
+                let in_tile = (0.0..width as f64).contains(&tx) && (0.0..height as f64).contains(&ty);
+                let in_card = (x..x + card_width).contains(&tx) && (y..y + card_height).contains(&ty);
+                if !in_tile {
+                    off_tile += 1;
+                } else if in_card {
+                    on_card += 1;
+                } else {
+                    round_card += 1;
+                }
+            }
+        }
+        (on_card, round_card, off_tile)
+    }
+
+    #[test]
+    fn a_lifted_card_has_a_shadow_only_where_something_composites() {
+        let lifted = Glass { lifted: true, ..WATER_GLASS };
+
+        let (on_card, round_card, off_tile) = card_ink(lifted, true);
+        assert!(on_card > 0, "the card was not drawn");
+        assert!(round_card > 0, "a lifted card on a compositor has no shadow");
+        assert_eq!(off_tile, 0, "the shadow spills out of the tile");
+
+        let (on_card, round_card, off_tile) = card_ink(lifted, false);
+        assert!(on_card > 0, "the card was not drawn");
+        assert_eq!(round_card + off_tile, 0, "a shadow with no compositor to blend it");
+    }
+
+    #[test]
+    fn a_card_that_is_not_lifted_is_the_whole_tile() {
+        let mut placed = (0.0, 0.0, 0.0, 0.0);
+        let _ = pixels(120, 48, |cr| {
+            placed = card(cr, 120.0, 48.0, 10.0, WATER_GLASS, true, |_, _, _| {});
+        });
+        assert_eq!(placed, (0.0, 0.0, 120.0, 48.0));
+        let (on_card, round_card, off_tile) = card_ink(WATER_GLASS, true);
+        assert!(on_card > 0);
+        assert_eq!(round_card + off_tile, 0, "a card with no shadow drew one");
+    }
+
     #[test]
     fn a_bar_is_thick_enough_to_see_at_every_icon_size() {
         assert!(bar_height(24) >= 2.0);
