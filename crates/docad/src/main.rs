@@ -8,6 +8,7 @@ mod patch;
 mod preview;
 mod service;
 mod state;
+mod status_line;
 mod trash;
 mod watch;
 mod widgets;
@@ -26,8 +27,20 @@ use crate::desktop::DesktopIndex;
 use crate::service::{Chosen, DockService};
 use crate::x11::{spawn_worker, watch_root, RootChange, X11Backend};
 
+/// The daemon, or — run as `docad claude-statusline` — Claude Code's status
+/// line (#76), which has to be quick and must not start what the daemon does.
+/// A mode rather than a binary of its own because it writes with the
+/// daemon's `atomic` and reads where the daemon's `usage` says Claude Code
+/// lives, and one installed program is one path to point `settings.json` at.
+fn main() -> Result<()> {
+    if std::env::args_os().nth(1).is_some_and(|mode| mode == crate::status_line::MODE) {
+        std::process::exit(crate::status_line::run_here());
+    }
+    daemon()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn daemon() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("docad=info")),
@@ -54,6 +67,9 @@ async fn main() -> Result<()> {
         .lock()
         .map(|c| (c.all_widgets(), c.widgets.clone()))
         .unwrap_or_default();
+    // Claude Code's status line as the option says, in case it was switched
+    // while the daemon was not running — by hand, in the file.
+    crate::status_line::follow(widget_settings.sanitised().claude.plan);
     // What the day accumulated, which is not what the user chose and so does
     // not live in the config file — see `state.rs`. Read before the widgets
     // are built, because what it holds is what they are built holding.

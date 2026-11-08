@@ -195,6 +195,13 @@ impl DockService {
         before: (Vec<String>, crate::config::WidgetSettings),
     ) -> zbus::fdo::Result<()> {
         let after = self.widget_shape()?;
+        // The one setting that reaches outside the dock: switching it puts
+        // Claude Code's status line in or takes it out. Here for the reason
+        // the settle below is, and only on a change, so a slider elsewhere
+        // never opens Claude Code's settings.
+        if after.1.claude.plan != before.1.claude.plan {
+            crate::status_line::follow(after.1.claude.plan);
+        }
         // Compared rather than always settled, so moving a slider in the
         // Appearance tab does not re-poll twelve widgets. Compared *here*
         // rather than named by each method, so a write added later cannot
@@ -816,6 +823,7 @@ fn widget_settings_of(config: &Config) -> WidgetSettings {
         claude_mode: settings.claude.mode,
         claude_window: settings.claude.window,
         claude_budget: settings.claude.budget,
+        claude_plan: settings.claude.plan,
     }
 }
 

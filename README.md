@@ -144,11 +144,20 @@ all_day = true
 mode = "five-hours"     # five-hours, week or tokens
 window = "today"        # for tokens: 5h, today or 7-days
 budget = 0              # 0 for none
+plan = false            # read the plan's limits from Claude Code's status line
 ```
 
 The `claude` widget reads the usage counts Claude Code writes under
 `~/.claude` (or `$CLAUDE_CONFIG_DIR`). Only counts are kept, and nothing leaves
 the machine.
+
+With `plan` on, the dock sets `docad claude-statusline` as the `statusLine` in
+Claude Code's `settings.json`. Claude Code hands that command the plan's
+five-hour and weekly share; it keeps only `used_percentage` and `resets_at` of
+each, in `$XDG_RUNTIME_DIR/doca/claude-limits.json`, and the five-hour and week
+modes show the plan's share while it has not reset. A status line you already
+had is still run with the same input and is what Claude Code shows; switching
+`plan` off puts it back as it was.
 
 Counters such as the water glasses live in `$XDG_STATE_HOME/doca/state.toml`,
 apart from the config, and start over each day.

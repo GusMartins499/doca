@@ -539,6 +539,8 @@ pub struct WidgetSettings {
     pub claude_window: String,
     /// Tokens the user means to stay under; 0 for none.
     pub claude_budget: u32,
+    /// Whether the plan's limits are read from Claude Code's status line.
+    pub claude_plan: bool,
 }
 
 /// The three views of Claude Code's usage (#32).
@@ -632,14 +634,16 @@ pub mod widget_key {
     pub const MODE: &str = "mode";
     pub const WINDOW: &str = "window";
     pub const BUDGET: &str = "budget";
+    pub const PLAN: &str = "plan";
 
     /// Every (widget, key) pair that exists, for a test to walk.
-    pub const ALL: [(&str, &str); 12] = [
+    pub const ALL: [(&str, &str); 13] = [
         (CALENDAR, AHEAD),
         (CALENDAR, ALL_DAY),
         (CLAUDE, MODE),
         (CLAUDE, WINDOW),
         (CLAUDE, BUDGET),
+        (CLAUDE, PLAN),
         (COUNTDOWN, DATE),
         (COUNTDOWN, LABEL),
         (NOTE, TEXT),
