@@ -752,6 +752,39 @@ const POMODORO_BREAK_GAUGE: Gauge = Gauge {
     edge: None,
 };
 
+/// A timer running down, or paused on the way: honey, warm without being
+/// an alarm yet.
+const TIMER_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.24, 0.16, 0.05),
+        to: (0.15, 0.10, 0.07),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.76, 0.30),
+    edge: None,
+};
+
+/// A timer that has rung: the glass goes red and the card lights a hot rim,
+/// the way a Claude card nearly spent does, so it is seen across the room.
+const TIMER_DONE_GAUGE: Gauge = Gauge {
+    glass: Glass {
+        from: (0.33, 0.09, 0.06),
+        to: (0.20, 0.06, 0.07),
+        rim: (0.22, 0.06),
+        lifted: false,
+    },
+    fill: (1.0, 0.50, 0.38),
+    edge: Some((1.0, 0.33, 0.24)),
+};
+
+/// Whether a timer has rung. The daemon marks a timer that is running as
+/// well as one that has rung, so the mark alone cannot tell; one that has
+/// rung is marked with all of its time gone.
+fn rang(simple: &Simple) -> bool {
+    simple.active && simple.progress >= 1.0
+}
+
 /// Whether a pomodoro is on a break: the phase is the first thing its
 /// detail says, `break` or `long break`, with `· paused` after it when it is.
 fn on_a_break(simple: &Simple) -> bool {
@@ -782,6 +815,8 @@ fn gauge_of(id: &str, simple: &Simple) -> Option<Gauge> {
         // daemon marks only a running block of focus, so the mark cannot.
         "pomodoro" if on_a_break(simple) => Some(POMODORO_BREAK_GAUGE),
         "pomodoro" => Some(POMODORO_FOCUS_GAUGE),
+        "timer" if rang(simple) => Some(TIMER_DONE_GAUGE),
+        "timer" => Some(TIMER_GAUGE),
         _ => None,
     }
 }
@@ -819,7 +854,7 @@ fn draw_meter(
     let track = faded(ON_A_GAUGE, GAUGE_TRACK);
     let fill = rgb(gauge.fill);
 
-    card(cr, width, height, corner, gauge.glass, composited(area), |cr, width, height| {
+    let (x0, y0, w, h) = card(cr, width, height, corner, gauge.glass, composited(area), |cr, width, height| {
         if look.level == Level::Minimal {
             let (cx, cy, radius, thickness) = ring_in(width, height);
             ring(cr, cx, cy, radius, thickness, fraction, track, fill);
@@ -864,6 +899,16 @@ fn draw_meter(
 
         groove(cr, pad, y + number_height + gap, room, thickness, fraction, track, fill);
     });
+
+    if let Some(edge) = gauge.edge {
+        let _ = cr.save();
+        cr.translate(x0, y0);
+        rounded(cr, 0.75, 0.75, w - 1.5, h - 1.5, corner);
+        cr.set_source_rgb(edge.0, edge.1, edge.2);
+        cr.set_line_width(1.5);
+        let _ = cr.stroke();
+        let _ = cr.restore();
+    }
 }
 
 /// A number as big as `size` and no bigger than its room: written smaller
@@ -3426,6 +3471,9 @@ pub mod tests {
             reading("pomodoro", "25:00", "focus \u{b7} paused", 0.0, false),
             reading("pomodoro", "18:42", "focus", 0.25, true),
             reading("pomodoro", "14:59", "long break \u{b7} paused", 0.0, false),
+            reading("timer", "04:10", "running", 0.70, true),
+            reading("timer", "1440:00", "paused", 0.0, false),
+            reading("timer", "00:00", "done", 1.0, true),
         ]
     }
 
@@ -3493,6 +3541,33 @@ pub mod tests {
                     "{id} {level:?}: a tile giving way still says what its number is a share of"
                 );
             }
+        }
+    }
+
+    /// A timer that has rung says so in a hot rim round its card, at every
+    /// level, and a timer still running has no such rim.
+    ///
+    /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_timer_that_has_rung_is_plain_on_its_card() {
+        let hot = TIMER_DONE_GAUGE.edge.expect("a rung timer has a rim");
+        let rim = |state: &WidgetState, level| {
+            let (data, stride, width, height) = metered(state, level);
+            let mut lit = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    let on_the_edge = x < 2 || y < 2 || x >= width - 2 || y >= height - 2;
+                    if on_the_edge && is_share(&data[y * stride + x * 4..], hot) {
+                        lit += 1;
+                    }
+                }
+            }
+            lit
+        };
+        for level in [Level::Full, Level::Compact, Level::Minimal] {
+            let done = rim(&reading("timer", "00:00", "done", 1.0, true), level);
+            let running = rim(&reading("timer", "04:10", "running", 0.70, true), level);
+            assert!(done > 0, "{level:?}: a timer that has rung has no rim");
+            assert_eq!(running, 0, "{level:?}: a running timer lights a rim");
         }
     }
 
@@ -4139,10 +4214,10 @@ pub mod tests {
 
     /// The widgets that are meters, and the counts that have an end to
     /// measure against.
-    const METERS: [&str; 4] = ["cpu", "battery", "time-progress", "pomodoro"];
+    const METERS: [&str; 5] = ["cpu", "battery", "time-progress", "pomodoro", "timer"];
 
     /// Every glass a meter can wear.
-    const GAUGES: [(&str, Gauge); 8] = [
+    const GAUGES: [(&str, Gauge); 10] = [
         ("cpu", CPU_GAUGE),
         ("hot cpu", CPU_HOT_GAUGE),
         ("battery", BATTERY_GAUGE),
@@ -4151,6 +4226,8 @@ pub mod tests {
         ("time", TIME_GAUGE),
         ("pomodoro focus", POMODORO_FOCUS_GAUGE),
         ("pomodoro break", POMODORO_BREAK_GAUGE),
+        ("timer", TIMER_GAUGE),
+        ("timer done", TIMER_DONE_GAUGE),
     ];
 
     /// A meter's words are white on its glass, and its share stands off the
@@ -4243,6 +4320,22 @@ pub mod tests {
         }
         assert_ne!(POMODORO_FOCUS_GAUGE.glass, POMODORO_BREAK_GAUGE.glass);
         assert_ne!(POMODORO_FOCUS_GAUGE.fill, POMODORO_BREAK_GAUGE.fill);
+    }
+
+    #[test]
+    fn only_a_timer_that_has_rung_lights_its_rim() {
+        assert_eq!(gauge_for(&reading("timer", "00:00", "done", 1.0, true)), Some(TIMER_DONE_GAUGE));
+        assert_eq!(
+            gauge_for(&reading("timer", "04:10", "running", 0.70, true)),
+            Some(TIMER_GAUGE),
+            "a running timer is marked too, and has not rung"
+        );
+        assert_eq!(gauge_for(&reading("timer", "10:00", "paused", 0.33, false)), Some(TIMER_GAUGE));
+        assert_eq!(gauge_for(&reading("timer", "15:00", "paused", 0.0, false)), Some(TIMER_GAUGE));
+        assert!(TIMER_DONE_GAUGE.edge.is_some());
+        for (name, gauge) in GAUGES.iter().filter(|(name, _)| *name != "timer done") {
+            assert_eq!(gauge.edge, None, "{name} lights a rim and has nothing to warn of");
+        }
     }
 
     #[test]
