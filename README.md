@@ -1,19 +1,15 @@
 # Doca
 
 A native dock for Linux with per-environment profiles and live widgets.
-No Electron, no webview.
+No Electron, no webview. A Linux port of [PrimoDock](https://dock.oprimo.dev) (macOS).
 
-Doca is a Linux port of [PrimoDock](https://dock.oprimo.dev) (macOS).
-
-![The dock, with pinned apps on the left and clock, CPU and battery widgets on the right](docs/screenshot.png)
+![The dock: pinned apps on the left, clock, CPU, water and pomodoro tiles on the right](docs/screenshot.png)
 
 ## Requirements
 
-| | |
-|---|---|
-| Session | X11 |
-| Desktop | GNOME Shell 42+ |
-| Toolkit | GTK3 |
+- X11 session
+- GNOME Shell 42+
+- GTK3
 
 ## Build
 
@@ -22,104 +18,63 @@ sudo apt-get install -y pkg-config libgtk-3-dev
 cargo build --release
 ```
 
-## Run
+## Try it
 
-### In a sandbox
+**In a sandbox** — a window with a nested X server, its own bus and its own
+config, seeded from your Plank launchers. Your desktop is not touched. Close
+the window to stop.
 
 ```bash
-./scripts/sandbox.sh
+./scripts/sandbox.sh              # add --headless for screenshots and CI
 ```
 
-Opens a window you can click around in. Inside it is a nested X server with
-its own session bus and its own config, seeded from your Plank launchers. The
-dock in there reserves space on the nested screen, not yours; your own dock
-keeps running untouched. Close the window to stop.
-
-`--headless` runs the same thing on a virtual screen with no window at all,
-for screenshots and CI.
-
-This is the way to evaluate the dock at no risk.
-
-### On your own session
+**On your own session** — stops Plank, runs Doca in its place, and brings
+Plank back on Ctrl-C.
 
 ```bash
 ./scripts/try-it.sh
 ```
 
-Stops Plank, runs Doca in its place, and restarts Plank when you press
-Ctrl-C. Two docks cannot share a screen edge — both reserve space through the
-same strut protocol and each reacts to the other's reservation — so they take
-turns rather than fight. On first run it seeds a config from your Plank
-launchers so the dock is not empty. Right-clicking the dock opens
-**Preferences…**, which edits that same config while it runs — the script puts
-the freshly built binaries on `PATH` so the window that opens is the one you
-just compiled.
-
-If the script is killed outright rather than interrupted, Plank will not come
-back on its own: `setsid plank >/dev/null 2>&1 &`.
-
-If the dock ever covers the terminal you started it from, switch to a text
-console with `Ctrl+Alt+F3`, log in, and run:
+If the dock ever gets in your way, switch to a text console (`Ctrl+Alt+F3`),
+log in and run:
 
 ```bash
 pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 ```
 
-`Ctrl+Alt+F2` returns to the desktop.
+`Ctrl+Alt+F2` takes you back.
 
-## On the bar
+## Using the bar
 
-Under an icon there is a dot for each window the app has open, up to three:
-three means three or more, and the tooltip has the number. The colour says
-which app has the focus.
+- **Dots** under an icon: one per open window, up to three. The coloured one
+  has the focus.
+- **Window previews**: rest the pointer on a running app and its windows come
+  up over it. Click one to bring it forward. Right-click lists them by title.
+- **Reorder**: drag an icon or a widget tile along the bar. Dragging a running
+  app in among the pins pins it.
+- **Unpin**: pull a pin up off the bar and let go.
+- **Bar menu**: right-click an empty spot for the theme, widgets, auto-hide,
+  trash and **Preferences…**.
 
-Rest the pointer on an app that has windows open and, a moment after its
-name, its windows come up over it: a picture of each and its title. Click
-one to bring that window forward. The pointer can leave the icon to reach
-them — they wait a moment for it — and the bar stays up while they are open.
-The pictures come from the daemon's `WindowPreview(u, u, u)` → `(uuay)`,
-which reads the window from the X server and shrinks it on that side of the
-bus, and answers only for windows on the dock. Under a compositor, which
-GNOME always has, a window covered by others still shows as itself; without
-one, what is covered comes out black. A minimised window, or one on another
-workspace, has no pixels to read and shows the app's icon instead. Right
-clicking still lists the windows by title, for the keyboard and for a
-pointer that does not wait.
-
-Drag a pinned icon along the bar to give it another place: the icons it
-passes make way, and it is pinned where you let go — written to the config,
-comments and all, through `PinItemAt`. A running app that is not pinned can
-be dragged in among the pins the same way, and is pinned where you let go;
-taken back out among the running apps it goes back where it was, because
-their order is their windows'. Folders and the trash come after everything
-and do not move. Widget tiles move the same way: drag one past its
-neighbour and the dock on screen keeps them in that order. A left click —
-on an icon or a tile — is chosen when the button comes up, so the same press
-can pick it up instead.
-
-Pull a pin up off the bar — an icon's height above it — and let go to unpin
-it. The bar closes the gap behind it while you carry it, and it goes up in a
-puff of smoke where you let go (not with *Reduce animation* on, nor without a
-compositor). Bring it back down before letting go and it is just a move. An
-app that is running stays on the bar, among the running ones.
+![Hovering the text editor shows its two windows over the icon](docs/window-previews.png)
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/doca/config.toml`:
+`$XDG_CONFIG_HOME/doca/config.toml` — or use the [preferences window](#preferences).
 
 ```toml
 [appearance]
-theme = "native"
-icon_size = 48
-magnification = 1.6
+theme = "native"        # native, system, midnight or paper
+icon_size = 48          # 24–96
+magnification = 1.6     # 1.0 turns the lens off
 auto_hide = false
 reveal_delay = 120      # ms at the edge before it comes up
 hide_delay = 400        # ms off the dock before it goes
 show_trash = true
-icon_theme = ""       # empty follows the system
+icon_theme = ""         # empty follows the system
 gtk_theme = ""
 cursor_theme = ""
-monitor = ""          # empty is the primary; or an output, as xrandr names it
+monitor = ""            # empty is the primary; or an xrandr output name
 
 [[environments]]
 name = "Work"
@@ -135,130 +90,37 @@ pinned = ["discord", "spotify"]
 widgets = ["clock", "music"]
 ```
 
-The ids in `pinned` are `.desktop` file names without the extension. An
-environment with no `workspaces` is a catch-all, used for any workspace no
-other environment claims.
-
-### Appearance
-
-| key | |
-|---|---|
-| `theme` | `system` (borrows the colours of the GTK theme in force), `native` (translucent dark glass, blue accents — the default), `midnight` (solid near-black, navy tint), or `paper` (light cream, terracotta accents). An unknown name falls back to `native` with a warning. |
-| `icon_size` | clamped to 24–96, and shrinks further on its own when there are more apps than fit, or than fit with the lens open. |
-| `magnification` | how much the icon under the pointer grows, clamped to 1.0–2.5. `1.0` turns the lens off. The lens needs room to open, which comes out of the icon size on a crowded dock. With GNOME's *Reduce animation* on (`gtk-enable-animations = false`) there is no lens at all, and nothing slides, swells or bounces: the dock is where it is going at once. |
-| `reveal_delay`, `hide_delay` | with `auto_hide`, how long in milliseconds the pointer has to stay at the edge before the bar comes up, and off the bar before it goes. Clamped to 0–2000. Defaults 120 and 400. |
-| `auto_hide` | slides the bar off the bottom edge, leaving a two-pixel sliver in sight, and reserves only that sliver through the strut so maximised windows get the screen back. The bottom six pixels under it bring it up, so there is more to reach than there is to see; while it is hidden, they take clicks from whatever is under them. Pointing there slides it up; moving away slides it down. |
-| `show_trash` | a trash item at the end of the bar. |
-| `icon_theme` | an icon theme for the dock alone. Empty follows `gtk-icon-theme-name`, which is what GNOME Tweaks → Appearance → Icons sets. |
-| `gtk_theme` | a GTK theme for the dock alone, which is what `theme = "system"` reads its colours from. Empty follows the system. |
-| `cursor_theme` | a cursor theme for the dock's own windows. Empty follows the system. |
-| `monitor` | the monitor the dock stands on, by the name of its output as `xrandr --listmonitors` shows it (`eDP-1`, `DisplayPort-0`). Empty is the primary. A named monitor that is unplugged hands the dock to the primary until it comes back; the name stays in the config. |
-
-A name no theme answers to is not an error: GTK falls back on its own and the
-log says what was asked for, so the dock stays usable. Clearing an override
-back to `""` restores whatever the desktop asked for, without a restart.
-
-### Following the system
-
-With `theme = "system"` the bar takes `@theme_bg_color`, `@theme_fg_color`,
-`@theme_selected_bg_color` and `@borders` from the GTK theme instead of carrying
-a palette of its own, and changing the theme in GNOME Tweaks is reflected
-without restarting anything — the dock reloads the stylesheet, and a change of
-icon theme reloads the icons on the bar.
-
-Two things worth knowing before choosing it:
-
-- **The GNOME Shell theme is out of reach.** A *Shell* theme is a
-  `gnome-shell.css` loaded by the GNOME Shell process; the dock is an ordinary
-  GTK3 window, not a Shell extension, and cannot read it. What `system` follows
-  is the *Applications* theme — the one GNOME Tweaks sets under Appearance →
-  Applications. Picking `Sweet-Dark-v40` for both is what makes them match; the
-  dock only ever sees the Applications half.
-- **A name no theme answers to is a warning, not a refusal.** GTK falls back to
-  something readable on its own, so `icon_theme = "Papirus-Drak"` leaves the
-  dock looking exactly as it did — which is indistinguishable from the setting
-  not working. The dock checks the three override names against `~/.themes`,
-  `~/.icons` and the shared data directories, and says in the log which one is
-  not installed.
-- **A theme that defines none of those four colours falls back to `native`**,
-  with the missing names in the log. GTK accepts a stylesheet naming colours
-  the theme never defined — the load succeeds and the declaration simply draws
-  as nothing, which on a translucent window means an *invisible* bar. So the
-  colours are looked up before the sheet is trusted rather than waiting for a
-  failure that never arrives.
-
-### Folders
-
-A path in `folders` becomes a dock item that opens as a grid of its contents,
-directories first, then names case-insensitively, capped at 60 entries. Hidden
-entries are left out. Each entry opens with `xdg-open`; file icons come from
-the content type, not the extension.
-
-The grid goes up on the click, not on the answer. Reading a folder is the one
-thing a click starts whose cost has no ceiling — a disk that is asleep, a
-mount that is not local — so the grid opens over its icon as a skeleton of
-faint cells, and the entries drop into it when they arrive.
-
-It is opened at the shape the folder had last time, and that memory is
-load-bearing rather than a nicety. A GTK menu takes its window's size when it
-pops up and never again: cells added to one already open are not shown but
-*scrolled* to, and the only way to resize it is to put it down and up again.
-So a folder opened before opens at its own shape and nothing moves at all; one
-whose shape has changed is put down and up once, which beats hiding two thirds
-of itself behind a scroll arrow. Every cell is the same size, which is what
-makes a shape knowable before the answer is.
-
-A grid is never taken down inside the quarter-second after it went up, and
-that figure is the click itself. A menu put up by a press and taken down and
-up again before the *release* of that same click is dismissed by that release:
-with a folder that reads instantly the whole dance fits inside one click, and
-the grid then opened one time in three. None of this is reachable from
-`cargo test`, which has no click to make and no grab to lose, so it is checked
-in `scripts/check-live.sh` instead — where it failed, twice, before it worked.
+- `pinned` takes `.desktop` file names without the extension.
+- An environment with no `workspaces` covers every workspace no other one claims.
+- `theme = "system"` takes its colours from the GTK *Applications* theme (the
+  GNOME Shell theme is out of reach). A theme that defines none of the colours
+  it needs falls back to `native`.
+- A path in `folders` opens as a grid of its contents.
+- With GNOME's *Reduce animation* on, nothing on the bar animates.
 
 ### Widgets
 
-A widget is not an icon that opens an app: it is a tile that draws its own
-state in the bar. Each one says what shape that state takes and how much room
-it wants, and the bar has a drawer for each shape rather than one column of
-labels for all of them.
+A widget is a tile that draws its own state. Click it to open a panel with its
+controls.
 
-| id | shows | tile | poll | panel offers |
-|---|---|---|---|---|
-| `clock` | time and date | wide | 1s | — |
-| `calendar` | the date, and the next three things on GNOME's calendars (Evolution Data Server, read only) | wide | 15s | — |
-| `battery` | charge and time to full or empty | wide | 30s | — |
-| `cpu` | busy share since the last sample | wide | 2s | — |
-| `network` | up and down rates | wide | 2s | — |
-| `music` | MPRIS title and artist | wide | 2s | play/pause, previous, next |
-| `pomodoro` | focus and break blocks | wide | 1s | start/pause, skip, reset |
-| `stopwatch` | counting up, with laps | wide | 1s | start/stop, lap, reset |
-| `timer` | counting down to a ring | wide | 1s | start/pause, add a minute, reset |
-| `time-progress` | how much of a span has gone | wide | 30s | next span, back to today |
-| `countdown` | days to a date | wide | 60s | — |
-| `water` | glasses counted, in a ring of the goal | square | 60s | one more, take one back, start over |
-| `note` | a line you leave yourself | wide | — | — |
-| `claude` | Claude Code's tokens: the open five-hour session, the last seven days, or a window you pick | wide | 15s | — |
+| id | shows | panel |
+|---|---|---|
+| `clock` | time and date | |
+| `calendar` | today and the next events on GNOME's calendars | |
+| `battery` | charge and time left | |
+| `cpu` | CPU usage | |
+| `network` | up and down rates | |
+| `music` | what is playing (MPRIS) | play/pause, previous, next |
+| `pomodoro` | focus and break blocks | start/pause, skip, reset |
+| `stopwatch` | time counting up, with laps | start/stop, lap, reset |
+| `timer` | time counting down | start/pause, +1 min, reset |
+| `time-progress` | how much of a span has gone | next span, today |
+| `countdown` | days to a date | |
+| `water` | glasses drunk against a goal | one more, one less, reset |
+| `note` | a line you leave yourself | |
+| `claude` | Claude Code token usage | |
 
-A **square** tile is about one icon wide and a **wide** one about two and a
-half, so a tile follows the `icon_size` the config asks for instead of being
-88 pixels whatever the icons are doing. The size is the widget's own
-declaration, which is why a tile joining or leaving the bar never resizes the
-ones beside it. It is paid for on a very full dock: four wide tiles take 144
-pixels more than the fixed-width ones did, which with twenty-eight apps
-already pinned comes out of the icon size.
-
-Clicking a tile opens a **panel** over it — what the widget is showing, and a
-row for each thing it can be told to do. The panel goes up in the frame the
-click landed in, as a skeleton, and fills when the daemon answers: a widget's
-contents are a question whose cost has no ceiling, and the bar puts none on
-it. `Esc` or a click outside closes it, the arrow keys walk the controls, and
-the keyboard goes back to the bar afterwards. It is a GTK menu, because the
-bar is a `_NET_WM_WINDOW_TYPE_DOCK` window and on X11 a menu's grab is the
-only thing that reliably carries the keyboard over one of those — the same
-reason the folder grid is one.
-
-Widgets that need settings take them from a `[widgets.*]` block:
+Settings, for the widgets that have them:
 
 ```toml
 [widgets.countdown]
@@ -275,147 +137,44 @@ minutes = 15
 goal = 8
 
 [widgets.calendar]
-ahead = "week"      # today, 3-days, week or month
-all_day = true      # list all-day events
-```
+ahead = "week"          # today, 3-days, week or month
+all_day = true
 
-Which calendars the calendar widget reads is chosen in GNOME Calendar: a
-calendar unticked there is left out here too.
-
-```toml
 [widgets.claude]
-mode = "five-hours"   # five-hours, week or tokens
-window = "today"      # for tokens: 5h, today or 7-days
-budget = 0            # tokens you mean to stay under; 0 for none
+mode = "five-hours"     # five-hours, week or tokens
+window = "today"        # for tokens: 5h, today or 7-days
+budget = 0              # 0 for none
 ```
 
-**The `claude` widget reads personal data from your disk.** It counts the
-`usage` Claude Code writes into its own transcripts under
-`$CLAUDE_CONFIG_DIR` (or `~/.claude`). Only the counts are kept — never what
-was said — nothing is logged, and nothing leaves the machine. There is no
-network call and no token. Your plan's limit is not in those files, so the
-tile shows a percentage only against a `budget` you set yourself, and says
-so. The format is Claude Code's own and may change; when it does, the tile
-says it could not understand it rather than showing zero.
+The `claude` widget reads the usage counts Claude Code writes under
+`~/.claude` (or `$CLAUDE_CONFIG_DIR`). Only counts are kept, and nothing leaves
+the machine.
 
-A poll is not an update: the scheduler compares the rendered state to the last
-one and stays quiet when nothing changed, so a clock showing `17:21` is read
-every second and announced once a minute.
+Counters such as the water glasses live in `$XDG_STATE_HOME/doca/state.toml`,
+apart from the config, and start over each day.
 
-#### What the day accumulated
+## Environments and shortcuts
 
-A setting is what you chose; a count is what the day did. The two live apart:
+Each environment is its own dock. With `workspaces` set, the dock follows the
+workspace; without, you switch by key.
 
-```
-$XDG_CONFIG_HOME/doca/config.toml    the goal of eight glasses
-$XDG_STATE_HOME/doca/state.toml      the six already drunk
-```
-
-So the glasses survive a restart, and nothing a counter does rewrites the file
-you edit by hand. The state file is written whole or not at all, and one that
-is missing, empty or half-written is a day that starts from zero and says so
-in the log rather than a daemon that will not start.
-
-The turn of the day is noticed in one place — `State::forget_the_day` in
-`crates/docad/src/state.rs` — and the result is handed to every widget. No
-widget asks what day it is, so yesterday's water cannot count towards today's
-goal and the next counter added cannot forget a rule it never had to know.
-Nothing in here appears in the preferences window: what is there is choice,
-not accumulation.
-
-## Switching environments
-
-An environment is a dock: its own apps, its own widgets. Two of them can share
-one workspace and be swapped by a key, or each can own a workspace and follow
-it — `workspaces` is what decides which. Leave it off every environment and
-the workspace stops deciding altogether; the first in the file is what you
-start on.
-
-A key puts an environment on screen and moves nothing. The choice stands until
-you step onto a workspace some environment asked for by name: that is a choice
-of its own and replaces the one the key made. A workspace only a catch-all
-covers asks for nothing, so a dock chosen by hand survives moving across it.
-
-The dock does not grab keys itself — on Linux the desktop owns the keyboard —
-so bind one. The [Shortcuts tab](#preferences) does this without a terminal;
-the script is the same thing for automation, and writes the same slots:
+The desktop owns the keyboard, so bind keys in the **Shortcuts** tab of the
+preferences, or with the script:
 
 ```bash
-./scripts/bind-key.sh                    # <Super>e cycles environment
-./scripts/bind-key.sh '<Super>x'         # the same action, your key
-./scripts/bind-key.sh '<Super>1' Work    # one key straight to one environment
+./scripts/bind-key.sh                    # <Super>e cycles environments
+./scripts/bind-key.sh '<Super>1' Work    # one key to one environment
+./scripts/bind-key.sh --items --take     # <Super>1..9 open the n-th icon
+./scripts/bind-key.sh --focus '<Super><Alt>d'   # keyboard to the dock
 ./scripts/bind-key.sh --list
-./scripts/bind-key.sh --remove '<Super>1' Work
-./scripts/bind-key.sh --item 3           # <Super>3 chooses the third icon
-./scripts/bind-key.sh --items --take     # <Super>1..9, taken from GNOME's dash
-./scripts/bind-key.sh --remove --items
-./scripts/bind-key.sh --back                       # <Shift><Super>e, the other way
-./scripts/bind-key.sh --auto-hide '<Super><Alt>h'  # auto-hide on and off
-./scripts/bind-key.sh --widget water '<Super><Alt>w'   # one widget on and off
-./scripts/bind-key.sh --focus '<Super><Alt>d'      # the keyboard to the dock
 ```
 
-GNOME binds `<Super>1..9` to its own dash out of the box
-(`org.gnome.shell.keybindings switch-to-application-N`), and a key bound twice
-goes to whichever wins. So `--item` and `--items` refuse those keys and say
-which, unless `--take` is given — which clears GNOME's binding for exactly
-the keys being bound, and nothing else. `gsettings reset` gives them back.
+`--take` clears GNOME's own `<Super>1..9` bindings for those keys;
+`gsettings reset` gives them back. The script's header lists the rest
+(`--remove`, `--back`, `--auto-hide`, `--widget`).
 
-A chosen item behaves as if clicked: an open app comes forward, and one that
-is not running starts, with the same bounce on the bar a click gives.
-
-`FocusDock` hands the keyboard to the dock. The bar comes up even with
-auto-hide on, and stays up for as long as it has the keyboard:
-
-| key | does |
-|---|---|
-| `←` `→`, `Tab` `Shift+Tab` | the icon or tile before or after; stops at the ends |
-| `Home` `End` | the first or the last |
-| `Enter`, `Space` | as a left click: an app comes forward or starts, a folder or a tile opens |
-| `Menu`, `Shift+F10` | as a right click: the icon's menu, or the tile's panel |
-| `Esc` | the keyboard back to the app that had it, and the bar hides again |
-
-`Esc` inside a menu or a panel steps back to the bar rather than out of it.
-Choosing an app, or clicking outside the dock, gives the keyboard back too.
-
-Every action a key can call, for binding by hand:
-
-| method | arguments | does |
-|---|---|---|
-| `CycleEnvironment` | — | the next dock, wrapping round |
-| `CycleEnvironmentBack` | — | the dock before, wrapping round |
-| `ToggleAutoHide` | — | auto-hide on or off; answers which |
-| `ToggleWidget` | `id` | that widget on or off the dock showing; answers which |
-| `SetEnvironment` | `name` | that dock |
-| `ActivatePosition` | `n`, from 1 | the n-th icon, as a click would |
-| `FocusDock` | — | the keyboard to the dock: the bar comes up, first item focused |
-| `ActivateItem` | `id` | that item, as a click would |
-| `InvokeWidget` | `id`, `action` | a widget's action — `water drink`, `music next` |
-| `SetAppearance` | `{key: value}` | e.g. `{'auto_hide': <true>}` |
-| `SetWidgetSetting` | `id`, `key`, `value` | e.g. `water goal <uint32 2500>` |
-
-```bash
-gdbus call --session --dest io.github.gusmartins499.Doca \
-    --object-path /io/github/gusmartins499/Doca \
-    --method io.github.gusmartins499.Doca1.ActivatePosition 3
-```
-
-The script writes a GNOME custom keybinding whose command is a `gdbus call` to
-`CycleEnvironment` or `SetEnvironment`. It exists because that list of
-keybindings is shared by every application on the desktop: it has to be read
-and written back, and a copy-pasted `gsettings set` that assigns the whole
-array drops every shortcut you had. Each action owns a named slot, so running
-it twice for one action moves that binding instead of adding another.
-
-Keys bound before this project was renamed from PrimoDock to Doca sit in slots
-named `primodock-*`, still calling a bus name that no longer answers: dead keys,
-and `--list` does not see them to say so. Rebind each one with the commands
-above, then delete the old entries — they show up under Settings → Keyboard →
-Custom Shortcuts, named `PrimoDock: …`.
-
-Cycling walks the environments in config order and wraps round, catch-alls
-included: switching by hand needs no workspace to switch to. It refuses when
-there is only one environment, which is the only case with nowhere to go.
+With the keyboard on the dock: arrows or Tab move, Enter opens, Menu or
+Shift+F10 opens the menu or panel, Esc gives the keyboard back.
 
 ## Preferences
 
@@ -423,146 +182,22 @@ there is only one environment, which is the only case with nowhere to go.
 doca-prefs
 ```
 
-Right-clicking the bar outside an icon or a tile offers what one click settles:
-the theme, the widgets on this dock, auto-hide, the trash, and **Preferences…**.
+Also under **right-click → Preferences…**. Every change applies at once, with
+no Apply button.
 
-Also from **right-clicking the dock → Preferences…**, and from the applications
-menu once `packaging/doca-prefs.desktop` is installed. It is single-instance:
-opening it again brings the window you have to the front rather than starting a
-second writer.
+- **Appearance**: theme, icon size, lens, auto-hide, trash, screen.
+- **Docks**: add, rename, reorder and remove environments; their workspaces,
+  pins and widgets.
+- **Widgets**: each widget's settings, and which docks show it.
+- **Shortcuts**: keys for cycling and for each dock, written to GNOME's
+  custom keybindings.
 
-Every control applies as it moves. There is no Apply and no OK — a dialog that
-asked you to confirm what you had just chosen would be the TOML again, with
-buttons. The window writes only through the bus, so the daemon stays the one
-thing that validates and saves, and a change made anywhere else — a bound key,
-a second window — moves these controls too.
+![The Appearance tab of the preferences window](docs/preferences.png)
 
-The **Appearance** tab is live: theme, icon size, magnification, auto-hide and
-the trash. The theme list comes from the shared contract rather than being
-written out in the window, so a theme added to the dock appears here without
-anyone remembering to.
+## D-Bus
 
-The **Docks** tab is the part a terminal was the only way to reach. Docks are
-added, removed and renamed on the left; on the right are the workspaces that
-dock claims, the apps it pins and the widgets it shows. The workspace field
-counts from 0, the same as the config file, so a hand-edited TOML and this
-window never disagree about which workspace is which; left empty, the dock
-covers whatever no other dock asked for. **Up** and **Down** under the list
-reorder the docks themselves — that order is the order a key cycles through
-them, and until this it was the one piece of the config only a text editor
-could reach. **Add app…** opens a box you can type
-in, over every installed application — searching the id as well as the name,
-because the id is what the file holds. Pins reorder with Up and Down, which
-move one pin a place and nothing else.
-
-A name is renamed when you press Enter, not as you type: a rename sent letter
-by letter would ask the daemon for "W", then "Wo", then "Wor". Remove greys out
-on the last dock, because the daemon refuses to remove it and a button that is
-always refused is better greyed than argued with. Anything else refused — a
-name already taken — is shown as the sentence the daemon sent back.
-
-The **Widgets** tab is what each widget is *set to* — which is a different
-question from which docks show it, and the reason the two live in different
-tabs: the countdown counts to one date no matter how many docks show it, while
-showing it is a property of the dock. Four of the twelve take settings — a
-countdown's date and caption, a note's text, a timer's length, a water goal —
-and the other eight say so rather than leaving a blank pane. A widget id in the
-config that nothing answers to — a typo in a hand-edited TOML — appears at the
-end of the list marked *unknown*, spelled the way the file spells it, rather
-than quietly not being there: the daemon drops it with a log line nobody reads,
-and the bar showing nothing looks exactly like a widget that was never turned
-on. Picking it says which docks ask for it and that it has to come out of
-`config.toml`, because the tick boxes in the Docks tab are built from the
-widgets that exist and an id that does not exist has no box to untick. Under each name is
-the line that answers the question this tab exists for: **Shown in Work and
-Home**, or, when nothing shows it, where to turn it on. A date is checked
-before it is sent, because the daemon accepts any text and the widget would
-just show "bad date" in the bar with no room to say why; an empty date is
-allowed, since that is how a countdown is turned off. The date and caption go
-out when you press Enter, the note when you click away or press its button —
-Enter belongs in a note.
-
-A setting reaches the widget that is already running, without restarting
-anything, and without resetting what it was counting: a new water goal keeps
-today's glasses, and a timer already counting down keeps its count and takes
-the new length at its next reset. Changing which widgets a dock shows works
-the same way — the ones that stay are carried over, not rebuilt, so adding a
-widget to one dock does not reset the stopwatch in another.
-
-The **Shortcuts** tab is the only one that does not write the dock's config.
-The dock does not grab keys — on Linux the desktop owns the keyboard — so what
-this writes is GNOME's own list of custom keybindings, the same list
-`scripts/bind-key.sh` writes and the same one Settings → Keyboard → Custom
-Shortcuts shows. The tab says so on screen, because a key that turns up in the
-desktop's settings is surprising if nothing said it would.
-
-One row for the cycle, one per dock. Click a key to set it, Backspace to clear
-it, Esc to leave it as it was. A shortcut needs Ctrl, Alt or Super held with
-it: a letter on its own would answer every time it was typed, and `<Shift>e` is
-just E — Shift counts towards the name of a shortcut, never towards making one.
-A lock that happens to be on, Num Lock above all, is kept out of the name, or
-the key would stop working the moment it was switched off.
-
-A key another application already holds is bound anyway and said out loud,
-naming what else has it: refusing would be the dock deciding who owns a key it
-does not own either. A key one of the *other rows* holds is refused, because
-this window owns both sides of that collision and clearing one is a click away.
-
-Two docks whose names come out the same once punctuation is stripped — `My
-Work` and `My-Work` — would share one keybinding slot, so both rows say so and
-offer no key until one is renamed. The same goes for a dock named only in
-punctuation, which leaves nothing to make a slot name out of.
-
-The script is not replaced by any of this: it is what automation and a terminal
-reach for, and the two write the *same* slot, label and command, so binding a
-key in one place moves what the other bound rather than sitting beside it.
-`scripts/check-live.sh` holds them to that, against a real dconf.
-
-On a desktop that keeps no such list — KDE, sway, a machine without
-gnome-settings-daemon — the tab says that in a line instead of offering capture
-buttons that would take a key press and drop it. The actions are still on the
-bus; [the table below](#changing-the-configuration-while-it-runs) is what to
-bind them to by hand.
-
-With no daemon running the window says so in a line, instead of drawing
-controls that would all look like they had worked and changed nothing.
-
-A separate binary rather than a window inside the dock, for three reasons: the
-shell draws the bar and reserves the screen edge, and a fault in a settings
-window must not take that down; the window leaves memory when it closes; and
-the daemon stays the single source of truth, which makes this window just
-another caller on the bus, no different from a keybinding.
-
-## Changing the configuration while it runs
-
-Everything in `config.toml` that the dock can change, it can change on the bus,
-and the bar applies it without being restarted. The daemon is the only writer:
-it validates what arrives, writes the file beside itself and renames it into
-place — so a session that dies mid-write leaves the old config intact rather
-than half a TOML — and then announces `ConfigChanged`, which the bar answers by
-re-reading and reapplying the theme, the icon size, the lens, the auto-hide and
-the trash on the window already on screen.
-
-| method | |
-|---|---|
-| `SetAppearance(a{sv})` | changes only the keys named: `theme`, `icon_size`, `magnification`, `auto_hide`, `show_trash`, `icon_theme`, `gtk_theme`, `cursor_theme`, `monitor`, `reveal_delay`, `hide_delay`. A key nobody knows is refused rather than ignored; a value out of range is brought back in (an `icon_size` of 4000 becomes 96). |
-| `SetWidgetSetting(s, s, v)` | one widget's one setting: `countdown`/`date`, `countdown`/`label`, `note`/`text`, `timer`/`minutes`, `water`/`goal`. Written, announced, and handed to the widget that is already running — which keeps whatever it was counting. A key nobody knows is refused rather than ignored, and a value out of range is brought back in. |
-| `WidgetSettings()` → `(sssuu)` | what every widget setting is, already clamped. The counterpart of `SetWidgetSetting`, flat and named the same way, so a window can put them straight on its controls. |
-| `AddEnvironment(s)` → `s` | a new dock, with nothing pinned and no workspace claimed, so it starts as a catch-all. Returns the name as stored. |
-| `RemoveEnvironment(s)` | removes a dock. The last one cannot go: something always has to be on screen. |
-| `RenameEnvironment(s, s)` → `s` | renames a dock, and follows the rename if that dock is the one a key put on screen. |
-| `SetEnvironmentWorkspaces(s, ai)` | which workspaces a dock claims, tidied: sorted, deduplicated, negatives dropped. An empty list makes it the catch-all. |
-| `SetEnvironmentWidgets(s, as)` | the widgets a dock shows, in the order it shows them. |
-| `ReorderEnvironments(as)` | reorders the docks themselves, which is the order a key cycles through them. Same contract as `ReorderPinned`: a name nobody knows is refused, and a dock left out keeps its place at the end. |
-| `ReorderPinned(s, as)` | reorders one dock's pins and nothing more. An id that is not pinned there is refused, and an id left out keeps its place at the end — so a window working from a stale list cannot quietly unpin what it had not heard about. There is no `ReorderItems`: of everything on the bar only the pins have an order anyone chose, so this is that method, and moving a single icon is `PinInAt` with an id already pinned. |
-| `PinIn(s, s)` / `UnpinIn(s, s)` | pin and unpin in the dock named, which need not be the one on screen — that is the whole difference from `PinItem`/`UnpinItem`, which act where the user is looking because that is what a click on the bar means. `PinIn` refuses an id no `.desktop` file answers to; `UnpinIn` does not, since that is how an uninstalled app gets out of the config. |
-| `PinInAt(s, s, u)` / `PinItemAt(s, u)` | pin at a place — in the dock named, or in the one on screen — counted as `ActivatePosition` counts: from 1, in the order the bar shows. The bar draws a dock's pins first, so place 2 is between the first pin and the second, and one past the last pin is the end. Anything else is refused in words, never clamped. An id already pinned there is moved rather than refused, which is what makes it the one call a drag needs; sent twice, the second changes nothing. New methods rather than a position added to `PinIn`/`PinItem`, so a binding written against those keeps working. `PinInAt` refuses a new id no `.desktop` file answers to, as `PinIn` does, but still moves one already pinned. |
-| `ListEnvironments()` → `a(saibasas)` | every dock: its name, the workspaces it claims, whether it is the one on screen, what it pins and which widgets it shows. Everything a writer can change about a dock is something a reader can see. |
-| `ListApplications()` → `a(sss)` | every installed application — id, name, icon — sorted by name, for a window that has to offer a choice of them. Entries marked `NoDisplay` are left out, the same ones a desktop menu leaves out. |
-
-Anything refused comes back as `InvalidArgs` with the reason in it, and nothing
-is written. Numbers may be sent as any integer width, or as text, so a
-keybinding or a `gdbus call` typed by hand works as well as a GUI does:
+Everything the preferences window does goes through the daemon on the session
+bus, so it can be scripted too:
 
 ```bash
 gdbus call --session --dest io.github.gusmartins499.Doca \
@@ -571,143 +206,36 @@ gdbus call --session --dest io.github.gusmartins499.Doca \
     '{"theme": <"midnight">, "icon_size": <int32 64>}'
 ```
 
-## Checking it against a real session
-
-`cargo test` covers everything that can be decided without a bus. Four things
-cannot be, and have scripts of their own:
-
-```bash
-cargo build --release && ./scripts/check-live.sh
-```
-
-starts a daemon, the bar and the preferences window on a nested display with a
-session bus, a config and a dconf database of their own, and asserts four
-things no unit test can reach.
-
-That a change made from anywhere else reaches the window. Writing is a method
-call and hearing is a signal, and the two break apart — every control can work
-while the window quietly stops following. It waits for the subscription rather
-than for the window, because the window is drawn well before it subscribes.
-
-And that a widget setting reaches the widget that is already running: it drinks
-two glasses, moves the water goal to four, and expects `2/4` back. A widget
-rebuilt instead of told would answer `0/4`, and the value landing in the config
-file would prove nothing either way.
-
-And that a rebuild of the bar keeps the widget tiles it already had. The bar is
-rebuilt whenever a window opens, closes or takes focus, and on every change to
-the config as well — which means on every frame of a slider being dragged in
-the preferences window. Tiles torn down and built again at that rate are a
-visible flicker, and a bar that quietly went back to doing so looks exactly
-like one that did not: the counts are the only thing that tells them apart, so
-they are read out of the bar's own log. Changing the icon size should carry
-every tile over and make none; dropping one widget should take one tile and
-leave the other where it was.
-
-And that `scripts/bind-key.sh` and the Shortcuts tab write the same slot, label
-and command. Two implementations of one algorithm is the price of the script
-staying useful for automation, and the price is only safe while they agree — a
-slot named differently would not replace the other's binding, it would sit
-beside it, and one key would fire the action twice. It binds with the script and
-then reads the count back out of the window's own log. It also plants another
-application's keybinding first, and expects to find it afterwards: the list is
-shared by every app on the desktop, and the whole reason the script exists is
-that writing the array outright drops everyone else's keys.
-
-The keybinding part writes dconf, so `XDG_CONFIG_HOME` is exported **before**
-`dbus-run-session`, not after. dconf writes do not go to the file the writing
-process points at — they go over the bus to `dconf-service`, which inherits its
-environment from the bus daemon. Exported too late, the session *reads* the
-temporary database and *writes* the real one, and the script quietly replaces
-the keybindings of whoever ran it. A sentinel write proves the isolation before
-anything shared is touched, and the keybinding checks are skipped rather than
-guessed at if it fails.
-
-```bash
-DISPLAY=:9 cargo test -p doca-shell -- --ignored
-DISPLAY=:9 cargo test -p doca-prefs -- --ignored
-```
-
-run the checks that need real GTK widgets — the ones that would otherwise be
-assertions about what GTK probably does. They need an X server on `:9`, which
-either `./scripts/dev-session.sh` or `./scripts/sandbox.sh` leaves running in
-another terminal.
+`gdbus introspect` on the same name and path lists every method — switching
+environments, pinning, widget actions, settings. Invalid input is refused with
+the reason; nothing is written.
 
 ## Development
 
 ```
 crates/doca-ipc     shared D-Bus contract
-crates/docad        the daemon: windows, workspaces, state
-crates/doca-shell   the bar: draws, anchors, never talks X11 policy
-crates/doca-prefs   the preferences window: writes only through the bus
+crates/docad        the daemon: windows, workspaces, config, widgets
+crates/doca-shell   the bar
+crates/doca-prefs   the preferences window
 ```
 
-The D-Bus boundary between the two is load-bearing: when the X11 session goes
-away, the shell is replaced and the daemon survives intact.
-
-The row of icons is one widget that draws them all, not a widget each. A
-widget per icon cannot animate: changing an icon's size changes what it asks
-of its parent, so every frame of the lens renegotiates the layout of the whole
-bar — 33 frames a second with twenty-nine icons, against 60 for a drawing.
-Where an icon goes is a function of its own resting place and the pointer, and
-of nothing else, so growing one cannot shift the rest by accumulation. Both
-the shape of that and its constants come from
-[Plank](https://github.com/ricotz/plank)'s `PositionManager`.
-
-What the lens is aimed at is not quite the pointer. A pointer that *moves* is
-followed exactly — nothing is interpolated and nothing lags. A pointer that
-*appears* somewhere it did not travel to is not: leaving the bar at one end
-and coming straight back at the other aims the lens somewhere new between two
-frames, which moved an icon 61px at once, where even a brisk sweep costs 27px.
-So the lens has a ceiling on how fast it travels, set above any speed a hand
-produces, and a jump is spread over the frames it takes — at worst, across the
-whole row, about as long as the lens takes to open. The figures are measured
-off the lens's own shape rather than guessed at, and the checks in
-`crates/doca-shell/src/row.rs` hold a jump to what a sweep at that ceiling
-would have cost.
-
-An icon that joins the row grows out of the bar and fades in, and one that
-leaves does the reverse and only then lets go of its place — an app that opens
-no longer makes its neighbours appear somewhere new between two frames. While
-that is happening an icon takes a fraction of a slot rather than all of it, so
-the row contracts and expands by fractions of a pixel; and the run of icons is
-centred on the room the bar was given rather than packed into the start of it,
-which is what lets the bar widen and recentre itself on the screen without the
-icons already there moving at all. The width the bar asks for counts only the
-icons that are staying: a departing one is drawn in the margin the row keeps at
-either end for the lens to push icons into. A resize is not an arrival — moving
-the icon-size slider or changing the icon theme refills the row with every icon
-new to it, and neither fades anything in.
-
-`scripts/dev-session.sh` is a barer version of the sandbox, for a debug build
-with an empty config:
+The daemon owns the state and is the only writer of the config; the bar and
+the preferences window are clients on the bus.
 
 ```bash
-sudo apt-get install -y xserver-xephyr xvfb openbox dbus   # once
-cargo build
-./scripts/dev-session.sh
+cargo test                                         # everything without a display
+./scripts/dev-session.sh                           # nested X on :9, debug build
+DISPLAY=:9 cargo test -- --ignored                 # tests that need real GTK
+cargo build --release && ./scripts/check-live.sh   # end-to-end, on its own bus and dconf
 ```
 
-Some tests need a real X display and are marked `#[ignore]`. Run them from
-inside a nested session:
+`dev-session.sh` needs `xserver-xephyr xvfb openbox dbus`. To move or click the
+pointer on a headless display:
 
 ```bash
-DISPLAY=:9 cargo test -- --ignored
-```
-
-GTK belongs to the thread that starts it and the harness gives each test a
-thread of its own, so those checks live beside the code they check and are
-called from a single `on_a_display` test rather than being `#[test]`s.
-
-Hover has no one to trigger it on a headless screen, so the pointer is moved
-by hand — and, for clicks, pressed for real through XTEST:
-
-```bash
-DISPLAY=:9 cargo run -p docad --example warp-pointer -- 700 1035
 DISPLAY=:9 cargo run -p docad --example warp-pointer -- 700 1035 click:3
 ```
 
 ## Not implemented
 
-Live window previews: the picture over an icon is taken once, when the
-windows come up, and does not move while you look at it.
+Live window previews: the picture is taken once, when the previews open.
