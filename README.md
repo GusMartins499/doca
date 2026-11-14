@@ -3,7 +3,7 @@
 A native dock for Linux with per-environment profiles and live widgets.
 No Electron, no webview. A Linux port of [PrimoDock](https://dock.oprimo.dev) (macOS).
 
-![The dock: pinned apps on the left, clock, CPU, water and pomodoro tiles on the right](docs/screenshot.png)
+![The dock: pinned apps on the left; clock, CPU, water, pomodoro, Claude and network cards on the right](docs/screenshot.png)
 
 ## Requirements
 
