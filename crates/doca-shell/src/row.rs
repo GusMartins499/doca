@@ -2046,7 +2046,17 @@ pub mod tests {
         row.aim(Some(rest.centre(0)));
         assert!(row.scale_now() > 1.0, "the lens shut, and nothing could jump");
 
-        let mut clock = Instant::now();
+        // Only the travel runs on the frames below, so nothing else may run on
+        // the wall clock. The magnification is held fully open: it reverses on
+        // `hover_since`, which is real time, and a test slowed down by a busy
+        // machine would see it dip and recover between two simulated frames
+        // and charge that to the travel. And the frames start where the lens
+        // last stepped, not at whatever `now` is by the time the loop begins:
+        // the first frame would otherwise carry the lens as far as all the
+        // real time spent since the first aim allows, which is what made this
+        // fail now and then (`icon moved 30px ... past the 29px`).
+        row.hover_since.set(Instant::now() - crate::motion::ZOOM);
+        let mut clock = row.lens_at.get();
         let mut arrived = None;
         for frame in 1..=60 {
             clock += crate::motion::FRAME;
