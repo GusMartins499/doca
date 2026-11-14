@@ -43,21 +43,47 @@ pub fn around(bar: gdk::Rectangle, icons: Option<(f64, f64)>) -> gdk::Rectangle 
 /// screen until something else happens to invalidate it.
 const SLIP: i32 = 2;
 
-/// The strip that has to be repainted to get from one background to the next.
+/// The strips that have to be repainted to get from one background to the
+/// next.
 ///
-/// The bar grows and shrinks at its ends and never in the middle, so this is
-/// the two ends and not the whole of it — which matters, because the middle
-/// is where the widget tiles are, and a tile repainted sixty times a second
-/// is a Pango layout sixty times a second for a picture that did not change.
-pub fn changed(was: gdk::Rectangle, is: gdk::Rectangle) -> Option<gdk::Rectangle> {
+/// The bar grows and shrinks at its ends and never in the middle, so these
+/// are the ends that moved and not the whole of it — which matters, because
+/// the middle is where the widget tiles are, and a tile repainted sixty times
+/// a second is a Pango layout sixty times a second for a picture that did not
+/// change. Measured before this was so: one bounding box from end to end, and
+/// every tile redrawn on a fifth of the frames of a pass of the lens.
+///
+/// An end's strip runs from where the edge was to where it is, and on inward
+/// by half the bar's height. That is as far as a rounded corner can reach
+/// (GTK keeps a radius to half the side), so the corner left behind and the
+/// corner drawn anew are both inside it.
+///
+/// A background that changed height or moved up or down is not an end
+/// moving, and is repainted whole.
+pub fn changed(was: gdk::Rectangle, is: gdk::Rectangle) -> Vec<gdk::Rectangle> {
     if was == is {
-        return None;
+        return Vec::new();
     }
-    let start = was.x().min(is.x()) - SLIP;
-    let end = (was.x() + was.width()).max(is.x() + is.width()) + SLIP;
-    let top = was.y().min(is.y()) - SLIP;
-    let bottom = (was.y() + was.height()).max(is.y() + is.height()) + SLIP;
-    Some(gdk::Rectangle::new(start, top, end - start, bottom - top))
+    if was.y() != is.y() || was.height() != is.height() {
+        let start = was.x().min(is.x()) - SLIP;
+        let end = (was.x() + was.width()).max(is.x() + is.width()) + SLIP;
+        let top = was.y().min(is.y()) - SLIP;
+        let bottom = (was.y() + was.height()).max(is.y() + is.height()) + SLIP;
+        return vec![gdk::Rectangle::new(start, top, end - start, bottom - top)];
+    }
+    let corner = is.height() / 2;
+    let (top, height) = (is.y() - SLIP, is.height() + 2 * SLIP);
+    let strip = |start: i32, end: i32| gdk::Rectangle::new(start, top, end - start, height);
+    let mut strips = Vec::with_capacity(2);
+    let (was_left, is_left) = (was.x(), is.x());
+    if was_left != is_left {
+        strips.push(strip(was_left.min(is_left) - SLIP, was_left.max(is_left) + corner + SLIP));
+    }
+    let (was_right, is_right) = (was.x() + was.width(), is.x() + is.width());
+    if was_right != is_right {
+        strips.push(strip(was_right.min(is_right) - corner - SLIP, was_right.max(is_right) + SLIP));
+    }
+    strips
 }
 
 /// The bar's background, painted on the window under everything else.
@@ -110,7 +136,7 @@ impl Ground {
         row.followed_by(move || {
             let was = following.painted.get();
             let is = following.rect(&followed_stage, &followed_bar, &followed_row);
-            if let Some(strip) = changed(rectangle(was), is) {
+            for strip in changed(rectangle(was), is) {
                 followed_stage.queue_draw_area(
                     strip.x(),
                     strip.y(),
@@ -307,34 +333,72 @@ pub mod tests {
         }
     }
 
-    /// The whole reason the strip is worked out rather than the stage simply
-    /// redrawn: nothing in the middle of the bar is touched, so the tiles are
-    /// left alone while the lens is open.
+    /// The whole reason the strips are worked out rather than the stage
+    /// simply redrawn: nothing in the middle of the bar is touched, so the
+    /// tiles are left alone while the lens is open.
     #[test]
     fn only_the_ends_of_the_bar_are_repainted_when_the_background_grows() {
         let was = bar();
         let is = around(bar(), Some(((bar().x() + REACH - 19) as f64, 0.0)));
 
-        let strip = changed(was, is).expect("the background moved");
+        let strips = changed(was, is);
 
+        assert_eq!(strips.len(), 1, "only the left end moved: {strips:?}");
+        let strip = strips[0];
         assert_eq!(strip.x(), is.x() - SLIP);
-        assert_eq!(strip.x() + strip.width(), was.x() + was.width() + SLIP);
+        assert_eq!(strip.x() + strip.width(), was.x() + was.height() / 2 + SLIP);
+        assert!(
+            strip.x() + strip.width() < was.x() + was.width() / 2,
+            "the strip reaches into the middle of the bar"
+        );
     }
 
     #[test]
     fn a_background_that_did_not_move_is_not_repainted_at_all() {
-        assert!(changed(bar(), bar()).is_none());
+        assert!(changed(bar(), bar()).is_empty());
     }
 
     /// The background shrinking back has to repaint the strip it is giving
-    /// up, or the bar keeps a stub of itself out past the icons.
+    /// up, or the bar keeps a stub of itself out past the icons, and the
+    /// corner it rounds off at its new edge.
     #[test]
     fn the_strip_given_up_by_a_shrinking_background_is_repainted_too() {
         let wide = around(bar(), Some(((bar().x() + REACH - 19) as f64, 0.0)));
 
-        let strip = changed(wide, bar()).expect("the background moved");
+        let strips = changed(wide, bar());
 
-        assert_eq!(strip.x(), wide.x() - SLIP);
-        assert!(strip.width() >= wide.width());
+        assert_eq!(strips.len(), 1);
+        assert_eq!(strips[0].x(), wide.x() - SLIP);
+        assert!(strips[0].x() + strips[0].width() >= bar().x() + bar().height() / 2);
+    }
+
+    /// Both ends moving are two strips, one at each end, and still nothing
+    /// in between.
+    #[test]
+    fn a_background_grown_at_both_ends_repaints_the_two_ends_apart() {
+        let was = bar();
+        let is = gdk::Rectangle::new(was.x() - 20, was.y(), was.width() + 40, was.height());
+
+        let strips = changed(was, is);
+
+        assert_eq!(strips.len(), 2);
+        let (left, right) = (strips[0], strips[1]);
+        assert!(left.x() <= is.x() && left.x() + left.width() >= was.x() + was.height() / 2);
+        assert!(right.x() <= was.x() + was.width() - was.height() / 2);
+        assert!(right.x() + right.width() >= is.x() + is.width());
+        assert!(left.x() + left.width() < right.x(), "the middle is repainted");
+    }
+
+    /// A bar that changed height is not an end moving: all of it again.
+    #[test]
+    fn a_background_that_changed_height_is_repainted_whole() {
+        let was = bar();
+        let is = gdk::Rectangle::new(was.x(), was.y() - 4, was.width(), was.height() + 4);
+
+        let strips = changed(was, is);
+
+        assert_eq!(strips.len(), 1);
+        assert!(strips[0].x() <= was.x() && strips[0].width() >= was.width());
+        assert!(strips[0].y() <= is.y() && strips[0].height() >= is.height());
     }
 }
