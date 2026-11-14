@@ -1132,9 +1132,13 @@ fn draw_water(
     }
 
     // The `+` and the week, right to left, and only when the card is whole.
+    // The week is the first to go: a card too narrow for both it and the
+    // amount keeps the amount.
+    let size = text_size(look.icon_size, 0.30);
+    let days = water_week_shown(area, water, look, width, height, size);
     let mut right = width - pad;
     if look.level == Level::Full {
-        let diameter = (height * 0.40).min(icon * 0.42);
+        let diameter = plus_diameter(icon, height);
         let (cx, cy) = (right - diameter / 2.0, height / 2.0);
         // A soft shadow under it, so it still stands out of a full card.
         cr.new_path();
@@ -1160,11 +1164,9 @@ fn draw_water(
         cr.set_line_cap(cairo::LineCap::Butt);
         right = cx - diameter / 2.0 - pad * 0.8;
 
-        let days = water.week.len();
         if days > 0 {
-            let bar = (icon * 0.045).max(2.0);
-            let spacing = bar * 0.9;
-            let span = days as f64 * bar + (days - 1) as f64 * spacing;
+            let (bar, spacing) = week_bar(icon);
+            let span = week_span(icon, days);
             let tallest = height * 0.46;
             let floor = height / 2.0 + tallest / 2.0;
             let most = water.week.iter().copied().max().unwrap_or(0).max(water.goal).max(1);
@@ -1182,16 +1184,12 @@ fn draw_water(
     }
 
     let room = (right - pad).max(0.0);
+    debug_assert!((room - water_room(look, width, height, days)).abs() < 1e-9);
     if room <= 0.0 {
         return;
     }
 
-    let amount = if water.drunk < 10_000 {
-        format!("{} ml", water.drunk)
-    } else {
-        compact_ml(water.drunk)
-    };
-    let amount = line(area, &amount, text_size(look.icon_size, 0.30), true, room);
+    let amount = water_amount(area, water.drunk, size, room);
     amount.set_alignment(pango::Alignment::Left);
     let against = line(
         area,
@@ -1212,6 +1210,78 @@ fn draw_water(
     let y = ((height - amount_height - against_height) / 2.0).max(0.0);
     paint(cr, &against, pad, y, quiet);
     paint(cr, &amount, pad, y + against_height, ink);
+}
+
+/// The round `+` on a whole water card.
+fn plus_diameter(icon: f64, height: f64) -> f64 {
+    (height * 0.40).min(icon * 0.42)
+}
+
+/// One day's bar in the week on a water card, and the gap after it.
+fn week_bar(icon: f64) -> (f64, f64) {
+    let bar = (icon * 0.045).max(2.0);
+    (bar, bar * 0.9)
+}
+
+/// How wide the week stands on a water card.
+fn week_span(icon: f64, days: usize) -> f64 {
+    let (bar, spacing) = week_bar(icon);
+    days as f64 * bar + days.saturating_sub(1) as f64 * spacing
+}
+
+/// What the `+` and the week leave the words on a water card that is not one
+/// icon wide.
+fn water_room(look: Look, width: f64, height: f64, days: usize) -> f64 {
+    let icon = look.icon_size as f64;
+    let pad = (icon * 0.12).max(3.0);
+    let mut right = width - pad;
+    if look.level == Level::Full {
+        right -= plus_diameter(icon, height) + pad * 0.8;
+        if days > 0 {
+            right -= week_span(icon, days) + pad * 0.8;
+        }
+    }
+    (right - pad).max(0.0)
+}
+
+/// The ways of writing an amount of water, the most exact first.
+///
+/// `1500 ml` is what was drunk; `1.5L` says the same in four characters, and
+/// is what a card with the `+` and the week beside it has room for.
+fn water_amounts(drunk: u32) -> Vec<String> {
+    if drunk < 1000 {
+        vec![format!("{drunk} ml")]
+    } else if drunk < 10_000 {
+        vec![format!("{drunk} ml"), compact_ml(drunk)]
+    } else {
+        vec![compact_ml(drunk)]
+    }
+}
+
+/// The amount, in the first of [`water_amounts`] that fits whole, and drawn
+/// smaller rather than cut off when none does: `150…` is a number nobody
+/// can read.
+fn water_amount(area: &gtk::DrawingArea, drunk: u32, size: f64, room: f64) -> pango::Layout {
+    let ways = water_amounts(drunk);
+    for way in &ways {
+        let layout = line(area, way, size, true, room);
+        if !layout.is_ellipsized() {
+            return layout;
+        }
+    }
+    fitted_whole(area, ways.last().expect("there is always one way"), size, room)
+}
+
+/// How many days of the week a water card stands beside its amount: all of
+/// them, or none when the amount would not be whole beside them.
+fn water_week_shown(area: &gtk::DrawingArea, water: &Water, look: Look, width: f64, height: f64, size: f64) -> usize {
+    let days = water.week.len();
+    let room = water_room(look, width, height, days);
+    if days == 0 || look.level != Level::Full || !water_amount(area, water.drunk, size, room).is_ellipsized() {
+        days
+    } else {
+        0
+    }
 }
 
 /// The top of the water as a closed path: a gentle swell across the card,
@@ -3044,6 +3114,28 @@ pub mod tests {
     }
 
     #[test]
+    fn an_amount_of_water_has_a_shorter_way_to_be_written_once_it_is_litres() {
+        assert_eq!(water_amounts(0), ["0 ml"]);
+        assert_eq!(water_amounts(999), ["999 ml"]);
+        assert_eq!(water_amounts(1500), ["1500 ml", "1.5L"]);
+        assert_eq!(water_amounts(9990), ["9990 ml", "10L"]);
+        assert_eq!(water_amounts(12_000), ["12L"]);
+    }
+
+    #[test]
+    fn the_room_a_water_card_leaves_its_words_is_what_the_plus_and_the_week_do_not_take() {
+        let full = Look { level: Level::Full, ..look(48) };
+        let compact = Look { level: Level::Compact, ..look(48) };
+        // 120 wide, a 5.76 pad each side, a 19.2 `+`, a week of seven 2.16
+        // bars with 1.944 between, and 4.608 after each of the two.
+        let week = 7.0 * 2.16 + 6.0 * 1.944;
+        let expected = 120.0 - 5.76 * 2.0 - 19.2 - week - 4.608 * 2.0;
+        assert!((water_room(full, 120.0, 48.0, 7) - expected).abs() < 1e-6);
+        assert!(water_room(full, 120.0, 48.0, 0) > water_room(full, 120.0, 48.0, 7));
+        assert!((water_room(compact, 77.0, 48.0, 7) - (77.0 - 5.76 * 2.0)).abs() < 1e-6);
+    }
+
+    #[test]
     fn no_amount_of_water_is_ever_shown_in_more_than_four_characters() {
         for ml in (0..=doca_ipc::MAX_WATER_GOAL).step_by(10) {
             let shown = compact_ml(ml);
@@ -3699,6 +3791,32 @@ pub mod tests {
     /// counting pixels would have said so.
     ///
     /// Run by `crate::on_a_display`, which owns the one GTK thread.
+    pub fn a_water_card_writes_its_amount_whole_at_every_size() {
+        let area = gtk::DrawingArea::new();
+        for icon_size in doca_ipc::MIN_ICON_SIZE..=doca_ipc::MAX_ICON_SIZE {
+            for level in [Level::Full, Level::Compact] {
+                let look = Look { level, ..look(icon_size) };
+                let width = level.width(Tile::Wide, icon_size) as f64;
+                for drunk in [0, 250, 999, 1000, 1500, 1750, 2500, 9990, 12_000] {
+                    let water = Water { drunk, goal: 2000, bottle: 500, week: vec![0; 7] };
+                    let size = text_size(icon_size, 0.30);
+                    let height = icon_size as f64;
+                    let days = water_week_shown(&area, &water, look, width, height, size);
+                    if icon_size >= 40 && level == Level::Full {
+                        assert_eq!(days, 7, "{drunk} ml at {icon_size}: the week gave way on a card big enough for both");
+                    }
+                    let room = water_room(look, width, height, days);
+                    let amount = water_amount(&area, drunk, text_size(icon_size, 0.30), room);
+                    assert!(
+                        !amount.is_ellipsized(),
+                        "{drunk} ml at {icon_size} {level:?} is cut off as {:?} in {room:.1}px",
+                        amount.text()
+                    );
+                }
+            }
+        }
+    }
+
     pub fn the_card_holds_as_much_as_the_day_has_in_it() {
         let poured = |drunk: u32| {
             let (width, height) = (120, 48);
