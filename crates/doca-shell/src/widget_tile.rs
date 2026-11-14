@@ -2237,7 +2237,7 @@ fn draw_music(
     let cover = (!music.art.is_empty())
         .then(|| {
             let dense = density as f64;
-            crate::dock::scaled_to_fill(&music.art, width * dense, height * dense)
+            cover_at(&music.art, width * dense, height * dense)
         })
         .flatten();
 
@@ -2295,6 +2295,53 @@ fn draw_music(
     paint(cr, &name, 0.0, y, ink);
     y += name_height;
     paint(cr, &who, 0.0, y, quiet);
+}
+
+/// Which cover a tile last drew, and at what size.
+///
+/// The file's time and length are in it as well as its name: a player that
+/// writes each track's art over the same file must not keep the last track's
+/// picture on the tile.
+#[derive(Debug, Clone, PartialEq)]
+struct CoverKey {
+    path: String,
+    stamp: Option<(std::time::SystemTime, u64)>,
+    width: i32,
+    height: i32,
+}
+
+impl CoverKey {
+    fn of(path: &str, width: f64, height: f64) -> Self {
+        let stamp = std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        Self { path: path.to_string(), stamp, width: width.round() as i32, height: height.round() as i32 }
+    }
+}
+
+thread_local! {
+    /// The last cover, decoded and cut to its tile. One is enough: there is
+    /// one music tile, and it shows one track.
+    static COVER: RefCell<Option<(CoverKey, Option<gdk::gdk_pixbuf::Pixbuf>)>> = const { RefCell::new(None) };
+}
+
+/// The cover at `path`, filling `width` by `height` device pixels.
+///
+/// Decoded once per track and size rather than on every draw. A tile is
+/// drawn whenever anything over it is, and a 640px JPEG is two milliseconds
+/// to decode: on every frame of the lens, that was most of the frame.
+fn cover_at(path: &str, width: f64, height: f64) -> Option<gdk::gdk_pixbuf::Pixbuf> {
+    let key = CoverKey::of(path, width, height);
+    COVER.with(|kept| {
+        if let Some((held, cover)) = kept.borrow().as_ref() {
+            if *held == key {
+                return cover.clone();
+            }
+        }
+        let cover = crate::dock::scaled_to_fill(path, width, height);
+        kept.replace(Some((key, cover.clone())));
+        cover
+    })
 }
 
 /// The ink the words take when they are sitting on somebody else's picture.
@@ -3028,6 +3075,38 @@ pub mod tests {
     }
 
     const ICON: i32 = 48;
+
+    /// A cover is decoded once for a track and a size, and again when the
+    /// file under the same name is a different picture.
+    #[test]
+    fn a_cover_is_decoded_once_and_again_only_when_it_changes() {
+        let dir = std::env::temp_dir().join(format!("doca-cover-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("art.png");
+        let path = file.to_str().unwrap();
+        let picture = |side: i32, file: &std::path::Path| {
+            let pixbuf = gdk::gdk_pixbuf::Pixbuf::new(gdk::gdk_pixbuf::Colorspace::Rgb, false, 8, side, side).unwrap();
+            pixbuf.fill(0x3366_99ff);
+            pixbuf.savev(file, "png", &[]).unwrap();
+        };
+
+        picture(64, &file);
+        let first = cover_at(path, 120.0, 48.0).expect("a cover");
+        let again = cover_at(path, 120.0, 48.0).expect("a cover");
+        assert_eq!(first, again, "the same cover was decoded twice");
+
+        let resized = cover_at(path, 96.0, 48.0).expect("a cover");
+        assert_ne!(first, resized, "a tile of another size kept the old cut");
+        assert_eq!(resized.width(), 96);
+
+        // The next track's art written over the same file.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        picture(80, &file);
+        let next = cover_at(path, 96.0, 48.0).expect("a cover");
+        assert_ne!(resized, next, "a new picture under the old name kept the old one");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn millilitres_are_shown_in_the_unit_people_speak_in() {
