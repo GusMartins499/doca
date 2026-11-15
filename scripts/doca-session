@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# Keeps Doca running for the length of a desktop session. This is what the
+# autostart entry `install.sh` writes runs at login.
+#
+# The daemon goes up first and the bar only once the daemon holds its name on
+# the bus: a bar that comes up before it has nothing to show. If either one
+# dies, both are started again. If they keep dying — five times inside two
+# minutes — this gives up and starts Plank instead, so a broken build never
+# leaves the session without a dock.
+#
+#   doca-session            start Doca and watch over it
+#   doca-session --stop     stop the one already watching
+#
+set -uo pipefail
+
+BUS_NAME=io.github.gusmartins499.Doca
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# "Preferences…" on the bar spawns doca-prefs by name.
+export PATH="$HERE:$PATH"
+
+stop_doca() {
+    pkill -x doca-prefs 2>/dev/null
+    pkill -x doca-shell 2>/dev/null
+    pkill -x docad 2>/dev/null
+}
+
+# One watcher per session: a second login item, a manual run or a reinstall
+# takes over from the one before rather than fighting it for the bus name.
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/doca"
+PID_FILE="$RUN_DIR/session.pid"
+mkdir -p "$RUN_DIR"
+
+# A watcher is alive while its pid still runs this script: a zombie, or a pid
+# the system has since handed to something else, has another command line.
+watching() { grep -qs doca-session "/proc/$1/cmdline"; }
+
+stop_watcher() {
+    local pid=$1
+    [ -n "$pid" ] && [ "$pid" != "$$" ] && watching "$pid" || return 0
+    kill "$pid" 2>/dev/null
+    # Until it is gone: on its way out it stops the dock, and would take down
+    # one started here in the meantime.
+    for _ in $(seq 50); do
+        watching "$pid" || return 0
+        sleep 0.1
+    done
+    kill -9 "$pid" 2>/dev/null
+}
+
+previous=$(cat "$PID_FILE" 2>/dev/null || true)
+
+if [ "${1:-}" = "--stop" ]; then
+    stop_watcher "$previous"
+    stop_doca
+    rm -f "$PID_FILE"
+    exit 0
+fi
+
+# This one is the watcher from here on, before the old one is even gone, so
+# that a --stop in between finds it.
+echo $$ >"$PID_FILE"
+stop_watcher "$previous"
+
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/doca"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/session.log"
+# One session's worth of log, plus the one before it for after a bad login.
+[ -f "$LOG" ] && mv -f "$LOG" "$LOG.old"
+exec >>"$LOG" 2>&1
+
+# Two docks cannot share an edge (see try-it.sh), so Plank goes while Doca runs.
+pkill -x plank 2>/dev/null
+
+trap 'stop_doca; exit 0' INT TERM HUP
+
+# Whether the daemon took its name on the bus, giving up after fifteen seconds
+# or as soon as the daemon is gone.
+up() {
+    for _ in $(seq 150); do
+        kill -0 "$1" 2>/dev/null || return 1
+        gdbus call --session --dest org.freedesktop.DBus \
+            --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.NameHasOwner "$BUS_NAME" 2>/dev/null |
+            grep -q true && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+crashes=()
+while true; do
+    stop_doca
+    sleep 0.5
+    echo "$(date '+%F %T') starting docad"
+    docad &
+    daemon=$!
+    if up "$daemon"; then
+        echo "$(date '+%F %T') starting doca-shell"
+        doca-shell &
+        shell=$!
+        # Whichever goes first takes the other with it.
+        wait -n "$daemon" "$shell"
+        echo "$(date '+%F %T') a Doca process exited ($?)"
+    else
+        echo "$(date '+%F %T') docad never took $BUS_NAME"
+    fi
+
+    now=$(date +%s)
+    recent=()
+    for at in "${crashes[@]}"; do
+        [ $((now - at)) -lt 120 ] && recent+=("$at")
+    done
+    crashes=("${recent[@]}" "$now")
+    if [ "${#crashes[@]}" -ge 5 ]; then
+        echo "$(date '+%F %T') five exits in two minutes, giving up; starting Plank"
+        stop_doca
+        if command -v plank >/dev/null; then
+            setsid plank >/dev/null 2>&1 </dev/null &
+        fi
+        exit 1
+    fi
+    sleep 2
+done

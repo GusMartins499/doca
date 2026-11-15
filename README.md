@@ -44,6 +44,26 @@ pkill -x doca-prefs; pkill -x doca-shell; pkill -x docad; setsid plank &
 
 `Ctrl+Alt+F2` takes you back.
 
+## Install
+
+For everyday use: builds, installs into `~/.local/bin`, starts Doca at every
+login in place of Plank, and starts it right away. No sudo.
+
+```bash
+./scripts/install.sh
+```
+
+Run it again after a `git pull` to update. If the dock dies it is started
+again; if it keeps dying, Plank comes up instead. The log is
+`~/.local/state/doca/session.log`.
+
+To go back to Plank — Doca is stopped and removed, Plank starts again at login
+and right now, and your config in `~/.config/doca` is left as it was:
+
+```bash
+./scripts/install.sh --uninstall
+```
+
 ## Using the bar
 
 - **Dots** under an icon: one per open window, up to three. The coloured one
